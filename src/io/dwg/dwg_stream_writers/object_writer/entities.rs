@@ -16,6 +16,14 @@ use super::common;
 use super::DwgObjectWriter;
 
 impl<'a> DwgObjectWriter<'a> {
+    fn warn_skipped_entity(&self, type_name: &str, handle: Handle) {
+        eprintln!(
+            "DWG writer: skipping unsupported entity {} (handle {:#X})",
+            type_name,
+            handle.value()
+        );
+    }
+
     // â”€â”€ Entity dispatch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Write a single entity record.
@@ -60,16 +68,19 @@ impl<'a> DwgObjectWriter<'a> {
             EntityType::Solid3D(e) => self.write_solid3d(e),
             EntityType::Region(e) => self.write_region(e),
             EntityType::Body(e) => self.write_body(e),
-            EntityType::Table(_)
-            | EntityType::Underlay(_) => {
-                // Not yet supported â€” silently skip
+            EntityType::Table(e) => {
+                self.warn_skipped_entity("ACAD_TABLE", e.common.handle);
+            }
+            EntityType::Underlay(e) => {
+                self.warn_skipped_entity(e.entity_name(), e.common.handle);
             }
             EntityType::Unknown(e) => {
                 // Write raw DWG data verbatim if available
                 if let Some(ref raw_data) = e.raw_dwg_data {
                     self.register_raw_object(e.common.handle, raw_data, e.dwg_handle_bits);
+                } else {
+                    self.warn_skipped_entity(&e.dxf_name, e.common.handle);
                 }
-                // else: no raw data â†’ silently skip (DXF-only unknown)
             }
         }
     }

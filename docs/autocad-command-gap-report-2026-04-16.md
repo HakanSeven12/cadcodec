@@ -146,23 +146,25 @@ Status legend:
 
 ## P0 - High impact gaps (roundtrip and interoperability risk)
 
-1. DWG writer silently skips some entity types.
+1. DWG writer skips some entity types (table/underlay).
 
 - Evidence: `src/io/dwg/dwg_stream_writers/object_writer/entities.rs`
-- Current behavior includes skip paths for types such as table/underlay in writer dispatch.
-- Risk: entity loss on DWG output.
+- Current behavior includes explicit skip paths for table/underlay in writer dispatch.
+- Mitigation added: writer now emits diagnostics to stderr instead of silently dropping these entities.
+- Remaining risk: entity loss on DWG output until full binary serializers are implemented.
 
-2. DWG writer skips or cannot serialize several object variants.
+2. DWG writer cannot serialize several typed object variants.
 
 - Evidence: `src/io/dwg/dwg_stream_writers/object_writer/objects.rs`
-- Stub/unsupported object variants are skipped.
-- Risk: object metadata loss (visual/material/geodata/spatial filter/table style related domains).
+- Stub/unsupported typed variants are skipped (visual/material/geodata/spatial filter/table style).
+- Mitigation added: skips now emit diagnostics; unknown objects with raw DWG payload are allowed as dictionary-writable and can roundtrip verbatim.
+- Remaining risk: metadata loss for typed variants that lack raw payload and have no dedicated DWG writer.
 
 3. Unknown/non-supported parse fallback paths are intentionally lossy in operation semantics.
 
 - Evidence: `src/io/dxf/reader/section_reader.rs`
-- Unsupported entities/objects are read into unknown/fallback representations.
-- Risk: geometry and rich semantics unavailable for command-style mutation despite raw preservation possibilities.
+- Unsupported entities/objects are read into unknown/fallback representations that preserve raw payload where available.
+- Remaining risk: geometry- and feature-level semantics are not reconstructed for command-style mutation.
 
 ## P1 - Core command-parity gaps (major feature work)
 

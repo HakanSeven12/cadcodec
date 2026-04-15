@@ -18,6 +18,14 @@ use super::common;
 use super::DwgObjectWriter;
 
 impl<'a> DwgObjectWriter<'a> {
+    fn warn_skipped_object(&self, type_name: &str, handle: Handle) {
+        eprintln!(
+            "DWG writer: skipping unsupported object {} (handle {:#X})",
+            type_name,
+            handle.value()
+        );
+    }
+
     // ── Object dispatch ─────────────────────────────────────────────
 
     /// Write a single non-graphical object record.
@@ -40,15 +48,17 @@ impl<'a> DwgObjectWriter<'a> {
             ObjectType::PlaceHolder(p) => self.write_placeholder(p),
             ObjectType::BookColor(b) => self.write_book_color(b),
             ObjectType::WipeoutVariables(w) => self.write_wipeout_variables(w),
-            // Stub / unsupported objects — skip
-            ObjectType::GeoData(_)
-            | ObjectType::SpatialFilter(_)
-            | ObjectType::VisualStyle(_)
-            | ObjectType::Material(_)
-            | ObjectType::TableStyle(_) => {}
+            // Stub / unsupported objects — report and skip
+            ObjectType::GeoData(o) => self.warn_skipped_object("GEODATA", o.handle),
+            ObjectType::SpatialFilter(o) => self.warn_skipped_object("SPATIALFILTER", o.handle),
+            ObjectType::VisualStyle(o) => self.warn_skipped_object("VISUALSTYLE", o.handle),
+            ObjectType::Material(o) => self.warn_skipped_object("MATERIAL", o.handle),
+            ObjectType::TableStyle(o) => self.warn_skipped_object("TABLESTYLE", o.handle),
             ObjectType::Unknown { handle, raw_dwg_data, raw_dwg_handle_bits, .. } => {
                 if let Some(ref raw) = raw_dwg_data {
                     self.register_raw_object(*handle, raw, *raw_dwg_handle_bits);
+                } else {
+                    self.warn_skipped_object("UNKNOWN", *handle);
                 }
             }
         }
@@ -70,13 +80,7 @@ impl<'a> DwgObjectWriter<'a> {
                 | ObjectType::VisualStyle(_)
                 | ObjectType::Material(_)
                 | ObjectType::TableStyle(_) => false,
-                ObjectType::Unknown { type_name, raw_dwg_data, .. } => {
-                    // Exclude types that would also be excluded if parsed into proper variants
-                    if type_name.starts_with("DWG_OBJ_106") // TABLESTYLE
-                        || type_name.starts_with("DWG_OBJ_105") // TABLECONTENT
-                    {
-                        return false;
-                    }
+                ObjectType::Unknown { raw_dwg_data, .. } => {
                     raw_dwg_data.is_some()
                 }
                 _ => true,
