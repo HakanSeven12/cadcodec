@@ -872,6 +872,24 @@ pub struct XrefInfo<'a> {
     pub handle: Handle,
 }
 
+/// Severity level for a [`ValidationIssue`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    /// A problem that may cause data loss or incorrect behaviour.
+    Error,
+    /// A potential issue that should be reviewed.
+    Warning,
+}
+
+/// A single issue found by [`CadDocument::validate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationIssue {
+    /// How severe the issue is.
+    pub severity: Severity,
+    /// Human-readable description of the issue.
+    pub message: String,
+}
+
 /// A CAD document containing all drawing data
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -3001,6 +3019,168 @@ impl CadDocument {
         // We just skip further assignment here.
 
         let _ = paper_handle; // suppress unused warning; future: paper space logic
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Entity Relationship Queries
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Return the entities that belong to a named block definition.
+    ///
+    /// Resolves each handle stored in [`BlockRecord::entity_handles`] and
+    /// returns references to the matching entities.  Handles that do not
+    /// resolve to an entity in the document are silently skipped.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::api::block::BlockBuilder;
+    /// use acadrust::entities::{EntityType, Line};
+    ///
+    /// let mut doc = CadDocument::new();
+    /// BlockBuilder::new("Frame")
+    ///     .entity(EntityType::Line(Line::from_coords(0.0, 0.0, 0.0, 10.0, 0.0, 0.0)))
+    ///     .entity(EntityType::Line(Line::from_coords(10.0, 0.0, 0.0, 10.0, 10.0, 0.0)))
+    ///     .build(&mut doc).unwrap();
+    ///
+    /// assert_eq!(doc.block_entities("Frame").count(), 2);
+    /// assert_eq!(doc.block_entities("NonExistent").count(), 0);
+    /// ```
+    pub fn block_entities<'a>(&'a self, block_name: &str) -> impl Iterator<Item = &'a EntityType> {
+        let handles: Vec<Handle> = self
+            .block_records
+            .get(block_name)
+            .map(|br| br.entity_handles.clone())
+            .unwrap_or_default();
+        handles.into_iter().filter_map(move |h| self.get_entity(h))
+    }
+
+    /// Return all [`Insert`] entities that reference a given block name.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::api::block::BlockBuilder;
+    /// use acadrust::entities::{EntityType, Circle, Insert};
+    /// use acadrust::types::Vector3;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// BlockBuilder::new("Bolt")
+    ///     .entity(EntityType::Circle(Circle::from_center_radius(Vector3::ZERO, 2.0)))
+    ///     .build(&mut doc).unwrap();
+    /// doc.insert_block("Bolt", Vector3::new(10.0, 0.0, 0.0)).unwrap();
+    /// doc.insert_block("Bolt", Vector3::new(20.0, 0.0, 0.0)).unwrap();
+    ///
+    /// assert_eq!(doc.inserts_of_block("Bolt").count(), 2);
+    /// ```
+    pub fn inserts_of_block<'a>(
+        &'a self,
+        block_name: &'a str,
+    ) -> impl Iterator<Item = &'a crate::entities::Insert> {
+        self.entities_of_type::<crate::entities::Insert>()
+            .filter(move |ins| ins.block_name == block_name)
+    }
+
+    /// Return the name of the block record that owns a given entity.
+    ///
+    /// Returns `None` if the entity's owner handle doesn't match any block
+    /// record, or if the handle is null.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line};
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let h = doc.add_entity(EntityType::Line(Line::new())).unwrap();
+    /// // Model-space entities are owned by the "*Model_Space" block record
+    /// assert!(doc.entity_owner(h).is_some());
+    /// ```
+    pub fn entity_owner(&self, handle: Handle) -> Option<&str> {
+        let entity = self.get_entity(handle)?;
+        let owner = entity.common().owner_handle;
+        if owner.is_null() {
+            return None;
+        }
+        self.block_records
+            .iter()
+            .find(|br| br.handle == owner)
+            .map(|br| br.name.as_str())
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Document Validation / Audit
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Validate the document and return a list of issues found.
+    ///
+    /// Checks performed:
+    /// - Entities referencing non-existent layers
+    /// - Entities with null handles
+    /// - Block records referencing entity handles that don't exist
+    /// - Duplicate handles in the entity index
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let doc = CadDocument::new();
+    /// let issues = doc.validate();
+    /// assert!(issues.is_empty());
+    /// ```
+    pub fn validate(&self) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
+
+        // Check for entities with null handles
+        for (i, entity) in self.entities.iter().enumerate() {
+            let common = entity.common();
+            if common.handle.is_null() {
+                issues.push(ValidationIssue {
+                    severity: Severity::Warning,
+                    message: format!("Entity at index {} has a null handle", i),
+                });
+            }
+
+            // Check layer existence
+            if !common.layer.is_empty() && self.layers.get(&common.layer).is_none() {
+                issues.push(ValidationIssue {
+                    severity: Severity::Warning,
+                    message: format!(
+                        "Entity {:?} references non-existent layer \"{}\"",
+                        common.handle, common.layer
+                    ),
+                });
+            }
+        }
+
+        // Check block records for dangling entity handles
+        for br in self.block_records.iter() {
+            for eh in &br.entity_handles {
+                if !eh.is_null() && self.entity_index.get(eh).is_none() {
+                    issues.push(ValidationIssue {
+                        severity: Severity::Warning,
+                        message: format!(
+                            "Block record \"{}\" references entity handle {:?} which does not exist",
+                            br.name, eh
+                        ),
+                    });
+                }
+            }
+        }
+
+        // Check for handle conflicts (entity_index size vs entities vec size)
+        if self.entity_index.len() != self.entities.len() {
+            issues.push(ValidationIssue {
+                severity: Severity::Error,
+                message: format!(
+                    "Entity index has {} entries but entities vec has {} entries (possible duplicate handles)",
+                    self.entity_index.len(),
+                    self.entities.len()
+                ),
+            });
+        }
+
+        issues
     }
 }
 

@@ -576,6 +576,46 @@ pub fn normalize_angle(angle: f64) -> f64 {
     a
 }
 
+/// Convert a point from Object Coordinate System (OCS) to World Coordinate
+/// System (WCS) given the entity's extrusion normal.
+///
+/// Uses the AutoCAD *arbitrary axis algorithm* to derive the OCS basis from
+/// the normal vector, then transforms the point.
+///
+/// # Example
+/// ```rust
+/// use acadrust::types::{Vector3, ocs_to_wcs};
+///
+/// // Entity extruded along Z — OCS coincides with WCS
+/// let wcs = ocs_to_wcs(Vector3::new(1.0, 2.0, 0.0), Vector3::UNIT_Z);
+/// assert!((wcs.x - 1.0).abs() < 1e-10);
+/// ```
+pub fn ocs_to_wcs(point: Vector3, normal: Vector3) -> Vector3 {
+    Matrix3::arbitrary_axis(normal).transform_point(point)
+}
+
+/// Convert a point from World Coordinate System (WCS) to Object Coordinate
+/// System (OCS) given the entity's extrusion normal.
+///
+/// This is the inverse of [`ocs_to_wcs`].
+///
+/// # Example
+/// ```rust
+/// use acadrust::types::{Vector3, wcs_to_ocs, ocs_to_wcs};
+///
+/// let normal = Vector3::new(0.0, 0.0, -1.0);
+/// let original = Vector3::new(3.0, 4.0, 5.0);
+/// let ocs = wcs_to_ocs(original, normal);
+/// let back = ocs_to_wcs(ocs, normal);
+/// assert!((back.x - original.x).abs() < 1e-10);
+/// assert!((back.y - original.y).abs() < 1e-10);
+/// assert!((back.z - original.z).abs() < 1e-10);
+/// ```
+pub fn wcs_to_ocs(point: Vector3, normal: Vector3) -> Vector3 {
+    // Transpose of the orthonormal OCS basis is its inverse.
+    Matrix3::arbitrary_axis(normal).transpose().transform_point(point)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

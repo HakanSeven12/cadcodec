@@ -61,6 +61,23 @@ impl Ellipse {
     pub fn is_full(&self) -> bool {
         (self.end_parameter - self.start_parameter - 2.0 * std::f64::consts::PI).abs() < 1e-10
     }
+
+    /// Compute the area of the full ellipse (π × a × b).
+    ///
+    /// For elliptical arcs this still returns the full-ellipse area.
+    pub fn area(&self) -> f64 {
+        std::f64::consts::PI * self.major_axis_length() * self.minor_axis_length()
+    }
+
+    /// Approximate the perimeter of the full ellipse using Ramanujan's formula.
+    ///
+    /// Accuracy is within ~0.01% for all eccentricities.
+    pub fn perimeter(&self) -> f64 {
+        let a = self.major_axis_length();
+        let b = self.minor_axis_length();
+        let h = ((a - b) * (a - b)) / ((a + b) * (a + b));
+        std::f64::consts::PI * (a + b) * (1.0 + 3.0 * h / (10.0 + (4.0 - 3.0 * h).sqrt()))
+    }
 }
 
 impl Default for Ellipse {
