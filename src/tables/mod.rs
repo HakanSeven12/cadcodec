@@ -159,6 +159,31 @@ impl<T: TableEntry> Table<T> {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
+
+    /// Get an existing entry by name, or insert a new one created by `f`.
+    ///
+    /// Returns a mutable reference to the (existing or newly inserted) entry.
+    /// The closure `f` is only called when the entry does not already exist.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let layer = doc.layers.get_or_insert_with("Walls", || {
+    ///     let mut l = Layer::new("Walls");
+    ///     l.color = Color::Index(1);
+    ///     l
+    /// });
+    /// ```
+    pub fn get_or_insert_with<F>(&mut self, name: &str, f: F) -> &mut T
+    where
+        F: FnOnce() -> T,
+    {
+        let key = name.to_uppercase();
+        if !self.entries.contains_key(&key) {
+            let entry = f();
+            self.entries.insert(key.clone(), entry);
+        }
+        self.entries.get_mut(&key).unwrap()
+    }
 }
 
 impl<T: TableEntry> Default for Table<T> {

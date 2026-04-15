@@ -1613,6 +1613,257 @@ impl CadDocument {
         Ok(layout_handle)
     }
 
+    // ════════════════════════════════════════════════════════════════════
+    // Layer & Table Management API — ensure_* helpers
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Ensure a layer with the given name exists, creating it with default
+    /// settings if it does not.
+    ///
+    /// Returns the layer's `Handle`.  If the layer already exists its
+    /// properties are left unchanged.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let h1 = doc.ensure_layer("Walls");
+    /// let h2 = doc.ensure_layer("Walls");
+    /// assert_eq!(h1, h2);
+    /// ```
+    pub fn ensure_layer(&mut self, name: &str) -> Handle {
+        if let Some(existing) = self.layers.get(name) {
+            return existing.handle;
+        }
+        let mut layer = Layer::new(name);
+        layer.set_handle(self.allocate_handle());
+        let handle = layer.handle;
+        self.layers.add(layer).ok();
+        handle
+    }
+
+    /// Ensure a layer exists with a specific color and linetype, creating
+    /// it if it does not.
+    ///
+    /// If the layer already exists its properties are **not** modified —
+    /// only the existing handle is returned.  This avoids accidentally
+    /// overwriting settings loaded from a DWG/DXF file.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::types::Color;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let h = doc.ensure_layer_with("Electrical", Color::CYAN, "DASHED");
+    /// assert!(doc.layers.get("Electrical").is_some());
+    /// ```
+    pub fn ensure_layer_with(&mut self, name: &str, color: Color, linetype: &str) -> Handle {
+        if let Some(existing) = self.layers.get(name) {
+            return existing.handle;
+        }
+        let mut layer = Layer::new(name);
+        layer.color = color;
+        layer.line_type = linetype.to_string();
+        layer.set_handle(self.allocate_handle());
+        let handle = layer.handle;
+        self.layers.add(layer).ok();
+        handle
+    }
+
+    /// Ensure a linetype with the given name exists, creating it with a
+    /// continuous (solid) pattern if it does not.
+    ///
+    /// Returns the linetype's `Handle`.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let h = doc.ensure_linetype("CENTER");
+    /// assert!(doc.line_types.get("CENTER").is_some());
+    /// ```
+    pub fn ensure_linetype(&mut self, name: &str) -> Handle {
+        if let Some(existing) = self.line_types.get(name) {
+            return existing.handle();
+        }
+        let mut lt = LineType::new(name);
+        lt.set_handle(self.allocate_handle());
+        let handle = lt.handle();
+        self.line_types.add(lt).ok();
+        handle
+    }
+
+    /// Ensure a text style with the given name exists, creating it with
+    /// default settings if it does not.
+    ///
+    /// Returns the text style's `Handle`.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let h = doc.ensure_text_style("Notes");
+    /// assert!(doc.text_styles.get("Notes").is_some());
+    /// ```
+    pub fn ensure_text_style(&mut self, name: &str) -> Handle {
+        if let Some(existing) = self.text_styles.get(name) {
+            return existing.handle();
+        }
+        let mut style = TextStyle::new(name);
+        style.set_handle(self.allocate_handle());
+        let handle = style.handle();
+        self.text_styles.add(style).ok();
+        handle
+    }
+
+    /// Ensure a dimension style with the given name exists, creating it
+    /// with default settings if it does not.
+    ///
+    /// Returns the dimension style's `Handle`.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let h = doc.ensure_dim_style("Metric");
+    /// assert!(doc.dim_styles.get("Metric").is_some());
+    /// ```
+    pub fn ensure_dim_style(&mut self, name: &str) -> Handle {
+        if let Some(existing) = self.dim_styles.get(name) {
+            return existing.handle();
+        }
+        let mut ds = DimStyle::new(name);
+        ds.set_handle(self.allocate_handle());
+        let handle = ds.handle();
+        self.dim_styles.add(ds).ok();
+        handle
+    }
+
+    /// Ensure an application ID with the given name exists, creating it
+    /// if it does not.
+    ///
+    /// Returns the AppId's `Handle`.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let h = doc.ensure_app_id("MyApp");
+    /// assert!(doc.app_ids.get("MyApp").is_some());
+    /// ```
+    pub fn ensure_app_id(&mut self, name: &str) -> Handle {
+        if let Some(existing) = self.app_ids.get(name) {
+            return existing.handle();
+        }
+        let mut appid = AppId::new(name);
+        appid.set_handle(self.allocate_handle());
+        let handle = appid.handle();
+        self.app_ids.add(appid).ok();
+        handle
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Layer-aware entity helpers
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Add an entity to the document, assigning it to the given layer.
+    ///
+    /// The layer is created with default settings if it does not already
+    /// exist.  The entity is placed in model space (same as
+    /// [`add_entity`](Self::add_entity)).
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line};
+    /// use acadrust::types::Vector3;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let line = Line::from_coords(0.0, 0.0, 0.0, 10.0, 10.0, 0.0);
+    /// let handle = doc.add_entity_on_layer(EntityType::Line(line), "Walls").unwrap();
+    ///
+    /// let entity = doc.get_entity(handle).unwrap();
+    /// assert_eq!(entity.common().layer, "Walls");
+    /// assert!(doc.layers.get("Walls").is_some());
+    /// ```
+    pub fn add_entity_on_layer(
+        &mut self,
+        mut entity: EntityType,
+        layer_name: &str,
+    ) -> Result<Handle> {
+        self.ensure_layer(layer_name);
+        entity.common_mut().layer = layer_name.to_string();
+        self.add_entity(entity)
+    }
+
+    /// Change an existing entity's layer.
+    ///
+    /// The target layer is created with default settings if it does not
+    /// already exist.  Returns an error if the entity handle is not found.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line};
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let line = Line::from_coords(0.0, 0.0, 0.0, 10.0, 10.0, 0.0);
+    /// let handle = doc.add_entity(EntityType::Line(line)).unwrap();
+    ///
+    /// doc.set_entity_layer(handle, "Dimensions").unwrap();
+    /// assert_eq!(doc.get_entity(handle).unwrap().common().layer, "Dimensions");
+    /// ```
+    pub fn set_entity_layer(
+        &mut self,
+        handle: Handle,
+        layer_name: &str,
+    ) -> Result<()> {
+        self.ensure_layer(layer_name);
+        let entity = self.get_entity_mut(handle).ok_or_else(|| {
+            crate::error::DxfError::Custom(format!(
+                "Entity with handle {:#X} not found",
+                handle.value()
+            ))
+        })?;
+        entity.common_mut().layer = layer_name.to_string();
+        Ok(())
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Entity query / filtering helpers
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Iterate over all entities on a given layer (case-insensitive).
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line};
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let line = Line::from_coords(0.0, 0.0, 0.0, 10.0, 10.0, 0.0);
+    /// doc.add_entity_on_layer(EntityType::Line(line), "Walls").unwrap();
+    ///
+    /// let count = doc.entities_on_layer("walls").count();
+    /// assert_eq!(count, 1);
+    /// ```
+    pub fn entities_on_layer<'a>(&'a self, layer_name: &'a str) -> impl Iterator<Item = &'a EntityType> {
+        let upper = layer_name.to_uppercase();
+        self.entities.iter().filter(move |e| e.common().layer.to_uppercase() == upper)
+    }
+
+    /// Iterate mutably over all entities on a given layer (case-insensitive).
+    pub fn entities_on_layer_mut<'a>(&'a mut self, layer_name: &'a str) -> impl Iterator<Item = &'a mut EntityType> {
+        let upper = layer_name.to_uppercase();
+        self.entities.iter_mut().filter(move |e| e.common().layer.to_uppercase() == upper)
+    }
+
     /// Get the number of entities
     pub fn entity_count(&self) -> usize {
         self.entities.len()
