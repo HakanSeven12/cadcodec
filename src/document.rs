@@ -1879,6 +1879,464 @@ impl CadDocument {
         self.entities.iter_mut()
     }
 
+    // ════════════════════════════════════════════════════════════════════
+    // Layout Management API
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Return all layouts sorted by tab order.
+    ///
+    /// The first element is always the *Model* layout (tab order 0),
+    /// followed by paper-space layouts in tab order.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let doc = CadDocument::new();
+    /// let layouts = doc.layouts();
+    /// assert!(layouts.iter().any(|l| l.name == "Model"));
+    /// ```
+    pub fn layouts(&self) -> Vec<&crate::objects::Layout> {
+        let mut result: Vec<&crate::objects::Layout> = self
+            .objects
+            .values()
+            .filter_map(|obj| match obj {
+                ObjectType::Layout(l) => Some(l),
+                _ => None,
+            })
+            .collect();
+        result.sort_by_key(|l| l.tab_order);
+        result
+    }
+
+    /// Look up a layout by name.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let doc = CadDocument::new();
+    /// assert!(doc.get_layout("Model").is_some());
+    /// assert!(doc.get_layout("NonExistent").is_none());
+    /// ```
+    pub fn get_layout(&self, name: &str) -> Option<&crate::objects::Layout> {
+        self.objects.values().find_map(|obj| match obj {
+            ObjectType::Layout(l) if l.name == name => Some(l),
+            _ => None,
+        })
+    }
+
+    /// Look up a layout by name (mutable).
+    pub fn get_layout_mut(&mut self, name: &str) -> Option<&mut crate::objects::Layout> {
+        self.objects.values_mut().find_map(|obj| match obj {
+            ObjectType::Layout(l) if l.name == name => Some(l),
+            _ => None,
+        })
+    }
+
+    /// Rename a paper-space layout.
+    ///
+    /// The *Model* layout cannot be renamed.  Returns an error if the
+    /// old name is not found or the new name already exists.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// doc.add_layout("Sheet1").unwrap();
+    /// doc.rename_layout("Sheet1", "A1-Plan").unwrap();
+    /// assert!(doc.get_layout("A1-Plan").is_some());
+    /// assert!(doc.get_layout("Sheet1").is_none());
+    /// ```
+    pub fn rename_layout(&mut self, old_name: &str, new_name: &str) -> Result<()> {
+        if old_name == "Model" {
+            return Err(crate::error::DxfError::Custom(
+                "Cannot rename the Model layout".to_string(),
+            ));
+        }
+        // Check target name doesn't already exist
+        let new_exists = self.objects.values().any(|obj| {
+            matches!(obj, ObjectType::Layout(l) if l.name == new_name)
+        });
+        if new_exists {
+            return Err(crate::error::DxfError::Custom(format!(
+                "Layout '{}' already exists",
+                new_name
+            )));
+        }
+        // Find the layout handle
+        let layout_handle = self
+            .objects
+            .values()
+            .find_map(|obj| match obj {
+                ObjectType::Layout(l) if l.name == old_name => Some(l.handle),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                crate::error::DxfError::Custom(format!(
+                    "Layout '{}' not found",
+                    old_name
+                ))
+            })?;
+        // Rename the layout object
+        if let Some(ObjectType::Layout(layout)) = self.objects.get_mut(&layout_handle) {
+            layout.name = new_name.to_string();
+        }
+        // Update ACAD_LAYOUT dictionary
+        if let Some(ObjectType::Dictionary(dict)) =
+            self.objects.get_mut(&self.header.acad_layout_dict_handle)
+        {
+            if let Some(pos) = dict.entries.iter().position(|(k, _)| k == old_name) {
+                let (_, handle) = dict.entries.remove(pos);
+                dict.entries.push((new_name.to_string(), handle));
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove a paper-space layout and all its entities.
+    ///
+    /// The *Model* layout cannot be removed.  This also removes the backing
+    /// `*Paper_Space` block record and de-registers the layout from the
+    /// ACAD_LAYOUT dictionary.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// doc.add_layout("Temporary").unwrap();
+    /// assert!(doc.get_layout("Temporary").is_some());
+    /// doc.remove_layout("Temporary").unwrap();
+    /// assert!(doc.get_layout("Temporary").is_none());
+    /// ```
+    pub fn remove_layout(&mut self, name: &str) -> Result<()> {
+        if name == "Model" {
+            return Err(crate::error::DxfError::Custom(
+                "Cannot remove the Model layout".to_string(),
+            ));
+        }
+        // Find layout and its block record handle
+        let (layout_handle, br_handle) = self
+            .objects
+            .values()
+            .find_map(|obj| match obj {
+                ObjectType::Layout(l) if l.name == name => {
+                    Some((l.handle, l.block_record))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                crate::error::DxfError::Custom(format!(
+                    "Layout '{}' not found",
+                    name
+                ))
+            })?;
+
+        // Collect entity handles owned by this block record
+        let entity_handles: Vec<Handle> = self
+            .block_records
+            .iter()
+            .find(|br| br.handle == br_handle)
+            .map(|br| br.entity_handles.clone())
+            .unwrap_or_default();
+
+        // Remove all entities in this layout
+        for eh in entity_handles {
+            self.remove_entity(eh);
+        }
+
+        // Remove the block record
+        let block_name: Option<String> = self
+            .block_records
+            .iter()
+            .find(|br| br.handle == br_handle)
+            .map(|br| br.name().to_string());
+        if let Some(bn) = block_name {
+            self.block_records.remove(&bn);
+        }
+
+        // Remove from ACAD_LAYOUT dictionary
+        if let Some(ObjectType::Dictionary(dict)) =
+            self.objects.get_mut(&self.header.acad_layout_dict_handle)
+        {
+            dict.entries.retain(|(k, _)| k != name);
+        }
+
+        // Remove layout object
+        self.objects.remove(&layout_handle);
+        Ok(())
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Entity Copying
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Clone an entity and add the copy to the same block/layout.
+    ///
+    /// The copy receives a new handle; all other properties (layer, color,
+    /// geometry, …) are duplicated from the original.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line};
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let line = Line::from_coords(0.0, 0.0, 0.0, 10.0, 10.0, 0.0);
+    /// let h1 = doc.add_entity(EntityType::Line(line)).unwrap();
+    /// let h2 = doc.copy_entity(h1).unwrap();
+    /// assert_ne!(h1, h2);
+    /// assert_eq!(doc.entity_count(), 2);
+    /// ```
+    pub fn copy_entity(&mut self, handle: Handle) -> Result<Handle> {
+        let original = self
+            .get_entity(handle)
+            .ok_or_else(|| {
+                crate::error::DxfError::Custom(format!(
+                    "Entity with handle {:#X} not found",
+                    handle.value()
+                ))
+            })?
+            .clone();
+        let mut copy = original;
+        // Allocate a fresh handle; clear reactors and xdictionary since
+        // those belong to the original entity.
+        let new_handle = self.allocate_handle();
+        copy.common_mut().handle = new_handle;
+        copy.common_mut().reactors.clear();
+        copy.common_mut().xdictionary_handle = None;
+
+        // Re-route into the same block record as the original
+        let owner = copy.common().owner_handle;
+        let is_excluded = matches!(
+            &copy,
+            EntityType::AttributeEntity(_)
+                | EntityType::Block(_)
+                | EntityType::BlockEnd(_)
+        );
+        if !is_excluded && !owner.is_null() {
+            for br in self.block_records.iter_mut() {
+                if br.handle == owner {
+                    br.entity_handles.push(new_handle);
+                    break;
+                }
+            }
+        }
+        let idx = self.entities.len();
+        self.entities.push(copy);
+        self.entity_index.insert(new_handle, idx);
+        Ok(new_handle)
+    }
+
+    /// Clone an entity into a different layout.
+    ///
+    /// The copy receives a new handle and its owner is set to the target
+    /// layout's block record.  The target layout is created if it does
+    /// not exist (via [`add_layout`](Self::add_layout)).
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line};
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let line = Line::from_coords(0.0, 0.0, 0.0, 5.0, 5.0, 0.0);
+    /// let h1 = doc.add_entity(EntityType::Line(line)).unwrap();
+    /// doc.add_layout("Layout2").unwrap();
+    /// let h2 = doc.copy_entity_to_layout(h1, "Layout2").unwrap();
+    /// assert_ne!(h1, h2);
+    /// ```
+    pub fn copy_entity_to_layout(
+        &mut self,
+        handle: Handle,
+        layout_name: &str,
+    ) -> Result<Handle> {
+        let original = self
+            .get_entity(handle)
+            .ok_or_else(|| {
+                crate::error::DxfError::Custom(format!(
+                    "Entity with handle {:#X} not found",
+                    handle.value()
+                ))
+            })?
+            .clone();
+        let mut copy = original;
+        let new_handle = self.allocate_handle();
+        copy.common_mut().handle = new_handle;
+        copy.common_mut().reactors.clear();
+        copy.common_mut().xdictionary_handle = None;
+        // Reset owner — add_entity_to_layout will set it correctly
+        copy.common_mut().owner_handle = Handle::NULL;
+        self.add_entity_to_layout(copy, layout_name)
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Group & Batch Operations API
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Create a named entity group and register it in the ACAD_GROUP
+    /// dictionary.
+    ///
+    /// Returns an error if a group with the same name already exists.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let gh = doc.create_group("Walls").unwrap();
+    /// assert!(doc.get_group("Walls").is_some());
+    /// ```
+    pub fn create_group(&mut self, name: &str) -> Result<Handle> {
+        // Check for duplicate
+        if self.get_group(name).is_some() {
+            return Err(crate::error::DxfError::Custom(format!(
+                "Group '{}' already exists",
+                name
+            )));
+        }
+        let mut group = crate::objects::Group::new(name);
+        group.handle = self.allocate_handle();
+        group.owner = self.header.acad_group_dict_handle;
+        let gh = group.handle;
+
+        // Register in ACAD_GROUP dictionary
+        if let Some(ObjectType::Dictionary(dict)) =
+            self.objects.get_mut(&self.header.acad_group_dict_handle)
+        {
+            dict.add_entry(name, gh);
+        }
+        self.objects.insert(gh, ObjectType::Group(group));
+        Ok(gh)
+    }
+
+    /// Create a named group pre-populated with a description and entity
+    /// handles.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line};
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let h1 = doc.add_entity(EntityType::Line(Line::from_coords(0.0,0.0,0.0, 1.0,1.0,0.0))).unwrap();
+    /// let h2 = doc.add_entity(EntityType::Line(Line::from_coords(1.0,1.0,0.0, 2.0,2.0,0.0))).unwrap();
+    /// let gh = doc.create_group_with("Frame", "Outer frame lines", &[h1, h2]).unwrap();
+    /// assert_eq!(doc.get_group("Frame").unwrap().len(), 2);
+    /// ```
+    pub fn create_group_with(
+        &mut self,
+        name: &str,
+        description: &str,
+        handles: &[Handle],
+    ) -> Result<Handle> {
+        let gh = self.create_group(name)?;
+        if let Some(ObjectType::Group(group)) = self.objects.get_mut(&gh) {
+            group.description = description.to_string();
+            group.add_entities(handles.iter().copied());
+        }
+        Ok(gh)
+    }
+
+    /// Look up a group by name.
+    pub fn get_group(&self, name: &str) -> Option<&crate::objects::Group> {
+        self.objects.values().find_map(|obj| match obj {
+            ObjectType::Group(g) if g.name == name => Some(g),
+            _ => None,
+        })
+    }
+
+    /// Look up a group by name (mutable).
+    pub fn get_group_mut(&mut self, name: &str) -> Option<&mut crate::objects::Group> {
+        self.objects.values_mut().find_map(|obj| match obj {
+            ObjectType::Group(g) if g.name == name => Some(g),
+            _ => None,
+        })
+    }
+
+    /// Return all groups in the document.
+    pub fn groups(&self) -> Vec<&crate::objects::Group> {
+        self.objects
+            .values()
+            .filter_map(|obj| match obj {
+                ObjectType::Group(g) => Some(g),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Remove a group from the document.
+    ///
+    /// This only removes the group object — the member entities are **not**
+    /// deleted.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// doc.create_group("Temp").unwrap();
+    /// assert!(doc.get_group("Temp").is_some());
+    /// doc.remove_group("Temp").unwrap();
+    /// assert!(doc.get_group("Temp").is_none());
+    /// ```
+    pub fn remove_group(&mut self, name: &str) -> Result<()> {
+        let group_handle = self
+            .objects
+            .values()
+            .find_map(|obj| match obj {
+                ObjectType::Group(g) if g.name == name => Some(g.handle),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                crate::error::DxfError::Custom(format!(
+                    "Group '{}' not found",
+                    name
+                ))
+            })?;
+
+        // Remove from ACAD_GROUP dictionary
+        if let Some(ObjectType::Dictionary(dict)) =
+            self.objects.get_mut(&self.header.acad_group_dict_handle)
+        {
+            dict.entries.retain(|(k, _)| k != name);
+        }
+        self.objects.remove(&group_handle);
+        Ok(())
+    }
+
+    /// Apply a mutation to every entity whose handle is in the given slice.
+    ///
+    /// Handles that do not resolve to an entity are silently skipped.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line};
+    /// use acadrust::types::Color;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let h1 = doc.add_entity(EntityType::Line(Line::from_coords(0.0,0.0,0.0, 1.0,0.0,0.0))).unwrap();
+    /// let h2 = doc.add_entity(EntityType::Line(Line::from_coords(0.0,0.0,0.0, 0.0,1.0,0.0))).unwrap();
+    /// doc.modify_entities(&[h1, h2], |e| {
+    ///     e.common_mut().color = Color::RED;
+    /// });
+    /// assert_eq!(doc.get_entity(h1).unwrap().common().color, Color::RED);
+    /// assert_eq!(doc.get_entity(h2).unwrap().common().color, Color::RED);
+    /// ```
+    pub fn modify_entities<F>(&mut self, handles: &[Handle], mut f: F)
+    where
+        F: FnMut(&mut EntityType),
+    {
+        for &h in handles {
+            if let Some(&idx) = self.entity_index.get(&h) {
+                f(&mut self.entities[idx]);
+            }
+        }
+    }
+
     /// Resolve handle references after reading a DXF file.
     ///
     /// This performs a simplified version of ACadSharp's two-phase build:
