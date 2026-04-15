@@ -360,6 +360,62 @@ impl MLineStyle {
         self.flags = flags;
         self
     }
+
+    /// Start a fluent builder for multiline styles.
+    pub fn builder(name: impl Into<String>) -> MLineStyleBuilder {
+        MLineStyleBuilder::new(name)
+    }
+}
+
+/// Fluent builder for [`MLineStyle`].
+#[derive(Debug, Clone)]
+pub struct MLineStyleBuilder {
+    style: MLineStyle,
+}
+
+impl MLineStyleBuilder {
+    /// Create a new multiline style builder.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            style: MLineStyle::new(name),
+        }
+    }
+
+    /// Set description text.
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.style.description = description.into();
+        self
+    }
+
+    /// Add a style element.
+    pub fn element(mut self, element: MLineStyleElement) -> Self {
+        self.style.add_element(element);
+        self
+    }
+
+    /// Enable fill with color.
+    pub fn fill(mut self, fill_color: Color) -> Self {
+        self.style.enable_fill(fill_color);
+        self
+    }
+
+    /// Set style flags directly.
+    pub fn flags(mut self, flags: MLineStyleFlags) -> Self {
+        self.style.flags = flags;
+        self
+    }
+
+    /// Set start/end cap angles in degrees.
+    pub fn cap_angles_deg(mut self, start_deg: f64, end_deg: f64) -> Self {
+        self.style.set_start_angle_degrees(start_deg);
+        self.style.set_end_angle_degrees(end_deg);
+        self
+    }
+
+    /// Build the configured multiline style.
+    pub fn build(self) -> MLineStyle {
+        self.style
+    }
 }
 
 impl Default for MLineStyle {
@@ -517,6 +573,29 @@ mod tests {
         
         assert!((style.start_angle_degrees() - 45.0).abs() < 1e-10);
         assert!((style.end_angle_degrees() - 60.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_mlinestyle_struct_builder() {
+        let style = MLineStyle::builder("Custom")
+            .description("Road marking")
+            .element(MLineStyleElement::new(-0.25))
+            .element(MLineStyleElement::new(0.25))
+            .flags(MLineStyleFlags {
+                display_joints: true,
+                ..Default::default()
+            })
+            .fill(Color::from_index(4))
+            .cap_angles_deg(30.0, 45.0)
+            .build();
+
+        assert_eq!(style.name, "Custom");
+        assert_eq!(style.description, "Road marking");
+        assert_eq!(style.elements.len(), 2);
+        assert!(style.flags.display_joints);
+        assert!((style.start_angle_degrees() - 30.0).abs() < 1e-10);
+        assert!((style.end_angle_degrees() - 45.0).abs() < 1e-10);
+        assert!(style.flags.fill_on);
     }
 }
 

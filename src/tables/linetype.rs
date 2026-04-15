@@ -150,6 +150,76 @@ impl LineType {
     pub fn is_continuous(&self) -> bool {
         self.elements.is_empty()
     }
+
+    /// Start a fluent builder for a line type.
+    pub fn builder(name: impl Into<String>) -> LineTypeBuilder {
+        LineTypeBuilder::new(name)
+    }
+}
+
+/// Fluent builder for [`LineType`].
+#[derive(Debug, Clone)]
+pub struct LineTypeBuilder {
+    line_type: LineType,
+}
+
+impl LineTypeBuilder {
+    /// Create a new line type builder.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            line_type: LineType::new(name),
+        }
+    }
+
+    /// Set description text.
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.line_type.description = description.into();
+        self
+    }
+
+    /// Add a custom pattern element.
+    pub fn element(mut self, element: LineTypeElement) -> Self {
+        self.line_type.elements.push(element);
+        self
+    }
+
+    /// Add a dash element.
+    pub fn dash(self, length: f64) -> Self {
+        self.element(LineTypeElement::dash(length))
+    }
+
+    /// Add a space element.
+    pub fn space(self, length: f64) -> Self {
+        self.element(LineTypeElement::space(length))
+    }
+
+    /// Add a dot element.
+    pub fn dot(self) -> Self {
+        self.element(LineTypeElement::dot())
+    }
+
+    /// Set alignment character (typically 'A').
+    pub fn alignment(mut self, alignment: char) -> Self {
+        self.line_type.alignment = alignment;
+        self
+    }
+
+    /// Set xref-dependent flag.
+    pub fn xref_dependent(mut self, xref_dependent: bool) -> Self {
+        self.line_type.xref_dependent = xref_dependent;
+        self
+    }
+
+    /// Build the configured line type.
+    pub fn build(mut self) -> LineType {
+        self.line_type.pattern_length = self
+            .line_type
+            .elements
+            .iter()
+            .map(|e| e.length.abs())
+            .sum();
+        self.line_type
+    }
 }
 
 impl TableEntry for LineType {
@@ -174,6 +244,37 @@ impl TableEntry for LineType {
             self.name.as_str(),
             "Continuous" | "ByLayer" | "ByBlock"
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linetype_builder_sets_pattern_and_metadata() {
+        let lt = LineType::builder("Center")
+            .description("Center line")
+            .dash(1.0)
+            .space(0.25)
+            .dot()
+            .alignment('A')
+            .xref_dependent(true)
+            .build();
+
+        assert_eq!(lt.name, "Center");
+        assert_eq!(lt.description, "Center line");
+        assert_eq!(lt.elements.len(), 3);
+        assert!((lt.pattern_length - 1.25).abs() < 1e-10);
+        assert_eq!(lt.alignment, 'A');
+        assert!(lt.xref_dependent);
+    }
+
+    #[test]
+    fn linetype_builder_defaults_match_new() {
+        let a = LineType::new("X");
+        let b = LineType::builder("X").build();
+        assert_eq!(a, b);
     }
 }
 

@@ -160,6 +160,91 @@ impl Layer {
     pub fn is_visible(&self) -> bool {
         !self.flags.off && !self.flags.frozen
     }
+
+    /// Start a fluent builder for a layer.
+    pub fn builder(name: impl Into<String>) -> LayerBuilder {
+        LayerBuilder::new(name)
+    }
+}
+
+/// Fluent builder for [`Layer`].
+#[derive(Debug, Clone)]
+pub struct LayerBuilder {
+    layer: Layer,
+}
+
+impl LayerBuilder {
+    /// Create a new layer builder.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            layer: Layer::new(name),
+        }
+    }
+
+    /// Set the layer color.
+    pub fn color(mut self, color: Color) -> Self {
+        self.layer.color = color;
+        self
+    }
+
+    /// Set the line type name.
+    pub fn line_type(mut self, line_type: impl Into<String>) -> Self {
+        self.layer.line_type = line_type.into();
+        self
+    }
+
+    /// Set the line weight.
+    pub fn line_weight(mut self, line_weight: LineWeight) -> Self {
+        self.layer.line_weight = line_weight;
+        self
+    }
+
+    /// Set whether this layer is plottable.
+    pub fn plottable(mut self, is_plottable: bool) -> Self {
+        self.layer.is_plottable = is_plottable;
+        self
+    }
+
+    /// Set the frozen state.
+    pub fn frozen(mut self, frozen: bool) -> Self {
+        self.layer.flags.frozen = frozen;
+        self
+    }
+
+    /// Set the locked state.
+    pub fn locked(mut self, locked: bool) -> Self {
+        self.layer.flags.locked = locked;
+        self
+    }
+
+    /// Set the off state.
+    pub fn off(mut self, off: bool) -> Self {
+        self.layer.flags.off = off;
+        self
+    }
+
+    /// Set whether the layer is xref-dependent.
+    pub fn xref_dependent(mut self, xref_dependent: bool) -> Self {
+        self.layer.flags.xref_dependent = xref_dependent;
+        self
+    }
+
+    /// Set the plot style name.
+    pub fn plot_style(mut self, plot_style: impl Into<String>) -> Self {
+        self.layer.plot_style = plot_style.into();
+        self
+    }
+
+    /// Set the material handle.
+    pub fn material(mut self, material: Handle) -> Self {
+        self.layer.material = material;
+        self
+    }
+
+    /// Build the configured layer.
+    pub fn build(self) -> Layer {
+        self.layer
+    }
 }
 
 impl TableEntry for Layer {
@@ -181,6 +266,46 @@ impl TableEntry for Layer {
 
     fn is_standard(&self) -> bool {
         self.name == "0"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layer_builder_sets_common_properties() {
+        let layer = Layer::builder("Walls")
+            .color(Color::RED)
+            .line_type("Hidden")
+            .line_weight(LineWeight::W0_50)
+            .plottable(false)
+            .frozen(true)
+            .locked(true)
+            .off(true)
+            .xref_dependent(true)
+            .plot_style("ByLayer")
+            .material(Handle::new(42))
+            .build();
+
+        assert_eq!(layer.name, "Walls");
+        assert_eq!(layer.color, Color::RED);
+        assert_eq!(layer.line_type, "Hidden");
+        assert_eq!(layer.line_weight, LineWeight::W0_50);
+        assert!(!layer.is_plottable);
+        assert!(layer.flags.frozen);
+        assert!(layer.flags.locked);
+        assert!(layer.flags.off);
+        assert!(layer.flags.xref_dependent);
+        assert_eq!(layer.plot_style, "ByLayer");
+        assert_eq!(layer.material, Handle::new(42));
+    }
+
+    #[test]
+    fn layer_builder_defaults_match_layer_new() {
+        let a = Layer::new("A");
+        let b = Layer::builder("A").build();
+        assert_eq!(a, b);
     }
 }
 

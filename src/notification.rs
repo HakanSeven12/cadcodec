@@ -8,6 +8,7 @@
 //! [`CadDocument::notifications`](crate::document::CadDocument::notifications) to see what was encountered.
 
 use std::fmt;
+use crate::types::Handle;
 
 /// Severity level of a notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -132,6 +133,130 @@ impl<'a> IntoIterator for &'a NotificationCollection {
     }
 }
 
+/// Document mutation event type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum DocumentEventType {
+    /// An entity was added to the document.
+    EntityAdded,
+    /// An entity was removed from the document.
+    EntityRemoved,
+    /// An existing entity was modified.
+    EntityModified,
+    /// Undo operation was recorded.
+    Undo,
+    /// Redo operation was recorded.
+    Redo,
+}
+
+/// A single document mutation event.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DocumentEvent {
+    /// Event kind.
+    pub event_type: DocumentEventType,
+    /// Entity handle involved in this event, if applicable.
+    pub handle: Option<Handle>,
+    /// Optional human-readable context.
+    pub message: Option<String>,
+}
+
+impl DocumentEvent {
+    /// Create an event with optional handle/message.
+    pub fn new(
+        event_type: DocumentEventType,
+        handle: Option<Handle>,
+        message: Option<impl Into<String>>,
+    ) -> Self {
+        Self {
+            event_type,
+            handle,
+            message: message.map(|m| m.into()),
+        }
+    }
+}
+
+/// Collection of document mutation events.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DocumentEventCollection {
+    items: Vec<DocumentEvent>,
+}
+
+impl DocumentEventCollection {
+    /// Create an empty event collection.
+    pub fn new() -> Self {
+        Self { items: Vec::new() }
+    }
+
+    /// Push a raw event.
+    pub fn push(&mut self, event: DocumentEvent) {
+        self.items.push(event);
+    }
+
+    /// Record an entity-added event.
+    pub fn entity_added(&mut self, handle: Handle) {
+        self.push(DocumentEvent::new(DocumentEventType::EntityAdded, Some(handle), None::<String>));
+    }
+
+    /// Record an entity-removed event.
+    pub fn entity_removed(&mut self, handle: Handle) {
+        self.push(DocumentEvent::new(DocumentEventType::EntityRemoved, Some(handle), None::<String>));
+    }
+
+    /// Record an entity-modified event.
+    pub fn entity_modified(&mut self, handle: Handle, message: impl Into<String>) {
+        self.push(DocumentEvent::new(
+            DocumentEventType::EntityModified,
+            Some(handle),
+            Some(message),
+        ));
+    }
+
+    /// Number of events.
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Whether there are no events.
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Iterate events.
+    pub fn iter(&self) -> std::slice::Iter<'_, DocumentEvent> {
+        self.items.iter()
+    }
+
+    /// Clear all recorded events.
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+
+    /// Drain all events and return them.
+    pub fn drain(&mut self) -> Vec<DocumentEvent> {
+        std::mem::take(&mut self.items)
+    }
+}
+
+impl IntoIterator for DocumentEventCollection {
+    type Item = DocumentEvent;
+    type IntoIter = std::vec::IntoIter<DocumentEvent>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a DocumentEventCollection {
+    type Item = &'a DocumentEvent;
+    type IntoIter = std::slice::Iter<'a, DocumentEvent>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.iter()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +287,31 @@ mod tests {
     fn test_display() {
         let n = Notification::new(NotificationType::NotImplemented, "THUMBNAILIMAGE section");
         assert_eq!(format!("{}", n), "[NotImplemented] THUMBNAILIMAGE section");
+    }
+
+    #[test]
+    fn test_document_event_collection_basics() {
+        let mut events = DocumentEventCollection::new();
+        assert!(events.is_empty());
+
+        let h1 = Handle::new(0x10);
+        let h2 = Handle::new(0x11);
+        events.entity_added(h1);
+        events.entity_modified(h1, "translated");
+        events.entity_removed(h2);
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(events.iter().next().unwrap().event_type, DocumentEventType::EntityAdded);
+        assert_eq!(events.iter().nth(1).unwrap().event_type, DocumentEventType::EntityModified);
+        assert_eq!(events.iter().nth(2).unwrap().event_type, DocumentEventType::EntityRemoved);
+    }
+
+    #[test]
+    fn test_document_event_drain() {
+        let mut events = DocumentEventCollection::new();
+        events.entity_added(Handle::new(0x20));
+        let drained = events.drain();
+        assert_eq!(drained.len(), 1);
+        assert!(events.is_empty());
     }
 }

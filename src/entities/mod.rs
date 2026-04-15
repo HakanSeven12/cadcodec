@@ -697,6 +697,7 @@ impl_entity_type_helpers! {
     is_ellipse, as_ellipse, as_ellipse_mut, Ellipse, Ellipse;
     is_polyline, as_polyline, as_polyline_mut, Polyline, Polyline;
     is_polyline2d, as_polyline2d, as_polyline2d_mut, Polyline2D, Polyline2D;
+    is_polyline3d, as_polyline3d, as_polyline3d_mut, Polyline3D, Polyline3D;
     is_lwpolyline, as_lwpolyline, as_lwpolyline_mut, LwPolyline, LwPolyline;
     is_text, as_text, as_text_mut, Text, Text;
     is_mtext, as_mtext, as_mtext_mut, MText, MText;
@@ -707,9 +708,12 @@ impl_entity_type_helpers! {
     is_face3d, as_face3d, as_face3d_mut, Face3D, Face3D;
     is_insert, as_insert, as_insert_mut, Insert, Insert;
     is_block, as_block, as_block_mut, Block, Block;
+    is_block_end, as_block_end, as_block_end_mut, BlockEnd, BlockEnd;
     is_ray, as_ray, as_ray_mut, Ray, Ray;
     is_xline, as_xline, as_xline_mut, XLine, XLine;
     is_viewport, as_viewport, as_viewport_mut, Viewport, Viewport;
+    is_attribute_definition, as_attribute_definition, as_attribute_definition_mut, AttributeDefinition, AttributeDefinition;
+    is_attribute_entity, as_attribute_entity, as_attribute_entity_mut, AttributeEntity, AttributeEntity;
     is_leader, as_leader, as_leader_mut, Leader, Leader;
     is_multileader, as_multileader, as_multileader_mut, MultiLeader, MultiLeader;
     is_mline, as_mline, as_mline_mut, MLine, MLine;
@@ -720,7 +724,14 @@ impl_entity_type_helpers! {
     is_body, as_body, as_body_mut, Body, Body;
     is_table, as_table, as_table_mut, Table, Table;
     is_tolerance, as_tolerance, as_tolerance_mut, Tolerance, Tolerance;
+    is_polyface_mesh, as_polyface_mesh, as_polyface_mesh_mut, PolyfaceMesh, PolyfaceMesh;
     is_wipeout, as_wipeout, as_wipeout_mut, Wipeout, Wipeout;
+    is_shape, as_shape, as_shape_mut, Shape, Shape;
+    is_underlay, as_underlay, as_underlay_mut, Underlay, Underlay;
+    is_seqend, as_seqend, as_seqend_mut, Seqend, Seqend;
+    is_ole2_frame, as_ole2_frame, as_ole2_frame_mut, Ole2Frame, Ole2Frame;
+    is_polygon_mesh, as_polygon_mesh, as_polygon_mesh_mut, PolygonMesh, PolygonMeshEntity;
+    is_unknown, as_unknown, as_unknown_mut, Unknown, UnknownEntity;
 }
 
 /// Trait for concrete entity types that can be extracted from an [`EntityType`] variant.
@@ -873,5 +884,33 @@ mod tests {
         )).is_dimension());
         assert!(EntityType::Leader(Leader::new()).is_leader());
         assert!(EntityType::Mesh(Mesh::new()).is_mesh());
+    }
+
+    #[test]
+    fn test_extended_type_helpers() {
+        assert!(EntityType::Polyline3D(Polyline3D::new()).is_polyline3d());
+        assert!(EntityType::BlockEnd(BlockEnd::new()).is_block_end());
+        assert!(
+            EntityType::AttributeDefinition(AttributeDefinition::new(
+                "TAG".to_string(),
+                "Prompt".to_string(),
+                "Default".to_string(),
+            ))
+            .is_attribute_definition()
+        );
+        assert!(
+            EntityType::AttributeEntity(AttributeEntity::new(
+                "TAG".to_string(),
+                "Value".to_string(),
+            ))
+            .is_attribute_entity()
+        );
+        assert!(EntityType::PolyfaceMesh(PolyfaceMesh::new()).is_polyface_mesh());
+        assert!(EntityType::Shape(Shape::new()).is_shape());
+        assert!(EntityType::Underlay(Underlay::new(UnderlayType::Pdf)).is_underlay());
+        assert!(EntityType::Seqend(Seqend::new()).is_seqend());
+        assert!(EntityType::Ole2Frame(Ole2Frame::new()).is_ole2_frame());
+        assert!(EntityType::PolygonMesh(PolygonMeshEntity::new()).is_polygon_mesh());
+        assert!(EntityType::Unknown(UnknownEntity::new("FOO")).is_unknown());
     }
 }

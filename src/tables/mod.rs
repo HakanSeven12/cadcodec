@@ -27,11 +27,11 @@ pub mod view;
 pub mod vport;
 pub mod ucs;
 
-pub use layer::{Layer, LayerFlags};
-pub use linetype::{LineType, LineTypeElement};
-pub use textstyle::{TextStyle, TextGenerationFlags};
+pub use layer::{Layer, LayerBuilder, LayerFlags};
+pub use linetype::{LineType, LineTypeBuilder, LineTypeElement};
+pub use textstyle::{TextStyle, TextStyleBuilder, TextGenerationFlags};
 pub use block_record::BlockRecord;
-pub use dimstyle::DimStyle;
+pub use dimstyle::{DimStyle, DimStyleBuilder};
 pub use appid::AppId;
 pub use view::View;
 pub use vport::VPort;

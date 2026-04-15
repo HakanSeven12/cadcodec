@@ -153,7 +153,8 @@ pub use entities::{
 
 // Re-export table types
 pub use tables::{
-    AppId, BlockRecord, DimStyle, Layer, LineType, Table, TableEntry, TextStyle, Ucs, VPort, View,
+    AppId, BlockRecord, DimStyle, DimStyleBuilder, Layer, LayerBuilder, LineType, LineTypeBuilder,
+    Table, TableEntry, TextStyle, TextStyleBuilder, Ucs, VPort, View,
 };
 
 // Re-export document

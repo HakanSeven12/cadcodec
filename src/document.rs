@@ -21,9 +21,10 @@ use crate::classes::DxfClassCollection;
 use crate::entities::{EntityCommon, EntityType};
 use crate::objects::ObjectType;
 use crate::tables::*;
-use crate::types::{DxfVersion, Color, Handle, Vector2, Vector3};
+use crate::types::{BoundingBox3D, DxfVersion, Color, Handle, Vector2, Vector3};
 use crate::Result;
 use std::collections::HashMap;
+use std::io::Cursor;
 
 /// DWG header variables containing drawing settings
 #[derive(Debug, Clone, PartialEq)]
@@ -940,6 +941,9 @@ pub struct CadDocument {
     /// Notifications collected during the last read/write operation
     pub notifications: crate::notification::NotificationCollection,
 
+    /// Document mutation events (entity add/remove/modify, undo/redo markers).
+    pub events: crate::notification::DocumentEventCollection,
+
     /// All entities in the document (contiguous storage for cache locality).
     pub(crate) entities: Vec<EntityType>,
 
@@ -986,6 +990,7 @@ impl CadDocument {
             ucss: Table::new(),
             classes: DxfClassCollection::new(),
             notifications: crate::notification::NotificationCollection::new(),
+            events: crate::notification::DocumentEventCollection::new(),
             entities: Vec::new(),
             entity_index: HashMap::new(),
             objects: HashMap::new(),
@@ -1393,6 +1398,7 @@ impl CadDocument {
         let idx = self.entities.len();
         self.entities.push(entity);
         self.entity_index.insert(handle, idx);
+        self.events.entity_added(handle);
         Ok(handle)
     }
 
@@ -1543,6 +1549,7 @@ impl CadDocument {
         let idx = self.entities.len();
         self.entities.push(entity);
         self.entity_index.insert(handle, idx);
+        self.events.entity_added(handle);
         Ok(handle)
     }
 
@@ -1555,6 +1562,7 @@ impl CadDocument {
             let moved_handle = self.entities[idx].common().handle;
             self.entity_index.insert(moved_handle, idx);
         }
+        self.events.entity_removed(handle);
         Some(entity)
     }
 
@@ -2169,6 +2177,62 @@ impl CadDocument {
         }
     }
 
+    /// Open a DWG or DXF document from in-memory bytes.
+    ///
+    /// The method tries DWG first, then falls back to DXF.
+    pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
+        if bytes.is_empty() {
+            return Err(crate::error::DxfError::InvalidFormat(
+                "Input bytes are empty".to_string(),
+            ));
+        }
+
+        let mut dwg_reader = crate::io::dwg::DwgReader::from_stream(Cursor::new(bytes.to_vec()));
+        match dwg_reader.read() {
+            Ok(doc) => Ok(doc),
+            Err(dwg_err) => {
+                let dxf_result = crate::io::dxf::DxfReader::from_reader(Cursor::new(bytes.to_vec()))
+                    .and_then(|r| r.read());
+                match dxf_result {
+                    Ok(doc) => Ok(doc),
+                    Err(dxf_err) => Err(crate::error::DxfError::InvalidFormat(format!(
+                        "Unable to parse bytes as DWG or DXF. DWG error: {}; DXF error: {}",
+                        dwg_err, dxf_err,
+                    ))),
+                }
+            }
+        }
+    }
+
+    /// Serialize the document to DWG bytes.
+    pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
+        crate::io::dwg::DwgWriter::write_to_vec(self)
+    }
+
+    /// Serialize the document to DXF bytes.
+    ///
+    /// Set `binary = true` for binary DXF output.
+    pub fn to_dxf_bytes(&self, binary: bool) -> crate::Result<Vec<u8>> {
+        let mut writer = crate::io::dxf::DxfWriter::new(self);
+        writer.set_binary(binary);
+        writer.write_to_vec()
+    }
+
+    /// Borrow the collected document mutation events.
+    pub fn events(&self) -> &crate::notification::DocumentEventCollection {
+        &self.events
+    }
+
+    /// Drain and return all currently collected mutation events.
+    pub fn drain_events(&mut self) -> Vec<crate::notification::DocumentEvent> {
+        self.events.drain()
+    }
+
+    /// Clear all currently collected mutation events.
+    pub fn clear_events(&mut self) {
+        self.events.clear();
+    }
+
     /// Move (translate) an entity by the given offset.
     ///
     /// Returns `false` if the handle was not found.
@@ -2186,6 +2250,7 @@ impl CadDocument {
     pub fn move_entity(&mut self, handle: crate::types::Handle, offset: Vector3) -> bool {
         if let Some(&idx) = self.entity_index.get(&handle) {
             self.entities[idx].as_entity_mut().translate(offset);
+            self.events.entity_modified(handle, "move");
             true
         } else {
             false
@@ -2219,6 +2284,7 @@ impl CadDocument {
             let t_back = crate::types::Transform::from_translation(center);
             let combined = t_to_origin.then(&rotation).then(&t_back);
             self.entities[idx].as_entity_mut().apply_transform(&combined);
+            self.events.entity_modified(handle, "rotate");
             true
         } else {
             false
@@ -2253,10 +2319,64 @@ impl CadDocument {
                 base_point,
             );
             self.entities[idx].as_entity_mut().apply_transform(&transform);
+            self.events.entity_modified(handle, "scale");
             true
         } else {
             false
         }
+    }
+
+    /// Compute an approximate distance between two entities by handle.
+    ///
+    /// Uses axis-aligned bounding boxes of both entities.
+    pub fn distance_between_handles(&self, a: Handle, b: Handle) -> Option<f64> {
+        let ea = self.get_entity(a)?;
+        let eb = self.get_entity(b)?;
+        Some(Self::distance_between_entities(ea, eb))
+    }
+
+    /// Compute an approximate distance between two entities.
+    ///
+    /// Uses axis-aligned bounding boxes of both entities.
+    pub fn distance_between_entities(a: &EntityType, b: &EntityType) -> f64 {
+        Self::bbox_distance(a.bounding_box(), b.bounding_box())
+    }
+
+    /// Return the minimum approximate distance from one entity to all others.
+    pub fn nearest_distance_from(&self, handle: Handle) -> Option<f64> {
+        let e = self.get_entity(handle)?;
+        let mut best = f64::INFINITY;
+        for other in &self.entities {
+            if other.common().handle == handle {
+                continue;
+            }
+            let d = Self::distance_between_entities(e, other);
+            if d < best {
+                best = d;
+            }
+        }
+        if best.is_finite() {
+            Some(best)
+        } else {
+            None
+        }
+    }
+
+    fn bbox_distance(a: BoundingBox3D, b: BoundingBox3D) -> f64 {
+        fn axis_dist(a_min: f64, a_max: f64, b_min: f64, b_max: f64) -> f64 {
+            if a_max < b_min {
+                b_min - a_max
+            } else if b_max < a_min {
+                a_min - b_max
+            } else {
+                0.0
+            }
+        }
+
+        let dx = axis_dist(a.min.x, a.max.x, b.min.x, b.max.x);
+        let dy = axis_dist(a.min.y, a.max.y, b.min.y, b.max.y);
+        let dz = axis_dist(a.min.z, a.max.z, b.min.z, b.max.z);
+        (dx * dx + dy * dy + dz * dz).sqrt()
     }
 
     /// Filter entities using an arbitrary predicate.
@@ -3706,6 +3826,129 @@ mod tests {
     fn test_scale_entity_not_found() {
         let mut doc = CadDocument::new();
         assert!(!doc.scale_entity(Handle::new(999), Vector3::ZERO, 2.0));
+    }
+
+    // ── In-memory bytes IO tests ─────────────────────────────────────
+
+    #[test]
+    fn test_to_dxf_bytes_and_from_bytes_roundtrip() {
+        let mut doc = CadDocument::new();
+        doc.add_entity(EntityType::Line(Line::from_coords(
+            0.0, 0.0, 0.0, 10.0, 0.0, 0.0,
+        )))
+        .unwrap();
+
+        let bytes = doc.to_dxf_bytes(false).expect("serialize DXF bytes");
+        assert!(!bytes.is_empty());
+
+        let parsed = CadDocument::from_bytes(&bytes).expect("parse bytes as DXF");
+        assert_eq!(parsed.entities().count(), 1);
+    }
+
+    #[test]
+    fn test_to_dwg_bytes_non_empty() {
+        let mut doc = CadDocument::new();
+        doc.add_entity(EntityType::Line(Line::from_coords(
+            0.0, 0.0, 0.0, 5.0, 0.0, 0.0,
+        )))
+        .unwrap();
+
+        let bytes = doc.to_bytes().expect("serialize DWG bytes");
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn test_from_bytes_empty_input_fails() {
+        let err = CadDocument::from_bytes(&[]).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.to_lowercase().contains("empty"));
+    }
+
+    // ── Mutation event tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_document_events_for_add_remove() {
+        let mut doc = CadDocument::new();
+        let h = doc.add_entity(EntityType::Line(Line::new())).unwrap();
+
+        let events = doc.drain_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].handle, Some(h));
+        assert_eq!(events[0].event_type, crate::notification::DocumentEventType::EntityAdded);
+
+        doc.remove_entity(h).unwrap();
+        let events = doc.drain_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].handle, Some(h));
+        assert_eq!(events[0].event_type, crate::notification::DocumentEventType::EntityRemoved);
+    }
+
+    #[test]
+    fn test_document_events_for_transforms() {
+        let mut doc = CadDocument::new();
+        let h = doc
+            .add_entity(EntityType::Line(Line::from_coords(0.0, 0.0, 0.0, 1.0, 0.0, 0.0)))
+            .unwrap();
+        doc.clear_events();
+
+        assert!(doc.move_entity(h, Vector3::new(1.0, 2.0, 0.0)));
+        assert!(doc.rotate_entity(h, Vector3::ZERO, std::f64::consts::FRAC_PI_2));
+        assert!(doc.scale_entity(h, Vector3::ZERO, 2.0));
+
+        let events = doc.drain_events();
+        assert_eq!(events.len(), 3);
+        assert!(events.iter().all(|e| e.handle == Some(h)));
+        assert_eq!(
+            events[0].event_type,
+            crate::notification::DocumentEventType::EntityModified
+        );
+        assert_eq!(events[0].message.as_deref(), Some("move"));
+        assert_eq!(events[1].message.as_deref(), Some("rotate"));
+        assert_eq!(events[2].message.as_deref(), Some("scale"));
+
+        doc.clear_events();
+        assert!(doc.events().is_empty());
+    }
+
+    // ── Entity distance tests ────────────────────────────────────────
+
+    #[test]
+    fn test_distance_between_handles() {
+        let mut doc = CadDocument::new();
+        let a = doc
+            .add_entity(EntityType::Line(Line::from_coords(0.0, 0.0, 0.0, 1.0, 0.0, 0.0)))
+            .unwrap();
+        let b = doc
+            .add_entity(EntityType::Line(Line::from_coords(4.0, 0.0, 0.0, 5.0, 0.0, 0.0)))
+            .unwrap();
+
+        let d = doc.distance_between_handles(a, b).unwrap();
+        assert!((d - 3.0).abs() < 1e-9, "distance was {}", d);
+    }
+
+    #[test]
+    fn test_distance_between_handles_missing_returns_none() {
+        let doc = CadDocument::new();
+        assert!(doc
+            .distance_between_handles(Handle::new(1), Handle::new(2))
+            .is_none());
+    }
+
+    #[test]
+    fn test_nearest_distance_from() {
+        let mut doc = CadDocument::new();
+        let a = doc
+            .add_entity(EntityType::Line(Line::from_coords(0.0, 0.0, 0.0, 1.0, 0.0, 0.0)))
+            .unwrap();
+        let _b = doc
+            .add_entity(EntityType::Line(Line::from_coords(4.0, 0.0, 0.0, 5.0, 0.0, 0.0)))
+            .unwrap();
+        let _c = doc
+            .add_entity(EntityType::Line(Line::from_coords(2.0, 0.0, 0.0, 3.0, 0.0, 0.0)))
+            .unwrap();
+
+        let d = doc.nearest_distance_from(a).unwrap();
+        assert!((d - 1.0).abs() < 1e-9, "nearest distance was {}", d);
     }
 }
 

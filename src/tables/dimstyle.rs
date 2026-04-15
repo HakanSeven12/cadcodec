@@ -292,6 +292,125 @@ impl DimStyle {
     pub fn standard() -> Self {
         Self::new("Standard")
     }
+
+    /// Start a fluent builder for a dimension style.
+    pub fn builder(name: impl Into<String>) -> DimStyleBuilder {
+        DimStyleBuilder::new(name)
+    }
+}
+
+/// Fluent builder for [`DimStyle`].
+#[derive(Debug, Clone)]
+pub struct DimStyleBuilder {
+    style: DimStyle,
+}
+
+impl DimStyleBuilder {
+    /// Create a new dimension style builder.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            style: DimStyle::new(name),
+        }
+    }
+
+    /// Set dimension line color.
+    pub fn dim_line_color(mut self, color: i16) -> Self {
+        self.style.dimclrd = color;
+        self
+    }
+
+    /// Set extension line color.
+    pub fn ext_line_color(mut self, color: i16) -> Self {
+        self.style.dimclre = color;
+        self
+    }
+
+    /// Set dimension text color.
+    pub fn text_color(mut self, color: i16) -> Self {
+        self.style.dimclrt = color;
+        self
+    }
+
+    /// Set dimension text height.
+    pub fn text_height(mut self, height: f64) -> Self {
+        self.style.dimtxt = height;
+        self
+    }
+
+    /// Set arrow size.
+    pub fn arrow_size(mut self, size: f64) -> Self {
+        self.style.dimasz = size;
+        self
+    }
+
+    /// Set overall dimension scale.
+    pub fn scale(mut self, scale: f64) -> Self {
+        self.style.dimscale = scale;
+        self
+    }
+
+    /// Set linear measurement scale factor.
+    pub fn linear_scale(mut self, factor: f64) -> Self {
+        self.style.dimlfac = factor;
+        self
+    }
+
+    /// Set linear unit format code.
+    pub fn unit_format(mut self, format: i16) -> Self {
+        self.style.dimlunit = format;
+        self
+    }
+
+    /// Set decimal place precision.
+    pub fn decimal_places(mut self, places: i16) -> Self {
+        self.style.dimdec = places;
+        self
+    }
+
+    /// Set text style by name.
+    pub fn text_style(mut self, style_name: impl Into<String>) -> Self {
+        self.style.dimtxsty = style_name.into();
+        self
+    }
+
+    /// Set text style handle.
+    pub fn text_style_handle(mut self, handle: Handle) -> Self {
+        self.style.dimtxsty_handle = handle;
+        self
+    }
+
+    /// Set tolerance mode and values.
+    pub fn tolerance(mut self, enabled: bool, plus: f64, minus: f64) -> Self {
+        self.style.dimtol = enabled;
+        self.style.dimtp = plus;
+        self.style.dimtm = minus;
+        self
+    }
+
+    /// Set limits mode.
+    pub fn limits(mut self, enabled: bool) -> Self {
+        self.style.dimlim = enabled;
+        self
+    }
+
+    /// Configure alternate units.
+    pub fn alternate_units(mut self, enabled: bool, factor: f64, decimals: i16) -> Self {
+        self.style.dimalt = enabled;
+        self.style.dimaltf = factor;
+        self.style.dimaltd = decimals;
+        self
+    }
+
+    /// Set fit mode value (`DIMATFIT`).
+    pub fn fit_mode(mut self, fit_mode: i16) -> Self {
+        self.style.dimatfit = fit_mode;
+        self
+    }
+
+    /// Build the configured dimension style.
+    pub fn build(self) -> DimStyle {
+        self.style
+    }
 }
 
 impl TableEntry for DimStyle {
@@ -313,6 +432,60 @@ impl TableEntry for DimStyle {
 
     fn is_standard(&self) -> bool {
         self.name == "Standard"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dimstyle_builder_sets_common_fields() {
+        let style = DimStyle::builder("ISO-25")
+            .dim_line_color(1)
+            .ext_line_color(2)
+            .text_color(3)
+            .text_height(2.5)
+            .arrow_size(1.25)
+            .scale(2.0)
+            .linear_scale(0.5)
+            .unit_format(4)
+            .decimal_places(4)
+            .text_style("Annotative")
+            .text_style_handle(Handle::new(77))
+            .tolerance(true, 0.02, 0.01)
+            .limits(true)
+            .alternate_units(true, 25.4, 2)
+            .fit_mode(1)
+            .build();
+
+        assert_eq!(style.name, "ISO-25");
+        assert_eq!(style.dimclrd, 1);
+        assert_eq!(style.dimclre, 2);
+        assert_eq!(style.dimclrt, 3);
+        assert_eq!(style.dimtxt, 2.5);
+        assert_eq!(style.dimasz, 1.25);
+        assert_eq!(style.dimscale, 2.0);
+        assert_eq!(style.dimlfac, 0.5);
+        assert_eq!(style.dimlunit, 4);
+        assert_eq!(style.dimdec, 4);
+        assert_eq!(style.dimtxsty, "Annotative");
+        assert_eq!(style.dimtxsty_handle, Handle::new(77));
+        assert!(style.dimtol);
+        assert_eq!(style.dimtp, 0.02);
+        assert_eq!(style.dimtm, 0.01);
+        assert!(style.dimlim);
+        assert!(style.dimalt);
+        assert_eq!(style.dimaltf, 25.4);
+        assert_eq!(style.dimaltd, 2);
+        assert_eq!(style.dimatfit, 1);
+    }
+
+    #[test]
+    fn dimstyle_builder_defaults_match_new() {
+        let a = DimStyle::new("X");
+        let b = DimStyle::builder("X").build();
+        assert_eq!(a, b);
     }
 }
 

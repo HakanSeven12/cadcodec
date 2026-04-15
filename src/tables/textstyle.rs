@@ -133,6 +133,91 @@ impl TextStyle {
     pub fn has_fixed_height(&self) -> bool {
         self.height > 0.0
     }
+
+    /// Start a fluent builder for a text style.
+    pub fn builder(name: impl Into<String>) -> TextStyleBuilder {
+        TextStyleBuilder::new(name)
+    }
+}
+
+/// Fluent builder for [`TextStyle`].
+#[derive(Debug, Clone)]
+pub struct TextStyleBuilder {
+    style: TextStyle,
+}
+
+impl TextStyleBuilder {
+    /// Create a new text style builder.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            style: TextStyle::new(name),
+        }
+    }
+
+    /// Set the primary shape/font file name.
+    pub fn font_file(mut self, font_file: impl Into<String>) -> Self {
+        self.style.font_file = font_file.into();
+        self
+    }
+
+    /// Set the TrueType font name.
+    pub fn truetype(mut self, true_type_font: impl Into<String>) -> Self {
+        self.style.true_type_font = true_type_font.into();
+        self
+    }
+
+    /// Set the big font file name.
+    pub fn big_font(mut self, big_font_file: impl Into<String>) -> Self {
+        self.style.big_font_file = big_font_file.into();
+        self
+    }
+
+    /// Set fixed text height.
+    pub fn height(mut self, height: f64) -> Self {
+        self.style.height = height;
+        self
+    }
+
+    /// Set width factor.
+    pub fn width_factor(mut self, width_factor: f64) -> Self {
+        self.style.width_factor = width_factor;
+        self
+    }
+
+    /// Set oblique angle in radians.
+    pub fn oblique_angle(mut self, oblique_angle: f64) -> Self {
+        self.style.oblique_angle = oblique_angle;
+        self
+    }
+
+    /// Set last used text height.
+    pub fn last_height(mut self, last_height: f64) -> Self {
+        self.style.last_height = last_height;
+        self
+    }
+
+    /// Set mirrored-in-X generation flag.
+    pub fn backward(mut self, backward: bool) -> Self {
+        self.style.flags.backward = backward;
+        self
+    }
+
+    /// Set mirrored-in-Y generation flag.
+    pub fn upside_down(mut self, upside_down: bool) -> Self {
+        self.style.flags.upside_down = upside_down;
+        self
+    }
+
+    /// Set xref-dependent flag.
+    pub fn xref_dependent(mut self, xref_dependent: bool) -> Self {
+        self.style.xref_dependent = xref_dependent;
+        self
+    }
+
+    /// Build the configured text style.
+    pub fn build(self) -> TextStyle {
+        self.style
+    }
 }
 
 impl TableEntry for TextStyle {
@@ -187,6 +272,41 @@ mod tests {
         
         style.set_upside_down(true);
         assert!(style.is_upside_down());
+    }
+
+    #[test]
+    fn test_textstyle_builder_sets_properties() {
+        let style = TextStyle::builder("Anno")
+            .font_file("romans.shx")
+            .truetype("Arial")
+            .big_font("gbcbig.shx")
+            .height(2.5)
+            .width_factor(0.8)
+            .oblique_angle(0.2)
+            .last_height(3.0)
+            .backward(true)
+            .upside_down(true)
+            .xref_dependent(true)
+            .build();
+
+        assert_eq!(style.name, "Anno");
+        assert_eq!(style.font_file, "romans.shx");
+        assert_eq!(style.true_type_font, "Arial");
+        assert_eq!(style.big_font_file, "gbcbig.shx");
+        assert_eq!(style.height, 2.5);
+        assert_eq!(style.width_factor, 0.8);
+        assert_eq!(style.oblique_angle, 0.2);
+        assert_eq!(style.last_height, 3.0);
+        assert!(style.flags.backward);
+        assert!(style.flags.upside_down);
+        assert!(style.xref_dependent);
+    }
+
+    #[test]
+    fn test_textstyle_builder_defaults_match_new() {
+        let a = TextStyle::new("A");
+        let b = TextStyle::builder("A").build();
+        assert_eq!(a, b);
     }
 }
 

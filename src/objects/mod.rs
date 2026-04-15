@@ -18,7 +18,7 @@ mod stub_objects;
 pub use dictionary_variable::DictionaryVariable;
 pub use group::Group;
 pub use image_definition::{ImageDefinition, ImageDefinitionReactor, ResolutionUnit};
-pub use mlinestyle::{MLineStyle, MLineStyleElement, MLineStyleFlags};
+pub use mlinestyle::{MLineStyle, MLineStyleBuilder, MLineStyleElement, MLineStyleFlags};
 pub use multileader_style::{
     BlockContentConnectionType, LeaderContentType, LeaderDrawOrderType,
     LeaderLinePropertyOverrideFlags, MultiLeaderDrawOrderType, MultiLeaderPathType,

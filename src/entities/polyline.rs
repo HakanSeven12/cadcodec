@@ -327,6 +327,60 @@ impl Polyline2D {
             .fold(Vector3::ZERO, |acc, v| acc + v.location);
         Vector3::new(sum.x / n, sum.y / n, sum.z / n)
     }
+
+    /// Return the closest point on the polyline to `point`.
+    ///
+    /// Uses straight segments between vertices (bulge arcs are treated as
+    /// chords for this query).
+    pub fn closest_point(&self, point: Vector3) -> Option<Vector3> {
+        if self.vertices.len() < 2 {
+            return None;
+        }
+        let n = self.vertices.len();
+        let seg_count = if self.is_closed() { n } else { n - 1 };
+
+        let mut best = self.vertices[0].location;
+        let mut best_d2 = f64::INFINITY;
+        for i in 0..seg_count {
+            let a = self.vertices[i].location;
+            let b = self.vertices[(i + 1) % n].location;
+            let cp = closest_point_on_segment(point, a, b);
+            let d2 = (point - cp).length_squared();
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best = cp;
+            }
+        }
+        Some(best)
+    }
+
+    /// Return the minimum distance from `point` to the polyline.
+    pub fn distance_to_point(&self, point: Vector3) -> Option<f64> {
+        let cp = self.closest_point(point)?;
+        Some((point - cp).length())
+    }
+
+    /// Check whether a point lies inside the closed polyline (XY plane).
+    ///
+    /// Returns `false` for open polylines.
+    pub fn contains_point(&self, point: Vector3, tolerance: f64) -> bool {
+        if !self.is_closed() || self.vertices.len() < 3 {
+            return false;
+        }
+
+        let verts: Vec<Vector3> = self.vertices.iter().map(|v| v.location).collect();
+
+        // Treat points on edges as inside.
+        for i in 0..verts.len() {
+            let a = verts[i];
+            let b = verts[(i + 1) % verts.len()];
+            if point_on_segment_2d(point, a, b, tolerance) {
+                return true;
+            }
+        }
+
+        point_in_polygon_2d(point, &verts)
+    }
 }
 
 impl Default for Polyline2D {
@@ -445,6 +499,105 @@ impl Polyline {
             .fold(Vector3::ZERO, |acc, v| acc + v.location);
         Vector3::new(sum.x / n, sum.y / n, sum.z / n)
     }
+
+    /// Return the closest point on the polyline to `point`.
+    pub fn closest_point(&self, point: Vector3) -> Option<Vector3> {
+        if self.vertices.len() < 2 {
+            return None;
+        }
+        let n = self.vertices.len();
+        let seg_count = if self.is_closed() { n } else { n - 1 };
+
+        let mut best = self.vertices[0].location;
+        let mut best_d2 = f64::INFINITY;
+        for i in 0..seg_count {
+            let a = self.vertices[i].location;
+            let b = self.vertices[(i + 1) % n].location;
+            let cp = closest_point_on_segment(point, a, b);
+            let d2 = (point - cp).length_squared();
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best = cp;
+            }
+        }
+        Some(best)
+    }
+
+    /// Return the minimum distance from `point` to the polyline.
+    pub fn distance_to_point(&self, point: Vector3) -> Option<f64> {
+        let cp = self.closest_point(point)?;
+        Some((point - cp).length())
+    }
+
+    /// Check whether a point lies inside the closed polyline (XY plane).
+    ///
+    /// Returns `false` for open polylines.
+    pub fn contains_point(&self, point: Vector3, tolerance: f64) -> bool {
+        if !self.is_closed() || self.vertices.len() < 3 {
+            return false;
+        }
+
+        let verts: Vec<Vector3> = self.vertices.iter().map(|v| v.location).collect();
+
+        for i in 0..verts.len() {
+            let a = verts[i];
+            let b = verts[(i + 1) % verts.len()];
+            if point_on_segment_2d(point, a, b, tolerance) {
+                return true;
+            }
+        }
+
+        point_in_polygon_2d(point, &verts)
+    }
+}
+
+fn closest_point_on_segment(p: Vector3, a: Vector3, b: Vector3) -> Vector3 {
+    let ab = b - a;
+    let ab2 = ab.length_squared();
+    if ab2 < 1e-20 {
+        return a;
+    }
+    let t = ((p - a).dot(&ab) / ab2).clamp(0.0, 1.0);
+    a + ab * t
+}
+
+fn point_on_segment_2d(p: Vector3, a: Vector3, b: Vector3, tol: f64) -> bool {
+    let ap = Vector2::new(p.x - a.x, p.y - a.y);
+    let ab = Vector2::new(b.x - a.x, b.y - a.y);
+    let ab_len2 = ab.length_squared();
+    if ab_len2 < 1e-20 {
+        return ap.length() <= tol;
+    }
+    let cross = ap.cross(&ab).abs();
+    if cross > tol * ab.length() {
+        return false;
+    }
+    let dot = ap.dot(&ab);
+    dot >= -tol && dot <= ab_len2 + tol
+}
+
+fn point_in_polygon_2d(point: Vector3, vertices: &[Vector3]) -> bool {
+    if vertices.len() < 3 {
+        return false;
+    }
+
+    let mut inside = false;
+    let mut j = vertices.len() - 1;
+    for i in 0..vertices.len() {
+        let xi = vertices[i].x;
+        let yi = vertices[i].y;
+        let xj = vertices[j].x;
+        let yj = vertices[j].y;
+
+        let intersects = ((yi > point.y) != (yj > point.y))
+            && (point.x
+                < (xj - xi) * (point.y - yi) / ((yj - yi).abs().max(1e-20)) + xi);
+        if intersects {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
 }
 
 impl Default for Polyline {
@@ -675,6 +828,51 @@ mod tests {
         assert_eq!(pl.centroid(), Vector3::ZERO);
     }
 
+    #[test]
+    fn test_polyline_closest_point_open() {
+        let pl = Polyline::from_points(vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
+        ]);
+        let cp = pl.closest_point(Vector3::new(4.0, 3.0, 0.0)).unwrap();
+        assert!((cp.x - 4.0).abs() < 1e-10);
+        assert!(cp.y.abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_polyline_distance_to_point_open() {
+        let pl = Polyline::from_points(vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
+        ]);
+        let d = pl.distance_to_point(Vector3::new(4.0, 3.0, 0.0)).unwrap();
+        assert!((d - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_polyline_contains_point_closed() {
+        let mut pl = Polyline::from_points(vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(4.0, 0.0, 0.0),
+            Vector3::new(4.0, 3.0, 0.0),
+            Vector3::new(0.0, 3.0, 0.0),
+        ]);
+        pl.close();
+        assert!(pl.contains_point(Vector3::new(2.0, 1.0, 0.0), 1e-9));
+        assert!(!pl.contains_point(Vector3::new(5.0, 1.0, 0.0), 1e-9));
+        assert!(pl.contains_point(Vector3::new(4.0, 1.0, 0.0), 1e-9));
+    }
+
+    #[test]
+    fn test_polyline_contains_point_open_false() {
+        let pl = Polyline::from_points(vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(4.0, 0.0, 0.0),
+            Vector3::new(4.0, 3.0, 0.0),
+        ]);
+        assert!(!pl.contains_point(Vector3::new(1.0, 1.0, 0.0), 1e-9));
+    }
+
     // ── Polyline2D tests ─────────────────────────────────────────────
 
     fn make_rect_2d() -> Polyline2D {
@@ -735,6 +933,36 @@ mod tests {
         pl.add_vertex(Vertex2D::new(Vector3::new(1.0, 0.0, 0.0)));
         pl.add_vertex(Vertex2D::new(Vector3::new(1.0, 1.0, 0.0)));
         assert_eq!(pl.area(), 0.0); // not closed
+    }
+
+    #[test]
+    fn test_polyline2d_closest_point() {
+        let mut pl = Polyline2D::new();
+        pl.add_vertex(Vertex2D::new(Vector3::new(0.0, 0.0, 0.0)));
+        pl.add_vertex(Vertex2D::new(Vector3::new(10.0, 0.0, 0.0)));
+        let cp = pl.closest_point(Vector3::new(4.0, 2.0, 0.0)).unwrap();
+        assert!((cp.x - 4.0).abs() < 1e-10);
+        assert!(cp.y.abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_polyline2d_distance_to_point() {
+        let mut pl = Polyline2D::new();
+        pl.add_vertex(Vertex2D::new(Vector3::new(0.0, 0.0, 0.0)));
+        pl.add_vertex(Vertex2D::new(Vector3::new(10.0, 0.0, 0.0)));
+        let d = pl.distance_to_point(Vector3::new(4.0, 2.0, 0.0)).unwrap();
+        assert!((d - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_polyline2d_contains_point_closed() {
+        let mut pl = make_rect_2d();
+        assert!(pl.contains_point(Vector3::new(2.0, 1.0, 0.0), 1e-9));
+        assert!(!pl.contains_point(Vector3::new(10.0, 1.0, 0.0), 1e-9));
+        assert!(pl.contains_point(Vector3::new(4.0, 1.0, 0.0), 1e-9));
+
+        pl.flags.set_closed(false);
+        assert!(!pl.contains_point(Vector3::new(2.0, 1.0, 0.0), 1e-9));
     }
 }
 

@@ -248,6 +248,89 @@ impl Spline {
         }
         points
     }
+
+    /// Approximate the unit tangent direction at normalized parameter `t`.
+    ///
+    /// Uses finite differences in parameter space.
+    pub fn tangent_at(&self, t: f64) -> Option<Vector3> {
+        let h = 1e-4;
+        let t0 = (t - h).clamp(0.0, 1.0);
+        let t1 = (t + h).clamp(0.0, 1.0);
+        if (t1 - t0).abs() < 1e-14 {
+            return None;
+        }
+        let p0 = self.point_at(t0)?;
+        let p1 = self.point_at(t1)?;
+        let d = (p1 - p0) / (t1 - t0);
+        let len = d.length();
+        if len < 1e-14 {
+            None
+        } else {
+            Some(d / len)
+        }
+    }
+
+    /// Approximate curvature magnitude at normalized parameter `t`.
+    ///
+    /// Uses first and second derivatives approximated by finite differences.
+    pub fn curvature_at(&self, t: f64) -> Option<f64> {
+        let h = 1e-3;
+        let t = t.clamp(0.0, 1.0);
+        if t <= h || t >= 1.0 - h {
+            return None;
+        }
+
+        let pm = self.point_at(t - h)?;
+        let p0 = self.point_at(t)?;
+        let pp = self.point_at(t + h)?;
+
+        let v = (pp - pm) / (2.0 * h);
+        let a = (pp - p0 * 2.0 + pm) / (h * h);
+        let speed = v.length();
+        if speed < 1e-14 {
+            return None;
+        }
+        let numer = v.cross(&a).length();
+        Some(numer / speed.powi(3))
+    }
+
+    /// Approximate the closest point on the spline to a query point.
+    ///
+    /// The spline is tessellated, then each line segment is tested.
+    pub fn closest_point(&self, point: Vector3) -> Option<Vector3> {
+        let pts = self.tessellate(256);
+        if pts.len() < 2 {
+            return None;
+        }
+
+        let mut best = pts[0];
+        let mut best_d2 = f64::INFINITY;
+        for i in 0..pts.len() - 1 {
+            let cp = closest_point_on_segment(point, pts[i], pts[i + 1]);
+            let d2 = (point - cp).length_squared();
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best = cp;
+            }
+        }
+        Some(best)
+    }
+
+    /// Approximate the minimum distance from the spline to a query point.
+    pub fn distance_to_point(&self, point: Vector3) -> Option<f64> {
+        let cp = self.closest_point(point)?;
+        Some((point - cp).length())
+    }
+}
+
+fn closest_point_on_segment(p: Vector3, a: Vector3, b: Vector3) -> Vector3 {
+    let ab = b - a;
+    let ab2 = ab.length_squared();
+    if ab2 < 1e-20 {
+        return a;
+    }
+    let t = ((p - a).dot(&ab) / ab2).clamp(0.0, 1.0);
+    a + ab * t
 }
 
 impl Default for Spline {
@@ -325,6 +408,11 @@ impl Entity for Spline {
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
         super::transform::transform_spline(self, transform);
+    }
+
+    fn apply_mirror(&mut self, transform: &crate::types::Transform) {
+        // SPLINE does not need post-mirror winding fixes like ARC/LWPOLYLINE.
+        self.apply_transform(transform);
     }
 }
 
@@ -436,5 +524,57 @@ mod tests {
     fn test_spline_approx_length_empty() {
         let s = Spline::new();
         assert_eq!(s.approx_length(100), 0.0);
+    }
+
+    #[test]
+    fn test_spline_tangent_linear() {
+        let s = linear_spline();
+        let t = s.tangent_at(0.25).unwrap();
+        assert!((t.x - 1.0).abs() < 1e-6);
+        assert!(t.y.abs() < 1e-6);
+        assert!(t.z.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_spline_curvature_linear_zero() {
+        let s = linear_spline();
+        let k = s.curvature_at(0.5).unwrap();
+        assert!(k.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_spline_tangent_cubic_exists() {
+        let s = cubic_spline();
+        let t = s.tangent_at(0.5).unwrap();
+        assert!((t.length() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_spline_curvature_cubic_positive() {
+        let s = cubic_spline();
+        let k = s.curvature_at(0.5).unwrap();
+        assert!(k > 0.0);
+    }
+
+    #[test]
+    fn test_spline_closest_point_linear() {
+        let s = linear_spline();
+        let cp = s.closest_point(Vector3::new(4.0, 3.0, 0.0)).unwrap();
+        assert!((cp.x - 4.0).abs() < 0.05);
+        assert!(cp.y.abs() < 0.05);
+    }
+
+    #[test]
+    fn test_spline_distance_to_point_linear() {
+        let s = linear_spline();
+        let d = s.distance_to_point(Vector3::new(4.0, 3.0, 0.0)).unwrap();
+        assert!((d - 3.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn test_spline_closest_point_empty() {
+        let s = Spline::new();
+        assert!(s.closest_point(Vector3::ZERO).is_none());
+        assert!(s.distance_to_point(Vector3::ZERO).is_none());
     }
 }
