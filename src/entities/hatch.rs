@@ -546,6 +546,60 @@ impl Hatch {
     pub fn has_paths(&self) -> bool {
         !self.paths.is_empty()
     }
+
+    /// Create a solid-fill hatch bounded by a rectangle.
+    ///
+    /// `p1` and `p2` are opposite corners of the rectangle.
+    pub fn from_rectangle(p1: Vector2, p2: Vector2) -> Self {
+        let verts = vec![
+            p1,
+            Vector2::new(p2.x, p1.y),
+            p2,
+            Vector2::new(p1.x, p2.y),
+        ];
+        let mut path = BoundaryPath::external();
+        path.add_edge(BoundaryEdge::Polyline(PolylineEdge::new(verts, true)));
+        let mut hatch = Self::solid();
+        hatch.add_path(path);
+        hatch.add_seed_point(Vector2::new(
+            (p1.x + p2.x) / 2.0,
+            (p1.y + p2.y) / 2.0,
+        ));
+        hatch
+    }
+
+    /// Create a solid-fill hatch bounded by a circle.
+    pub fn from_circle(center: Vector2, radius: f64) -> Self {
+        let mut path = BoundaryPath::external();
+        path.add_edge(BoundaryEdge::CircularArc(CircularArcEdge {
+            center,
+            radius,
+            start_angle: 0.0,
+            end_angle: 2.0 * std::f64::consts::PI,
+            counter_clockwise: true,
+        }));
+        let mut hatch = Self::solid();
+        hatch.add_path(path);
+        hatch.add_seed_point(center);
+        hatch
+    }
+
+    /// Create a solid-fill hatch bounded by a closed polyline of 2D points.
+    pub fn from_polyline(points: Vec<Vector2>) -> Self {
+        let centroid = if points.is_empty() {
+            Vector2::new(0.0, 0.0)
+        } else {
+            let n = points.len() as f64;
+            let (sx, sy) = points.iter().fold((0.0, 0.0), |(sx, sy), v| (sx + v.x, sy + v.y));
+            Vector2::new(sx / n, sy / n)
+        };
+        let mut path = BoundaryPath::external();
+        path.add_edge(BoundaryEdge::Polyline(PolylineEdge::new(points, true)));
+        let mut hatch = Self::solid();
+        hatch.add_path(path);
+        hatch.add_seed_point(centroid);
+        hatch
+    }
 }
 
 impl Default for Hatch {

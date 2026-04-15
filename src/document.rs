@@ -2019,6 +2019,62 @@ impl CadDocument {
         self.entities.iter_mut().filter_map(T::from_entity_type_mut)
     }
 
+    /// Filter entities using an arbitrary predicate.
+    ///
+    /// This is the most flexible query method — use it when the built-in
+    /// filters (`entities_on_layer`, `entities_of_type`, etc.) are not
+    /// sufficient.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line};
+    /// use acadrust::types::Color;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let mut l = Line::from_coords(0.0,0.0,0.0, 1.0,0.0,0.0);
+    /// l.common.color = Color::RED;
+    /// doc.add_entity(EntityType::Line(l)).unwrap();
+    /// doc.add_entity(EntityType::Line(Line::new())).unwrap();
+    ///
+    /// let red: Vec<_> = doc.entities_where(|e| e.common().color == Color::RED).collect();
+    /// assert_eq!(red.len(), 1);
+    /// ```
+    pub fn entities_where<F>(&self, predicate: F) -> impl Iterator<Item = &EntityType>
+    where
+        F: Fn(&EntityType) -> bool,
+    {
+        self.entities.iter().filter(move |e| predicate(e))
+    }
+
+    /// Collect handles of entities that match a predicate.
+    ///
+    /// Convenient for building a [`SelectionSet`](crate::api::selection::SelectionSet)
+    /// from a query.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line};
+    ///
+    /// let mut doc = CadDocument::new();
+    /// doc.add_entity(EntityType::Line(Line::from_coords(0.0,0.0,0.0,5.0,0.0,0.0))).unwrap();
+    /// doc.add_entity(EntityType::Line(Line::from_coords(0.0,0.0,0.0,1.0,0.0,0.0))).unwrap();
+    ///
+    /// let on_zero: Vec<_> = doc.select_where(|e| e.common().layer == "0");
+    /// assert_eq!(on_zero.len(), 2);
+    /// ```
+    pub fn select_where<F>(&self, predicate: F) -> Vec<Handle>
+    where
+        F: Fn(&EntityType) -> bool,
+    {
+        self.entities
+            .iter()
+            .filter(|e| predicate(e))
+            .map(|e| e.common().handle)
+            .collect()
+    }
+
     // ════════════════════════════════════════════════════════════════════
     // Layout Management API
     // ════════════════════════════════════════════════════════════════════

@@ -147,8 +147,8 @@ pub use types::{
 
 // Re-export entity types
 pub use entities::{
-    Arc, Circle, Ellipse, Entity, EntityType, EntityVariant, Line, LwPolyline, MText, Point,
-    Polyline, Spline, Text,
+    Arc, Circle, Ellipse, Entity, EntityType, EntityVariant, Hatch, Insert, Leader, Line,
+    LwPolyline, MText, Point, Polyline, Spline, Text,
 };
 
 // Re-export table types
@@ -157,7 +157,7 @@ pub use tables::{
 };
 
 // Re-export document
-pub use document::CadDocument;
+pub use document::{CadDocument, Severity, ValidationIssue};
 
 // Re-export I/O types
 pub use io::dxf::{DxfReader, DxfWriter};

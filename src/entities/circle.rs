@@ -59,6 +59,48 @@ impl Circle {
     pub fn area(&self) -> f64 {
         std::f64::consts::PI * self.radius * self.radius
     }
+
+    /// Check whether a point lies inside or on the circle (2D, ignoring Z).
+    pub fn contains_point(&self, point: Vector3) -> bool {
+        let dx = point.x - self.center.x;
+        let dy = point.y - self.center.y;
+        dx * dx + dy * dy <= self.radius * self.radius + 1e-10
+    }
+
+    /// Return the closest point on the circle perimeter to the given point.
+    ///
+    /// If the point coincides with the center, returns the point at angle 0.
+    pub fn closest_point(&self, point: Vector3) -> Vector3 {
+        let dx = point.x - self.center.x;
+        let dy = point.y - self.center.y;
+        let dist = (dx * dx + dy * dy).sqrt();
+        if dist < 1e-20 {
+            // Point is at the center — pick the rightmost point
+            return Vector3::new(self.center.x + self.radius, self.center.y, self.center.z);
+        }
+        let scale = self.radius / dist;
+        Vector3::new(
+            self.center.x + dx * scale,
+            self.center.y + dy * scale,
+            self.center.z,
+        )
+    }
+
+    /// Return the minimum distance from a point to the circle perimeter.
+    pub fn distance_to_point(&self, point: Vector3) -> f64 {
+        let dx = point.x - self.center.x;
+        let dy = point.y - self.center.y;
+        ((dx * dx + dy * dy).sqrt() - self.radius).abs()
+    }
+
+    /// Return the point on the circle at a given angle (in radians).
+    pub fn point_at_angle(&self, angle: f64) -> Vector3 {
+        Vector3::new(
+            self.center.x + self.radius * angle.cos(),
+            self.center.y + self.radius * angle.sin(),
+            self.center.z,
+        )
+    }
 }
 
 impl Default for Circle {

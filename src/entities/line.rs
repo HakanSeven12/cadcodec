@@ -63,6 +63,27 @@ impl Line {
             (self.start.z + self.end.z) / 2.0,
         )
     }
+
+    /// Return the closest point on the line **segment** to the given point.
+    pub fn closest_point(&self, point: Vector3) -> Vector3 {
+        let ab = self.end - self.start;
+        let len_sq = ab.dot(&ab);
+        if len_sq < 1e-20 {
+            return self.start; // degenerate (zero-length) segment
+        }
+        let t = ((point - self.start).dot(&ab) / len_sq).clamp(0.0, 1.0);
+        self.start + ab * t
+    }
+
+    /// Return the minimum distance from a point to the line segment.
+    pub fn distance_to_point(&self, point: Vector3) -> f64 {
+        point.distance(&self.closest_point(point))
+    }
+
+    /// Return the point at parameter `t` along the line (0 = start, 1 = end).
+    pub fn point_at(&self, t: f64) -> Vector3 {
+        self.start + (self.end - self.start) * t
+    }
 }
 
 impl Default for Line {
