@@ -139,6 +139,115 @@ impl Spline {
     pub fn add_knot(&mut self, knot: f64) {
         self.knots.push(knot);
     }
+
+    /// Evaluate a single B-spline basis function N_{i,p}(t) using the
+    /// Cox-de Boor recursion.
+    fn basis(i: usize, p: usize, t: f64, knots: &[f64]) -> f64 {
+        if p == 0 {
+            return if knots[i] <= t && t < knots[i + 1] { 1.0 } else { 0.0 };
+        }
+        let mut val = 0.0;
+        let denom1 = knots[i + p] - knots[i];
+        if denom1.abs() > 1e-14 {
+            val += (t - knots[i]) / denom1 * Self::basis(i, p - 1, t, knots);
+        }
+        let denom2 = knots[i + p + 1] - knots[i + 1];
+        if denom2.abs() > 1e-14 {
+            val += (knots[i + p + 1] - t) / denom2 * Self::basis(i + 1, p - 1, t, knots);
+        }
+        val
+    }
+
+    /// Evaluate the spline at parameter `t` (in the knot domain).
+    ///
+    /// For a clamped knot vector this is typically `[0, 1]`.
+    /// Uses the Cox-de Boor algorithm.
+    ///
+    /// Returns `None` if the spline has no control points or knots.
+    pub fn evaluate(&self, t: f64) -> Option<Vector3> {
+        let n = self.control_points.len();
+        let p = self.degree as usize;
+        if n == 0 || self.knots.len() < n + p + 1 {
+            return None;
+        }
+        // Clamp t to the valid range to handle endpoint evaluation
+        let t_min = self.knots[p];
+        let t_max = self.knots[n];
+        let t_clamped = if (t - t_max).abs() < 1e-14 {
+            t_max - 1e-14
+        } else {
+            t.clamp(t_min, t_max)
+        };
+        let mut point = Vector3::ZERO;
+        let rational = !self.weights.is_empty() && self.weights.len() == n;
+        let mut w_sum = 0.0;
+        for i in 0..n {
+            let b = Self::basis(i, p, t_clamped, &self.knots);
+            let w = if rational { self.weights[i] } else { 1.0 };
+            let bw = b * w;
+            point = Vector3::new(
+                point.x + self.control_points[i].x * bw,
+                point.y + self.control_points[i].y * bw,
+                point.z + self.control_points[i].z * bw,
+            );
+            w_sum += bw;
+        }
+        if w_sum.abs() < 1e-20 {
+            return None;
+        }
+        Some(Vector3::new(point.x / w_sum, point.y / w_sum, point.z / w_sum))
+    }
+
+    /// Evaluate the spline at a normalized parameter `t` in `[0, 1]`.
+    ///
+    /// `t = 0` → start of the spline, `t = 1` → end.
+    pub fn point_at(&self, t: f64) -> Option<Vector3> {
+        let n = self.control_points.len();
+        let p = self.degree as usize;
+        if n == 0 || self.knots.len() < n + p + 1 {
+            return None;
+        }
+        let t_min = self.knots[p];
+        let t_max = self.knots[n];
+        let knot_t = t_min + t * (t_max - t_min);
+        self.evaluate(knot_t)
+    }
+
+    /// Approximate the arc-length of the spline by evaluating many points.
+    ///
+    /// `segments` controls the accuracy — more segments yield a more
+    /// accurate result.
+    pub fn approx_length(&self, segments: usize) -> f64 {
+        let segments = segments.max(1);
+        let mut length = 0.0;
+        let mut prev = match self.point_at(0.0) {
+            Some(p) => p,
+            None => return 0.0,
+        };
+        for i in 1..=segments {
+            let t = i as f64 / segments as f64;
+            if let Some(p) = self.point_at(t) {
+                length += (p - prev).length();
+                prev = p;
+            }
+        }
+        length
+    }
+
+    /// Convert the spline to a sequence of line segments (tessellation).
+    ///
+    /// Returns `segments + 1` points that approximate the curve.
+    pub fn tessellate(&self, segments: usize) -> Vec<Vector3> {
+        let segments = segments.max(1);
+        let mut points = Vec::with_capacity(segments + 1);
+        for i in 0..=segments {
+            let t = i as f64 / segments as f64;
+            if let Some(p) = self.point_at(t) {
+                points.push(p);
+            }
+        }
+        points
+    }
 }
 
 impl Default for Spline {
@@ -219,4 +328,113 @@ impl Entity for Spline {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    fn linear_spline() -> Spline {
+        // Degree-1 linear spline from (0,0,0) to (10,0,0)
+        Spline::from_control_points(1, vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
+        ])
+    }
+
+    fn cubic_spline() -> Spline {
+        Spline::from_control_points(3, vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 2.0, 0.0),
+            Vector3::new(3.0, 2.0, 0.0),
+            Vector3::new(4.0, 0.0, 0.0),
+        ])
+    }
+
+    #[test]
+    fn test_spline_evaluate_linear_start() {
+        let s = linear_spline();
+        let p = s.evaluate(0.0).unwrap();
+        assert!((p.x).abs() < 1e-8);
+    }
+
+    #[test]
+    fn test_spline_evaluate_linear_end() {
+        let s = linear_spline();
+        let p = s.point_at(1.0).unwrap();
+        assert!((p.x - 10.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn test_spline_evaluate_linear_mid() {
+        let s = linear_spline();
+        let p = s.point_at(0.5).unwrap();
+        assert!((p.x - 5.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn test_spline_point_at_cubic_endpoints() {
+        let s = cubic_spline();
+        let start = s.point_at(0.0).unwrap();
+        let end = s.point_at(1.0).unwrap();
+        assert!((start.x).abs() < 1e-6);
+        assert!((start.y).abs() < 1e-6);
+        assert!((end.x - 4.0).abs() < 1e-6);
+        assert!((end.y).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_spline_point_at_cubic_midpoint() {
+        let s = cubic_spline();
+        let mid = s.point_at(0.5).unwrap();
+        // midpoint should be roughly between control points
+        assert!(mid.x > 0.5 && mid.x < 3.5);
+        assert!(mid.y > 0.0);
+    }
+
+    #[test]
+    fn test_spline_approx_length_linear() {
+        let s = linear_spline();
+        let len = s.approx_length(100);
+        assert!((len - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_spline_approx_length_cubic() {
+        let s = cubic_spline();
+        let len = s.approx_length(200);
+        // The arc length of this cubic should be > chord length of 4.0
+        assert!(len > 4.0);
+    }
+
+    #[test]
+    fn test_spline_tessellate() {
+        let s = cubic_spline();
+        let pts = s.tessellate(10);
+        assert_eq!(pts.len(), 11);
+        assert!((pts[0].x).abs() < 1e-6);
+        assert!((pts[10].x - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_spline_tessellate_linear() {
+        let s = linear_spline();
+        let pts = s.tessellate(4);
+        assert_eq!(pts.len(), 5);
+        for (i, p) in pts.iter().enumerate() {
+            let expected_x = 10.0 * i as f64 / 4.0;
+            assert!((p.x - expected_x).abs() < 0.1);
+        }
+    }
+
+    #[test]
+    fn test_spline_evaluate_empty() {
+        let s = Spline::new();
+        assert!(s.evaluate(0.5).is_none());
+        assert!(s.point_at(0.5).is_none());
+    }
+
+    #[test]
+    fn test_spline_approx_length_empty() {
+        let s = Spline::new();
+        assert_eq!(s.approx_length(100), 0.0);
+    }
+}

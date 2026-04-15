@@ -2019,6 +2019,246 @@ impl CadDocument {
         self.entities.iter_mut().filter_map(T::from_entity_type_mut)
     }
 
+    /// Search for entities that contain the given text (case-insensitive).
+    ///
+    /// Examines [`Text`](crate::entities::Text) and [`MText`](crate::entities::MText)
+    /// entities and returns those whose `value` field contains `query`.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Text, MText};
+    /// use acadrust::types::Vector3;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let mut t = Text::new();
+    /// t.value = "Hello World".to_string();
+    /// doc.add_entity(EntityType::Text(t)).unwrap();
+    /// let mut mt = MText::new();
+    /// mt.value = "Goodbye".to_string();
+    /// doc.add_entity(EntityType::MText(mt)).unwrap();
+    ///
+    /// let found: Vec<_> = doc.entities_with_text("hello").collect();
+    /// assert_eq!(found.len(), 1);
+    /// ```
+    pub fn entities_with_text<'a>(&'a self, query: &'a str) -> impl Iterator<Item = &'a EntityType> + 'a {
+        let q = query.to_lowercase();
+        self.entities.iter().filter(move |e| {
+            match e {
+                EntityType::Text(t) => t.value.to_lowercase().contains(&q),
+                EntityType::MText(t) => t.value.to_lowercase().contains(&q),
+                _ => false,
+            }
+        })
+    }
+
+    /// Return all text values found in the document.
+    ///
+    /// Collects the `value` field from every `Text` and `MText` entity.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Text};
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let mut t = Text::new();
+    /// t.value = "Note A".to_string();
+    /// doc.add_entity(EntityType::Text(t)).unwrap();
+    /// assert_eq!(doc.text_values().len(), 1);
+    /// ```
+    pub fn text_values(&self) -> Vec<&str> {
+        self.entities.iter().filter_map(|e| {
+            match e {
+                EntityType::Text(t) => Some(t.value.as_str()),
+                EntityType::MText(t) => Some(t.value.as_str()),
+                _ => None,
+            }
+        }).collect()
+    }
+
+    /// Return a count of entities grouped by their type name.
+    ///
+    /// The keys are the strings returned by [`Entity::entity_type()`], e.g.
+    /// `"LINE"`, `"CIRCLE"`, `"ARC"`.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line, Circle};
+    ///
+    /// let mut doc = CadDocument::new();
+    /// doc.add_entity(EntityType::Line(Line::new())).unwrap();
+    /// doc.add_entity(EntityType::Line(Line::new())).unwrap();
+    /// doc.add_entity(EntityType::Circle(Circle::new())).unwrap();
+    ///
+    /// let counts = doc.entity_type_counts();
+    /// assert_eq!(counts["LINE"], 2);
+    /// assert_eq!(counts["CIRCLE"], 1);
+    /// ```
+    pub fn entity_type_counts(&self) -> HashMap<&str, usize> {
+        let mut counts = HashMap::new();
+        for e in &self.entities {
+            *counts.entry(e.as_entity().entity_type()).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// Open a DWG or DXF file, auto-detecting the format from the file extension.
+    ///
+    /// Supported extensions: `.dwg`, `.dxf` (case-insensitive).
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use acadrust::CadDocument;
+    ///
+    /// let doc = CadDocument::from_file("drawing.dwg").unwrap();
+    /// let doc = CadDocument::from_file("drawing.dxf").unwrap();
+    /// ```
+    pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> crate::Result<Self> {
+        let path = path.as_ref();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        match ext.as_str() {
+            "dwg" => {
+                let mut reader = crate::io::dwg::DwgReader::from_file(path)?;
+                reader.read()
+            }
+            "dxf" => {
+                let reader = crate::io::dxf::DxfReader::from_file(path)?;
+                reader.read()
+            }
+            _ => Err(crate::error::DxfError::InvalidFormat(format!(
+                "Unsupported file extension: '{}'. Use .dwg or .dxf",
+                ext,
+            ))),
+        }
+    }
+
+    /// Save the document to a DWG or DXF file, auto-detecting the format
+    /// from the file extension.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use acadrust::CadDocument;
+    ///
+    /// let doc = CadDocument::new();
+    /// doc.save("output.dxf").unwrap();
+    /// doc.save("output.dwg").unwrap();
+    /// ```
+    pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> crate::Result<()> {
+        let path = path.as_ref();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        match ext.as_str() {
+            "dwg" => crate::io::dwg::DwgWriter::write_to_file(path, self),
+            "dxf" => {
+                let writer = crate::io::dxf::DxfWriter::new(self);
+                writer.write_to_file(path)
+            }
+            _ => Err(crate::error::DxfError::InvalidFormat(format!(
+                "Unsupported file extension for save: '{}'. Use .dwg or .dxf",
+                ext,
+            ))),
+        }
+    }
+
+    /// Move (translate) an entity by the given offset.
+    ///
+    /// Returns `false` if the handle was not found.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line};
+    /// use acadrust::types::Vector3;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let h = doc.add_entity(EntityType::Line(Line::from_coords(0.0,0.0,0.0,1.0,0.0,0.0))).unwrap();
+    /// assert!(doc.move_entity(h, Vector3::new(10.0, 0.0, 0.0)));
+    /// ```
+    pub fn move_entity(&mut self, handle: crate::types::Handle, offset: Vector3) -> bool {
+        if let Some(&idx) = self.entity_index.get(&handle) {
+            self.entities[idx].as_entity_mut().translate(offset);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Rotate an entity around a center point by the given angle (in radians, Z-axis).
+    ///
+    /// Returns `false` if the handle was not found.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line};
+    /// use acadrust::types::Vector3;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let h = doc.add_entity(EntityType::Line(Line::from_coords(1.0,0.0,0.0,2.0,0.0,0.0))).unwrap();
+    /// doc.rotate_entity(h, Vector3::ZERO, std::f64::consts::FRAC_PI_2);
+    /// ```
+    pub fn rotate_entity(
+        &mut self,
+        handle: crate::types::Handle,
+        center: Vector3,
+        angle: f64,
+    ) -> bool {
+        if let Some(&idx) = self.entity_index.get(&handle) {
+            // translate to origin, rotate around Z, translate back
+            let t_to_origin = crate::types::Transform::from_translation(-center);
+            let rotation = crate::types::Transform::from_rotation(Vector3::UNIT_Z, angle);
+            let t_back = crate::types::Transform::from_translation(center);
+            let combined = t_to_origin.then(&rotation).then(&t_back);
+            self.entities[idx].as_entity_mut().apply_transform(&combined);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Scale an entity from a base point by the given factor.
+    ///
+    /// Returns `false` if the handle was not found.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Circle};
+    /// use acadrust::types::Vector3;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let h = doc.add_entity(EntityType::Circle(Circle::from_center_radius(
+    ///     Vector3::new(5.0, 5.0, 0.0), 1.0,
+    /// ))).unwrap();
+    /// doc.scale_entity(h, Vector3::ZERO, 2.0);
+    /// ```
+    pub fn scale_entity(
+        &mut self,
+        handle: crate::types::Handle,
+        base_point: Vector3,
+        factor: f64,
+    ) -> bool {
+        if let Some(&idx) = self.entity_index.get(&handle) {
+            let transform = crate::types::Transform::from_scaling_with_origin(
+                Vector3::new(factor, factor, factor),
+                base_point,
+            );
+            self.entities[idx].as_entity_mut().apply_transform(&transform);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Filter entities using an arbitrary predicate.
     ///
     /// This is the most flexible query method — use it when the built-in
@@ -3294,4 +3534,178 @@ impl Default for CadDocument {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entities::*;
+
+    // ── Text search tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_entities_with_text_case_insensitive() {
+        let mut doc = CadDocument::new();
+        let mut t = Text::new();
+        t.value = "Hello World".into();
+        doc.add_entity(EntityType::Text(t)).unwrap();
+        let mut mt = MText::new();
+        mt.value = "Goodbye".into();
+        doc.add_entity(EntityType::MText(mt)).unwrap();
+
+        let found: Vec<_> = doc.entities_with_text("hello").collect();
+        assert_eq!(found.len(), 1);
+
+        let found: Vec<_> = doc.entities_with_text("GOODBYE").collect();
+        assert_eq!(found.len(), 1);
+    }
+
+    #[test]
+    fn test_entities_with_text_partial_match() {
+        let mut doc = CadDocument::new();
+        let mut t = Text::new();
+        t.value = "ROOM 101".into();
+        doc.add_entity(EntityType::Text(t)).unwrap();
+        let mut t2 = Text::new();
+        t2.value = "ROOM 202".into();
+        doc.add_entity(EntityType::Text(t2)).unwrap();
+
+        assert_eq!(doc.entities_with_text("room").count(), 2);
+        assert_eq!(doc.entities_with_text("101").count(), 1);
+        assert_eq!(doc.entities_with_text("xyz").count(), 0);
+    }
+
+    #[test]
+    fn test_entities_with_text_no_text_entities() {
+        let mut doc = CadDocument::new();
+        doc.add_entity(EntityType::Line(Line::new())).unwrap();
+        assert_eq!(doc.entities_with_text("anything").count(), 0);
+    }
+
+    #[test]
+    fn test_text_values() {
+        let mut doc = CadDocument::new();
+        let mut t = Text::new();
+        t.value = "A".into();
+        doc.add_entity(EntityType::Text(t)).unwrap();
+        let mut mt = MText::new();
+        mt.value = "B".into();
+        doc.add_entity(EntityType::MText(mt)).unwrap();
+        doc.add_entity(EntityType::Line(Line::new())).unwrap();
+
+        let values = doc.text_values();
+        assert_eq!(values.len(), 2);
+        assert!(values.contains(&"A"));
+        assert!(values.contains(&"B"));
+    }
+
+    // ── Entity type counts tests ─────────────────────────────────────
+
+    #[test]
+    fn test_entity_type_counts_empty() {
+        let doc = CadDocument::new();
+        assert!(doc.entity_type_counts().is_empty());
+    }
+
+    #[test]
+    fn test_entity_type_counts_mixed() {
+        let mut doc = CadDocument::new();
+        doc.add_entity(EntityType::Line(Line::new())).unwrap();
+        doc.add_entity(EntityType::Line(Line::new())).unwrap();
+        doc.add_entity(EntityType::Circle(Circle::new())).unwrap();
+        doc.add_entity(EntityType::Arc(Arc::new())).unwrap();
+
+        let counts = doc.entity_type_counts();
+        assert_eq!(counts["LINE"], 2);
+        assert_eq!(counts["CIRCLE"], 1);
+        assert_eq!(counts["ARC"], 1);
+        assert_eq!(counts.len(), 3);
+    }
+
+    // ── from_file / save tests ───────────────────────────────────────
+
+    #[test]
+    fn test_from_file_bad_extension() {
+        let result = CadDocument::from_file("test.xyz");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_save_bad_extension() {
+        let doc = CadDocument::new();
+        let result = doc.save("test.txt");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_file_nonexistent() {
+        let result = CadDocument::from_file("nonexistent.dxf");
+        assert!(result.is_err());
+        let result = CadDocument::from_file("nonexistent.dwg");
+        assert!(result.is_err());
+    }
+
+    // ── Document-level transform tests ───────────────────────────────
+
+    #[test]
+    fn test_move_entity() {
+        let mut doc = CadDocument::new();
+        let h = doc
+            .add_entity(EntityType::Line(Line::from_coords(0.0, 0.0, 0.0, 1.0, 0.0, 0.0)))
+            .unwrap();
+        assert!(doc.move_entity(h, Vector3::new(10.0, 20.0, 0.0)));
+
+        let line = doc.entities_of_type::<Line>().next().unwrap();
+        assert!((line.start.x - 10.0).abs() < 1e-10);
+        assert!((line.start.y - 20.0).abs() < 1e-10);
+        assert!((line.end.x - 11.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_move_entity_not_found() {
+        let mut doc = CadDocument::new();
+        assert!(!doc.move_entity(Handle::new(999), Vector3::new(1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn test_rotate_entity() {
+        use std::f64::consts::FRAC_PI_2;
+        let mut doc = CadDocument::new();
+        let h = doc
+            .add_entity(EntityType::Line(Line::from_coords(1.0, 0.0, 0.0, 2.0, 0.0, 0.0)))
+            .unwrap();
+        doc.rotate_entity(h, Vector3::ZERO, FRAC_PI_2);
+
+        let line = doc.entities_of_type::<Line>().next().unwrap();
+        // After 90° CCW rotation: (1,0)→(0,1), (2,0)→(0,2)
+        assert!(line.start.x.abs() < 1e-8);
+        assert!((line.start.y - 1.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn test_rotate_entity_not_found() {
+        let mut doc = CadDocument::new();
+        assert!(!doc.rotate_entity(Handle::new(999), Vector3::ZERO, 1.0));
+    }
+
+    #[test]
+    fn test_scale_entity() {
+        let mut doc = CadDocument::new();
+        let h = doc
+            .add_entity(EntityType::Circle(Circle::from_center_radius(
+                Vector3::new(5.0, 5.0, 0.0),
+                1.0,
+            )))
+            .unwrap();
+        doc.scale_entity(h, Vector3::ZERO, 2.0);
+
+        let circle = doc.entities_of_type::<Circle>().next().unwrap();
+        assert!((circle.center.x - 10.0).abs() < 1e-8);
+        assert!((circle.center.y - 10.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn test_scale_entity_not_found() {
+        let mut doc = CadDocument::new();
+        assert!(!doc.scale_entity(Handle::new(999), Vector3::ZERO, 2.0));
+    }
+}
 

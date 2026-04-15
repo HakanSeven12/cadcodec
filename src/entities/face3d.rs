@@ -174,6 +174,50 @@ impl Face3D {
             area1 + area2
         }
     }
+
+    /// Compute the face normal (unit vector perpendicular to the face).
+    ///
+    /// Uses the cross product of two edges. Returns `None` if the face
+    /// is degenerate (zero-area).
+    pub fn normal(&self) -> Option<Vector3> {
+        let v1 = self.second_corner - self.first_corner;
+        let v2 = self.third_corner - self.first_corner;
+        let n = v1.cross(&v2);
+        let len = n.length();
+        if len < 1e-14 {
+            return None;
+        }
+        Some(Vector3::new(n.x / len, n.y / len, n.z / len))
+    }
+
+    /// Compute the centroid (geometric center) of the face.
+    pub fn centroid(&self) -> Vector3 {
+        if self.is_triangle() {
+            Vector3::new(
+                (self.first_corner.x + self.second_corner.x + self.third_corner.x) / 3.0,
+                (self.first_corner.y + self.second_corner.y + self.third_corner.y) / 3.0,
+                (self.first_corner.z + self.second_corner.z + self.third_corner.z) / 3.0,
+            )
+        } else {
+            Vector3::new(
+                (self.first_corner.x + self.second_corner.x + self.third_corner.x + self.fourth_corner.x) / 4.0,
+                (self.first_corner.y + self.second_corner.y + self.third_corner.y + self.fourth_corner.y) / 4.0,
+                (self.first_corner.z + self.second_corner.z + self.third_corner.z + self.fourth_corner.z) / 4.0,
+            )
+        }
+    }
+
+    /// Check whether a point lies on the plane of this face.
+    ///
+    /// Returns `true` if the point is within `tolerance` of the face plane.
+    pub fn is_point_on_plane(&self, point: Vector3, tolerance: f64) -> bool {
+        if let Some(n) = self.normal() {
+            let d = point - self.first_corner;
+            (d.x * n.x + d.y * n.y + d.z * n.z).abs() < tolerance
+        } else {
+            false
+        }
+    }
 }
 
 impl Entity for Face3D {
@@ -246,4 +290,82 @@ impl Entity for Face3D {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    fn triangle() -> Face3D {
+        Face3D::triangle(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(4.0, 0.0, 0.0),
+            Vector3::new(0.0, 3.0, 0.0),
+        )
+    }
+
+    fn quad() -> Face3D {
+        Face3D::new(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(2.0, 0.0, 0.0),
+            Vector3::new(2.0, 3.0, 0.0),
+            Vector3::new(0.0, 3.0, 0.0),
+        )
+    }
+
+    #[test]
+    fn test_face3d_triangle_area() {
+        let f = triangle();
+        assert!((f.area() - 6.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_face3d_quad_area() {
+        let f = quad();
+        assert!((f.area() - 6.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_face3d_normal_triangle() {
+        let f = triangle();
+        let n = f.normal().unwrap();
+        assert!(n.x.abs() < 1e-10);
+        assert!(n.y.abs() < 1e-10);
+        assert!((n.z - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_face3d_normal_quad() {
+        let f = quad();
+        let n = f.normal().unwrap();
+        assert!((n.z - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_face3d_centroid_triangle() {
+        let f = triangle();
+        let c = f.centroid();
+        assert!((c.x - 4.0 / 3.0).abs() < 1e-10);
+        assert!((c.y - 1.0).abs() < 1e-10);
+        assert!(c.z.abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_face3d_centroid_quad() {
+        let f = quad();
+        let c = f.centroid();
+        assert!((c.x - 1.0).abs() < 1e-10);
+        assert!((c.y - 1.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_face3d_is_point_on_plane() {
+        let f = triangle();
+        assert!(f.is_point_on_plane(Vector3::new(1.0, 1.0, 0.0), 1e-6));
+        assert!(!f.is_point_on_plane(Vector3::new(1.0, 1.0, 1.0), 1e-6));
+    }
+
+    #[test]
+    fn test_face3d_is_triangle() {
+        assert!(triangle().is_triangle());
+        assert!(!quad().is_triangle());
+    }
+}

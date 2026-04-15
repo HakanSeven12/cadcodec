@@ -629,6 +629,98 @@ impl EntityType {
     pub fn bounding_box(&self) -> BoundingBox3D {
         self.as_entity().bounding_box()
     }
+
+    // ── Convenience type-check and downcast helpers ──────────────────
+
+    /// Check whether this entity is of a given concrete type.
+    ///
+    /// ```
+    /// use acadrust::entities::{EntityType, Circle, EntityVariant};
+    /// let et = EntityType::Circle(Circle::new());
+    /// assert!(et.is::<Circle>());
+    /// ```
+    pub fn is<T: EntityVariant>(&self) -> bool {
+        T::from_entity_type(self).is_some()
+    }
+
+    /// Try to downcast to a concrete entity type (immutable).
+    ///
+    /// ```
+    /// use acadrust::entities::{EntityType, Circle, EntityVariant};
+    /// let et = EntityType::Circle(Circle::new());
+    /// assert!(et.downcast_ref::<Circle>().is_some());
+    /// ```
+    pub fn downcast_ref<T: EntityVariant>(&self) -> Option<&T> {
+        T::from_entity_type(self)
+    }
+
+    /// Try to downcast to a concrete entity type (mutable).
+    pub fn downcast_mut<T: EntityVariant>(&mut self) -> Option<&mut T> {
+        T::from_entity_type_mut(self)
+    }
+}
+
+macro_rules! impl_entity_type_helpers {
+    ($($fn_is:ident, $fn_as:ident, $fn_as_mut:ident, $variant:ident, $ty:ty);* $(;)?) => {
+        impl EntityType {
+        $(
+            /// Returns `true` if this entity is the corresponding variant.
+            pub fn $fn_is(&self) -> bool {
+                matches!(self, EntityType::$variant(_))
+            }
+
+            /// Try to get an immutable reference to the inner type.
+            pub fn $fn_as(&self) -> Option<&$ty> {
+                match self {
+                    EntityType::$variant(inner) => Some(inner),
+                    _ => None,
+                }
+            }
+
+            /// Try to get a mutable reference to the inner type.
+            pub fn $fn_as_mut(&mut self) -> Option<&mut $ty> {
+                match self {
+                    EntityType::$variant(inner) => Some(inner),
+                    _ => None,
+                }
+            }
+        )*
+        }
+    };
+}
+
+impl_entity_type_helpers! {
+    is_point, as_point, as_point_mut, Point, Point;
+    is_line, as_line, as_line_mut, Line, Line;
+    is_circle, as_circle, as_circle_mut, Circle, Circle;
+    is_arc, as_arc, as_arc_mut, Arc, Arc;
+    is_ellipse, as_ellipse, as_ellipse_mut, Ellipse, Ellipse;
+    is_polyline, as_polyline, as_polyline_mut, Polyline, Polyline;
+    is_polyline2d, as_polyline2d, as_polyline2d_mut, Polyline2D, Polyline2D;
+    is_lwpolyline, as_lwpolyline, as_lwpolyline_mut, LwPolyline, LwPolyline;
+    is_text, as_text, as_text_mut, Text, Text;
+    is_mtext, as_mtext, as_mtext_mut, MText, MText;
+    is_spline, as_spline, as_spline_mut, Spline, Spline;
+    is_dimension, as_dimension, as_dimension_mut, Dimension, Dimension;
+    is_hatch, as_hatch, as_hatch_mut, Hatch, Hatch;
+    is_solid, as_solid, as_solid_mut, Solid, Solid;
+    is_face3d, as_face3d, as_face3d_mut, Face3D, Face3D;
+    is_insert, as_insert, as_insert_mut, Insert, Insert;
+    is_block, as_block, as_block_mut, Block, Block;
+    is_ray, as_ray, as_ray_mut, Ray, Ray;
+    is_xline, as_xline, as_xline_mut, XLine, XLine;
+    is_viewport, as_viewport, as_viewport_mut, Viewport, Viewport;
+    is_leader, as_leader, as_leader_mut, Leader, Leader;
+    is_multileader, as_multileader, as_multileader_mut, MultiLeader, MultiLeader;
+    is_mline, as_mline, as_mline_mut, MLine, MLine;
+    is_mesh, as_mesh, as_mesh_mut, Mesh, Mesh;
+    is_raster_image, as_raster_image, as_raster_image_mut, RasterImage, RasterImage;
+    is_solid3d, as_solid3d, as_solid3d_mut, Solid3D, Solid3D;
+    is_region, as_region, as_region_mut, Region, Region;
+    is_body, as_body, as_body_mut, Body, Body;
+    is_table, as_table, as_table_mut, Table, Table;
+    is_tolerance, as_tolerance, as_tolerance_mut, Tolerance, Tolerance;
+    is_wipeout, as_wipeout, as_wipeout_mut, Wipeout, Wipeout;
 }
 
 /// Trait for concrete entity types that can be extracted from an [`EntityType`] variant.
@@ -711,3 +803,75 @@ impl_entity_variant!(Ole2Frame, Ole2Frame);
 impl_entity_variant!(PolygonMesh, PolygonMeshEntity);
 impl_entity_variant!(Unknown, UnknownEntity);
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_line() {
+        let et = EntityType::Line(Line::new());
+        assert!(et.is_line());
+        assert!(!et.is_circle());
+        assert!(!et.is_arc());
+    }
+
+    #[test]
+    fn test_is_circle() {
+        let et = EntityType::Circle(Circle::new());
+        assert!(et.is_circle());
+        assert!(!et.is_line());
+    }
+
+    #[test]
+    fn test_as_line() {
+        let et = EntityType::Line(Line::from_coords(0.0, 0.0, 0.0, 1.0, 0.0, 0.0));
+        let l = et.as_line().unwrap();
+        assert!((l.end.x - 1.0).abs() < 1e-10);
+        assert!(et.as_circle().is_none());
+    }
+
+    #[test]
+    fn test_as_circle_mut() {
+        let mut et = EntityType::Circle(Circle::new());
+        et.as_circle_mut().unwrap().radius = 42.0;
+        assert!((et.as_circle().unwrap().radius - 42.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_is_generic() {
+        let et = EntityType::Arc(Arc::new());
+        assert!(et.is::<Arc>());
+        assert!(!et.is::<Circle>());
+    }
+
+    #[test]
+    fn test_downcast_ref() {
+        let et = EntityType::Spline(Spline::new());
+        assert!(et.downcast_ref::<Spline>().is_some());
+        assert!(et.downcast_ref::<Line>().is_none());
+    }
+
+    #[test]
+    fn test_downcast_mut() {
+        let mut et = EntityType::Hatch(Hatch::new());
+        assert!(et.downcast_mut::<Hatch>().is_some());
+        assert!(et.downcast_mut::<Circle>().is_none());
+    }
+
+    #[test]
+    fn test_all_type_checks() {
+        // Spot check several variants
+        assert!(EntityType::Point(Point::new()).is_point());
+        assert!(EntityType::Arc(Arc::new()).is_arc());
+        assert!(EntityType::Ellipse(Ellipse::new()).is_ellipse());
+        assert!(EntityType::Spline(Spline::new()).is_spline());
+        assert!(EntityType::Text(Text::new()).is_text());
+        assert!(EntityType::MText(MText::new()).is_mtext());
+        assert!(EntityType::Insert(Insert::new("B", Vector3::ZERO)).is_insert());
+        assert!(EntityType::Dimension(Dimension::Linear(
+            crate::entities::dimension::DimensionLinear::new(Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0)),
+        )).is_dimension());
+        assert!(EntityType::Leader(Leader::new()).is_leader());
+        assert!(EntityType::Mesh(Mesh::new()).is_mesh());
+    }
+}

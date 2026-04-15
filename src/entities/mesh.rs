@@ -468,6 +468,39 @@ impl Mesh {
             .map(|(min, max)| (min + max) * 0.5)
     }
 
+    /// Compute the total surface area of the mesh.
+    ///
+    /// Triangulates each face using a fan from the first vertex and sums
+    /// the triangle areas (cross-product / 2).
+    pub fn surface_area(&self) -> f64 {
+        let mut total = 0.0;
+        for face in &self.faces {
+            let vs = &face.vertices;
+            if vs.len() < 3 {
+                continue;
+            }
+            let p0 = self.vertices[vs[0]];
+            for i in 1..vs.len() - 1 {
+                let v1 = self.vertices[vs[i]] - p0;
+                let v2 = self.vertices[vs[i + 1]] - p0;
+                total += v1.cross(&v2).length() * 0.5;
+            }
+        }
+        total
+    }
+
+    /// Compute the centroid of the mesh (average of all vertices).
+    ///
+    /// Returns `None` if the mesh has no vertices.
+    pub fn centroid(&self) -> Option<Vector3> {
+        if self.vertices.is_empty() {
+            return None;
+        }
+        let n = self.vertices.len() as f64;
+        let sum = self.vertices.iter().fold(Vector3::ZERO, |acc, &v| acc + v);
+        Some(Vector3::new(sum.x / n, sum.y / n, sum.z / n))
+    }
+
     /// Reverses all face winding orders.
     pub fn flip_normals(&mut self) {
         for face in &mut self.faces {
@@ -1049,6 +1082,49 @@ mod tests {
         assert_eq!(mesh.face_count(), 1);
         assert_eq!(mesh.subdivision_level, 2);
         assert!(!mesh.blend_crease);
+    }
+
+    #[test]
+    fn test_mesh_surface_area_unit_cube() {
+        let mesh = Mesh::create_unit_cube();
+        // Surface area of unit cube: 6 faces × 1×1 = 6.0
+        let area = mesh.surface_area();
+        assert!((area - 6.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_mesh_surface_area_triangle() {
+        let mesh = Mesh::from_triangles(
+            vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(4.0, 0.0, 0.0),
+                Vector3::new(0.0, 3.0, 0.0),
+            ],
+            &[(0, 1, 2)],
+        );
+        assert!((mesh.surface_area() - 6.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_mesh_surface_area_box() {
+        let mesh = Mesh::create_box(Vector3::ZERO, Vector3::new(2.0, 3.0, 4.0));
+        // SA = 2*(2*3 + 2*4 + 3*4) = 2*(6+8+12) = 52
+        assert!((mesh.surface_area() - 52.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_mesh_centroid_unit_cube() {
+        let mesh = Mesh::create_unit_cube();
+        let c = mesh.centroid().unwrap();
+        assert!(c.x.abs() < 1e-10);
+        assert!(c.y.abs() < 1e-10);
+        assert!(c.z.abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_mesh_centroid_empty() {
+        let mesh = Mesh::new();
+        assert!(mesh.centroid().is_none());
     }
 }
 

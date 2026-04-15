@@ -249,6 +249,84 @@ impl Polyline2D {
     pub fn close(&mut self) {
         self.flags.set_closed(true);
     }
+
+    /// Compute the total length of the 2D polyline.
+    ///
+    /// Handles bulge (arc segments) between vertices. If the polyline is
+    /// closed, includes the closing segment.
+    pub fn length(&self) -> f64 {
+        if self.vertices.len() < 2 {
+            return 0.0;
+        }
+        let n = self.vertices.len();
+        let count = if self.is_closed() { n } else { n - 1 };
+        let mut len = 0.0;
+        for i in 0..count {
+            let j = (i + 1) % n;
+            let p0 = &self.vertices[i].location;
+            let p1 = &self.vertices[j].location;
+            let bulge = self.vertices[i].bulge;
+            let chord = ((p1.x - p0.x).powi(2) + (p1.y - p0.y).powi(2)).sqrt();
+            if bulge.abs() < 1e-10 {
+                len += chord;
+            } else {
+                // Arc segment: arc_length = radius * |sweep|
+                let s = bulge.abs();
+                let radius = chord * (s * s + 1.0) / (4.0 * s);
+                let sweep = 4.0 * s.atan();
+                len += radius * sweep;
+            }
+        }
+        len
+    }
+
+    /// Compute the area of the 2D polyline (closed only).
+    ///
+    /// Accounts for bulge (arc) segments using the circular-segment
+    /// correction.  Returns `0.0` for open polylines or fewer than 3
+    /// vertices.
+    pub fn area(&self) -> f64 {
+        if self.vertices.len() < 3 || !self.is_closed() {
+            return 0.0;
+        }
+        let n = self.vertices.len();
+        let mut sum = 0.0;
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let pi = &self.vertices[i].location;
+            let pj = &self.vertices[j].location;
+            // Shoelace contribution
+            sum += pi.x * pj.y - pj.x * pi.y;
+            // Bulge correction: add signed circular segment area
+            let bulge = self.vertices[i].bulge;
+            if bulge.abs() > 1e-10 {
+                let chord = ((pj.x - pi.x).powi(2) + (pj.y - pi.y).powi(2)).sqrt();
+                let s = bulge.abs();
+                let radius = chord * (s * s + 1.0) / (4.0 * s);
+                let sweep = 4.0 * s.atan();
+                let segment_area = radius * radius * (sweep - sweep.sin()) / 2.0;
+                if bulge > 0.0 {
+                    sum += 2.0 * segment_area;
+                } else {
+                    sum -= 2.0 * segment_area;
+                }
+            }
+        }
+        sum.abs() / 2.0
+    }
+
+    /// Compute the centroid of the polyline vertices.
+    pub fn centroid(&self) -> Vector3 {
+        if self.vertices.is_empty() {
+            return Vector3::ZERO;
+        }
+        let n = self.vertices.len() as f64;
+        let sum = self
+            .vertices
+            .iter()
+            .fold(Vector3::ZERO, |acc, v| acc + v.location);
+        Vector3::new(sum.x / n, sum.y / n, sum.z / n)
+    }
 }
 
 impl Default for Polyline2D {
@@ -312,6 +390,60 @@ impl Polyline {
     /// Close the polyline
     pub fn close(&mut self) {
         self.flags.set_closed(true);
+    }
+
+    /// Compute the total length of the polyline.
+    ///
+    /// Sums the Euclidean distances between consecutive vertices.
+    /// If the polyline is closed, includes the closing segment.
+    pub fn length(&self) -> f64 {
+        if self.vertices.len() < 2 {
+            return 0.0;
+        }
+        let mut len = 0.0;
+        for i in 0..self.vertices.len() - 1 {
+            len += (self.vertices[i + 1].location - self.vertices[i].location).length();
+        }
+        if self.is_closed() && self.vertices.len() > 2 {
+            len += (self.vertices[0].location - self.vertices.last().unwrap().location).length();
+        }
+        len
+    }
+
+    /// Compute the area of the polyline (using the shoelace formula).
+    ///
+    /// Only meaningful for closed, planar polylines. Returns the absolute
+    /// area (always non-negative). For open polylines or fewer than 3
+    /// vertices, returns `0.0`.
+    pub fn area(&self) -> f64 {
+        if self.vertices.len() < 3 || !self.is_closed() {
+            return 0.0;
+        }
+        let n = self.vertices.len();
+        let mut sum = 0.0;
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let pi = &self.vertices[i].location;
+            let pj = &self.vertices[j].location;
+            sum += pi.x * pj.y - pj.x * pi.y;
+        }
+        sum.abs() / 2.0
+    }
+
+    /// Compute the centroid of the polyline vertices.
+    ///
+    /// Returns the arithmetic mean of all vertex positions. Returns
+    /// [`Vector3::ZERO`] if the polyline has no vertices.
+    pub fn centroid(&self) -> Vector3 {
+        if self.vertices.is_empty() {
+            return Vector3::ZERO;
+        }
+        let n = self.vertices.len() as f64;
+        let sum = self
+            .vertices
+            .iter()
+            .fold(Vector3::ZERO, |acc, v| acc + v.location);
+        Vector3::new(sum.x / n, sum.y / n, sum.z / n)
     }
 }
 
@@ -467,4 +599,142 @@ impl Entity for Polyline {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Polyline (3D) tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_polyline_length_open() {
+        let pl = Polyline::from_points(vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(3.0, 0.0, 0.0),
+            Vector3::new(3.0, 4.0, 0.0),
+        ]);
+        // 3 + 4 = 7
+        assert!((pl.length() - 7.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_polyline_length_closed() {
+        let mut pl = Polyline::from_points(vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(3.0, 0.0, 0.0),
+            Vector3::new(3.0, 4.0, 0.0),
+        ]);
+        pl.close();
+        // 3 + 4 + 5 = 12
+        assert!((pl.length() - 12.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_polyline_length_single_vertex() {
+        let pl = Polyline::from_points(vec![Vector3::ZERO]);
+        assert_eq!(pl.length(), 0.0);
+    }
+
+    #[test]
+    fn test_polyline_area_closed_rectangle() {
+        let mut pl = Polyline::from_points(vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(4.0, 0.0, 0.0),
+            Vector3::new(4.0, 3.0, 0.0),
+            Vector3::new(0.0, 3.0, 0.0),
+        ]);
+        pl.close();
+        assert!((pl.area() - 12.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_polyline_area_open_returns_zero() {
+        let pl = Polyline::from_points(vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(4.0, 0.0, 0.0),
+            Vector3::new(4.0, 3.0, 0.0),
+        ]);
+        assert_eq!(pl.area(), 0.0);
+    }
+
+    #[test]
+    fn test_polyline_centroid() {
+        let pl = Polyline::from_points(vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(4.0, 0.0, 0.0),
+            Vector3::new(4.0, 4.0, 0.0),
+            Vector3::new(0.0, 4.0, 0.0),
+        ]);
+        let c = pl.centroid();
+        assert!((c.x - 2.0).abs() < 1e-10);
+        assert!((c.y - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_polyline_centroid_empty() {
+        let pl = Polyline::new();
+        assert_eq!(pl.centroid(), Vector3::ZERO);
+    }
+
+    // ── Polyline2D tests ─────────────────────────────────────────────
+
+    fn make_rect_2d() -> Polyline2D {
+        let mut pl = Polyline2D::new();
+        pl.add_vertex(Vertex2D::new(Vector3::new(0.0, 0.0, 0.0)));
+        pl.add_vertex(Vertex2D::new(Vector3::new(4.0, 0.0, 0.0)));
+        pl.add_vertex(Vertex2D::new(Vector3::new(4.0, 3.0, 0.0)));
+        pl.add_vertex(Vertex2D::new(Vector3::new(0.0, 3.0, 0.0)));
+        pl.close();
+        pl
+    }
+
+    #[test]
+    fn test_polyline2d_length_straight() {
+        let pl = make_rect_2d();
+        // 4 + 3 + 4 + 3 = 14
+        assert!((pl.length() - 14.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_polyline2d_area_rectangle() {
+        let pl = make_rect_2d();
+        assert!((pl.area() - 12.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_polyline2d_length_with_bulge() {
+        // Two-vertex closed polyline with bulge = 1 (semicircle)
+        let mut pl = Polyline2D::new();
+        let mut v0 = Vertex2D::new(Vector3::new(0.0, 0.0, 0.0));
+        v0.bulge = 1.0; // semicircular arc
+        pl.add_vertex(v0);
+        pl.add_vertex(Vertex2D::new(Vector3::new(2.0, 0.0, 0.0)));
+        // Open: one segment with bulge=1, chord=2, radius=1, sweep=π
+        let len = pl.length();
+        let expected = std::f64::consts::PI; // semicircle of radius 1
+        assert!((len - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_polyline2d_centroid() {
+        let pl = make_rect_2d();
+        let c = pl.centroid();
+        assert!((c.x - 2.0).abs() < 1e-10);
+        assert!((c.y - 1.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_polyline2d_length_empty() {
+        let pl = Polyline2D::new();
+        assert_eq!(pl.length(), 0.0);
+    }
+
+    #[test]
+    fn test_polyline2d_area_open() {
+        let mut pl = Polyline2D::new();
+        pl.add_vertex(Vertex2D::new(Vector3::new(0.0, 0.0, 0.0)));
+        pl.add_vertex(Vertex2D::new(Vector3::new(1.0, 0.0, 0.0)));
+        pl.add_vertex(Vertex2D::new(Vector3::new(1.0, 1.0, 0.0)));
+        assert_eq!(pl.area(), 0.0); // not closed
+    }
+}
 
