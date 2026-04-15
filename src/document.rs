@@ -857,6 +857,21 @@ impl Default for HeaderVariables {
     }
 }
 
+/// Information about an attached external reference.
+///
+/// Returned by [`CadDocument::xref_info`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XrefInfo<'a> {
+    /// Block name used by INSERT entities to place this xref.
+    pub block_name: &'a str,
+    /// File path to the referenced drawing.
+    pub file_path: &'a str,
+    /// `true` for an overlay xref, `false` for a standard attach.
+    pub is_overlay: bool,
+    /// Handle of the xref's block record.
+    pub handle: Handle,
+}
+
 /// A CAD document containing all drawing data
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -2335,6 +2350,193 @@ impl CadDocument {
                 f(&mut self.entities[idx]);
             }
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Xref (External Reference) API
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Attach an external drawing as a reference (xref).
+    ///
+    /// Creates a `BlockRecord` with the `is_xref` flag and the given file
+    /// path, together with the required `Block` / `BlockEnd` structural
+    /// entities.  The xref is *not* resolved (loaded) — it only records
+    /// the reference in the document so that a DWG/DXF writer emits the
+    /// correct data and the host CAD application can resolve it.
+    ///
+    /// Use `overlay = true` for an xref overlay (not nested into further
+    /// xrefs) or `false` for a standard attach.
+    ///
+    /// Returns the block-record handle.  To place the xref in model space
+    /// create an [`Insert`](crate::entities::Insert) referencing the
+    /// block name.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// let br_handle = doc.attach_xref("site_plan", "C:/drawings/site_plan.dwg", false).unwrap();
+    /// assert!(doc.block_records.get("site_plan").is_some());
+    /// ```
+    pub fn attach_xref(
+        &mut self,
+        block_name: &str,
+        file_path: &str,
+        overlay: bool,
+    ) -> Result<Handle> {
+        // Reject if a block with this name already exists
+        if self.block_records.get(block_name).is_some() {
+            return Err(crate::error::DxfError::Custom(format!(
+                "Block record '{}' already exists",
+                block_name
+            )));
+        }
+
+        // Create the xref block record
+        let mut br = BlockRecord::new(block_name);
+        br.set_handle(self.allocate_handle());
+        br.flags.is_xref = true;
+        br.flags.is_xref_overlay = overlay;
+        br.xref_path = file_path.to_string();
+
+        // Create structural Block/BlockEnd entities
+        let block_handle = self.allocate_handle();
+        let block_end_handle = self.allocate_handle();
+        br.block_entity_handle = block_handle;
+        br.block_end_handle = block_end_handle;
+
+        let br_handle = br.handle;
+        self.block_records
+            .add(br)
+            .map_err(|e| crate::error::DxfError::Custom(e))?;
+
+        // Store Block entity
+        let mut block = crate::entities::Block::new(block_name, Vector3::default());
+        block.xref_path = file_path.to_string();
+        block.common.handle = block_handle;
+        block.common.owner_handle = br_handle;
+        let idx = self.entities.len();
+        self.entities.push(EntityType::Block(block));
+        self.entity_index.insert(block_handle, idx);
+
+        // Store BlockEnd entity
+        let mut block_end = crate::entities::BlockEnd::new();
+        block_end.common.handle = block_end_handle;
+        block_end.common.owner_handle = br_handle;
+        let idx = self.entities.len();
+        self.entities.push(EntityType::BlockEnd(block_end));
+        self.entity_index.insert(block_end_handle, idx);
+
+        Ok(br_handle)
+    }
+
+    /// Detach (remove) an external reference by block name.
+    ///
+    /// Removes the xref block record, its structural `Block`/`BlockEnd`
+    /// entities, **and** any `Insert` entities that reference it.
+    ///
+    /// Returns an error if the block is not an xref.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// doc.attach_xref("site", "site.dwg", false).unwrap();
+    /// doc.detach_xref("site").unwrap();
+    /// assert!(doc.block_records.get("site").is_none());
+    /// ```
+    pub fn detach_xref(&mut self, block_name: &str) -> Result<()> {
+        // Verify this is indeed an xref
+        let br = self
+            .block_records
+            .get(block_name)
+            .ok_or_else(|| {
+                crate::error::DxfError::Custom(format!(
+                    "Block record '{}' not found",
+                    block_name
+                ))
+            })?;
+        if !br.flags.is_xref {
+            return Err(crate::error::DxfError::Custom(format!(
+                "Block '{}' is not an xref",
+                block_name
+            )));
+        }
+
+        // Collect handles to remove: Block, BlockEnd, owned entities
+        let mut to_remove: Vec<Handle> = Vec::new();
+        to_remove.push(br.block_entity_handle);
+        to_remove.push(br.block_end_handle);
+        to_remove.extend(br.entity_handles.iter().copied());
+
+        // Also remove any Insert entities that reference this block
+        let inserts: Vec<Handle> = self
+            .entities
+            .iter()
+            .filter_map(|e| match e {
+                EntityType::Insert(ins) if ins.block_name == block_name => {
+                    Some(ins.common.handle)
+                }
+                _ => None,
+            })
+            .collect();
+        to_remove.extend(inserts);
+
+        for h in to_remove {
+            if !h.is_null() {
+                self.remove_entity(h);
+            }
+        }
+
+        // Remove the block record
+        self.block_records.remove(block_name);
+        Ok(())
+    }
+
+    /// List all xref block records in the document.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// doc.attach_xref("floor1", "floor1.dwg", false).unwrap();
+    /// doc.attach_xref("floor2", "floor2.dwg", true).unwrap();
+    /// let xrefs = doc.xrefs();
+    /// assert_eq!(xrefs.len(), 2);
+    /// ```
+    pub fn xrefs(&self) -> Vec<&BlockRecord> {
+        self.block_records
+            .iter()
+            .filter(|br| br.flags.is_xref)
+            .collect()
+    }
+
+    /// Return xref info for a block name, or `None` if it is not an xref.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// doc.attach_xref("plan", "plan.dwg", false).unwrap();
+    /// let info = doc.xref_info("plan").unwrap();
+    /// assert_eq!(info.file_path, "plan.dwg");
+    /// assert!(!info.is_overlay);
+    /// ```
+    pub fn xref_info(&self, block_name: &str) -> Option<XrefInfo<'_>> {
+        let br = self.block_records.get(block_name)?;
+        if !br.flags.is_xref {
+            return None;
+        }
+        Some(XrefInfo {
+            block_name: &br.name,
+            file_path: &br.xref_path,
+            is_overlay: br.flags.is_xref_overlay,
+            handle: br.handle,
+        })
     }
 
     /// Resolve handle references after reading a DXF file.
