@@ -211,6 +211,16 @@ impl BoundingBox3D {
         self.max.z = self.max.z.max(point.z);
     }
 
+    /// Check whether two bounding boxes overlap.
+    pub fn intersects(&self, other: &BoundingBox3D) -> bool {
+        self.min.x <= other.max.x
+            && self.max.x >= other.min.x
+            && self.min.y <= other.max.y
+            && self.max.y >= other.min.y
+            && self.min.z <= other.max.z
+            && self.max.z >= other.min.z
+    }
+
     /// Merge with another bounding box
     pub fn merge(&self, other: &BoundingBox3D) -> BoundingBox3D {
         BoundingBox3D {

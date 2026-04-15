@@ -622,5 +622,92 @@ impl EntityType {
             EntityType::Unknown(e) => &mut e.common,
         }
     }
+
+    /// Compute the axis-aligned bounding box for this entity.
+    ///
+    /// Delegates to the [`Entity::bounding_box()`] trait method.
+    pub fn bounding_box(&self) -> BoundingBox3D {
+        self.as_entity().bounding_box()
+    }
 }
+
+/// Trait for concrete entity types that can be extracted from an [`EntityType`] variant.
+///
+/// This is implemented for every inner entity type (e.g. `Circle`, `Line`, `Arc`, …)
+/// so that generic code can filter entities by type:
+///
+/// ```
+/// use acadrust::entities::{EntityType, EntityVariant, Circle};
+///
+/// let et = EntityType::Circle(Circle::new());
+/// assert!(Circle::from_entity_type(&et).is_some());
+/// ```
+pub trait EntityVariant: Sized {
+    /// Try to extract an immutable reference from an [`EntityType`].
+    fn from_entity_type(e: &EntityType) -> Option<&Self>;
+    /// Try to extract a mutable reference from an [`EntityType`].
+    fn from_entity_type_mut(e: &mut EntityType) -> Option<&mut Self>;
+}
+
+macro_rules! impl_entity_variant {
+    ($variant:ident, $ty:ty) => {
+        impl EntityVariant for $ty {
+            fn from_entity_type(e: &EntityType) -> Option<&Self> {
+                match e {
+                    EntityType::$variant(inner) => Some(inner),
+                    _ => None,
+                }
+            }
+            fn from_entity_type_mut(e: &mut EntityType) -> Option<&mut Self> {
+                match e {
+                    EntityType::$variant(inner) => Some(inner),
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+impl_entity_variant!(Point, Point);
+impl_entity_variant!(Line, Line);
+impl_entity_variant!(Circle, Circle);
+impl_entity_variant!(Arc, Arc);
+impl_entity_variant!(Ellipse, Ellipse);
+impl_entity_variant!(Polyline, Polyline);
+impl_entity_variant!(Polyline2D, Polyline2D);
+impl_entity_variant!(Polyline3D, Polyline3D);
+impl_entity_variant!(LwPolyline, LwPolyline);
+impl_entity_variant!(Text, Text);
+impl_entity_variant!(MText, MText);
+impl_entity_variant!(Spline, Spline);
+impl_entity_variant!(Dimension, Dimension);
+impl_entity_variant!(Hatch, Hatch);
+impl_entity_variant!(Solid, Solid);
+impl_entity_variant!(Face3D, Face3D);
+impl_entity_variant!(Insert, Insert);
+impl_entity_variant!(Block, Block);
+impl_entity_variant!(BlockEnd, BlockEnd);
+impl_entity_variant!(Ray, Ray);
+impl_entity_variant!(XLine, XLine);
+impl_entity_variant!(Viewport, Viewport);
+impl_entity_variant!(AttributeDefinition, AttributeDefinition);
+impl_entity_variant!(AttributeEntity, AttributeEntity);
+impl_entity_variant!(Leader, Leader);
+impl_entity_variant!(MultiLeader, MultiLeader);
+impl_entity_variant!(MLine, MLine);
+impl_entity_variant!(Mesh, Mesh);
+impl_entity_variant!(RasterImage, RasterImage);
+impl_entity_variant!(Solid3D, Solid3D);
+impl_entity_variant!(Region, Region);
+impl_entity_variant!(Body, Body);
+impl_entity_variant!(Table, Table);
+impl_entity_variant!(Tolerance, Tolerance);
+impl_entity_variant!(PolyfaceMesh, PolyfaceMesh);
+impl_entity_variant!(Wipeout, Wipeout);
+impl_entity_variant!(Shape, Shape);
+impl_entity_variant!(Underlay, Underlay);
+impl_entity_variant!(Seqend, Seqend);
+impl_entity_variant!(Ole2Frame, Ole2Frame);
+impl_entity_variant!(PolygonMesh, PolygonMeshEntity);
+impl_entity_variant!(Unknown, UnknownEntity);
 

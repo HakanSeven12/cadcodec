@@ -1879,6 +1879,66 @@ impl CadDocument {
         self.entities.iter_mut().filter(move |e| e.common().layer.to_uppercase() == upper)
     }
 
+    /// Iterate over entities whose bounding box intersects the given region.
+    ///
+    /// This is a brute-force scan — suitable for interactive use, not for
+    /// spatial indexing of millions of entities.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line};
+    /// use acadrust::types::{BoundingBox3D, Vector3};
+    ///
+    /// let mut doc = CadDocument::new();
+    /// doc.add_entity(EntityType::Line(
+    ///     Line::from_coords(0.0, 0.0, 0.0, 5.0, 5.0, 0.0),
+    /// )).unwrap();
+    /// doc.add_entity(EntityType::Line(
+    ///     Line::from_coords(100.0, 100.0, 0.0, 200.0, 200.0, 0.0),
+    /// )).unwrap();
+    ///
+    /// let region = BoundingBox3D::new(
+    ///     Vector3::new(-1.0, -1.0, -1.0),
+    ///     Vector3::new(10.0, 10.0, 1.0),
+    /// );
+    /// assert_eq!(doc.entities_in_bounding_box(&region).count(), 1);
+    /// ```
+    pub fn entities_in_bounding_box<'a>(
+        &'a self,
+        region: &'a crate::types::BoundingBox3D,
+    ) -> impl Iterator<Item = &'a EntityType> {
+        self.entities
+            .iter()
+            .filter(move |e| e.bounding_box().intersects(region))
+    }
+
+    /// Compute the combined bounding box of all entities in the document.
+    ///
+    /// Returns `None` if the document has no entities.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Line};
+    ///
+    /// let mut doc = CadDocument::new();
+    /// doc.add_entity(EntityType::Line(
+    ///     Line::from_coords(0.0, 0.0, 0.0, 10.0, 5.0, 0.0),
+    /// )).unwrap();
+    /// let bbox = doc.extents().unwrap();
+    /// assert_eq!(bbox.width(), 10.0);
+    /// ```
+    pub fn extents(&self) -> Option<crate::types::BoundingBox3D> {
+        let mut iter = self.entities.iter();
+        let first = iter.next()?;
+        let mut result = first.bounding_box();
+        for e in iter {
+            result = result.merge(&e.bounding_box());
+        }
+        Some(result)
+    }
+
     /// Get the number of entities
     pub fn entity_count(&self) -> usize {
         self.entities.len()
@@ -1892,6 +1952,53 @@ impl CadDocument {
     /// Iterate over all entities mutably
     pub fn entities_mut(&mut self) -> impl Iterator<Item = &mut EntityType> {
         self.entities.iter_mut()
+    }
+
+    /// Iterate over entities of a specific concrete type.
+    ///
+    /// Uses the [`EntityVariant`] trait to filter entities by their variant
+    /// and yield references to the inner concrete type.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Circle, Line};
+    ///
+    /// let mut doc = CadDocument::new();
+    /// doc.add_entity(EntityType::Circle(Circle::new())).unwrap();
+    /// doc.add_entity(EntityType::Line(Line::new())).unwrap();
+    /// doc.add_entity(EntityType::Circle(Circle::from_center_radius(
+    ///     acadrust::types::Vector3::new(5.0, 5.0, 0.0), 2.0,
+    /// ))).unwrap();
+    ///
+    /// let circles: Vec<&Circle> = doc.entities_of_type::<Circle>().collect();
+    /// assert_eq!(circles.len(), 2);
+    /// ```
+    pub fn entities_of_type<'a, T: crate::entities::EntityVariant + 'a>(
+        &'a self,
+    ) -> impl Iterator<Item = &'a T> + 'a {
+        self.entities.iter().filter_map(T::from_entity_type)
+    }
+
+    /// Iterate mutably over entities of a specific concrete type.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::entities::{EntityType, Circle};
+    ///
+    /// let mut doc = CadDocument::new();
+    /// doc.add_entity(EntityType::Circle(Circle::new())).unwrap();
+    ///
+    /// for c in doc.entities_of_type_mut::<Circle>() {
+    ///     c.radius = 10.0;
+    /// }
+    /// assert_eq!(doc.entities_of_type::<Circle>().next().unwrap().radius, 10.0);
+    /// ```
+    pub fn entities_of_type_mut<'a, T: crate::entities::EntityVariant + 'a>(
+        &'a mut self,
+    ) -> impl Iterator<Item = &'a mut T> + 'a {
+        self.entities.iter_mut().filter_map(T::from_entity_type_mut)
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -2537,6 +2644,95 @@ impl CadDocument {
             is_overlay: br.flags.is_xref_overlay,
             handle: br.handle,
         })
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Block Instance API
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Insert a block reference into model space.
+    ///
+    /// The block must already exist (created via
+    /// [`BlockBuilder`](crate::api::block::BlockBuilder) or loaded from a
+    /// file).  Returns the handle of the new
+    /// [`Insert`](crate::entities::Insert) entity.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::api::block::BlockBuilder;
+    /// use acadrust::entities::{EntityType, Circle};
+    /// use acadrust::types::Vector3;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// BlockBuilder::new("Bolt")
+    ///     .entity(EntityType::Circle(Circle::from_center_radius(Vector3::ZERO, 3.0)))
+    ///     .build(&mut doc)
+    ///     .unwrap();
+    ///
+    /// let h = doc.insert_block("Bolt", Vector3::new(10.0, 20.0, 0.0)).unwrap();
+    /// assert_eq!(doc.get_entity(h).unwrap().common().layer, "0");
+    /// ```
+    pub fn insert_block(
+        &mut self,
+        block_name: &str,
+        position: Vector3,
+    ) -> Result<Handle> {
+        if self.block_records.get(block_name).is_none() {
+            return Err(crate::error::DxfError::Custom(format!(
+                "Block '{}' not found",
+                block_name
+            )));
+        }
+        let insert = crate::entities::Insert::new(block_name, position);
+        self.add_entity(EntityType::Insert(insert))
+    }
+
+    /// Insert a block reference with explicit scale and rotation.
+    ///
+    /// `scale` is applied uniformly to X, Y, and Z.  `rotation` is in
+    /// radians.
+    ///
+    /// # Example
+    /// ```rust
+    /// use acadrust::CadDocument;
+    /// use acadrust::api::block::BlockBuilder;
+    /// use acadrust::entities::{EntityType, Circle};
+    /// use acadrust::types::Vector3;
+    /// use std::f64::consts::FRAC_PI_2;
+    ///
+    /// let mut doc = CadDocument::new();
+    /// BlockBuilder::new("Arrow")
+    ///     .entity(EntityType::Circle(Circle::from_center_radius(Vector3::ZERO, 1.0)))
+    ///     .build(&mut doc)
+    ///     .unwrap();
+    ///
+    /// let h = doc.insert_block_with(
+    ///     "Arrow",
+    ///     Vector3::new(0.0, 0.0, 0.0),
+    ///     2.0,
+    ///     FRAC_PI_2,
+    /// ).unwrap();
+    /// ```
+    pub fn insert_block_with(
+        &mut self,
+        block_name: &str,
+        position: Vector3,
+        scale: f64,
+        rotation: f64,
+    ) -> Result<Handle> {
+        if self.block_records.get(block_name).is_none() {
+            return Err(crate::error::DxfError::Custom(format!(
+                "Block '{}' not found",
+                block_name
+            )));
+        }
+        let mut insert = crate::entities::Insert::new(block_name, position);
+        insert.set_x_scale(scale);
+        insert.set_y_scale(scale);
+        insert.set_z_scale(scale);
+        insert.rotation = rotation;
+        self.add_entity(EntityType::Insert(insert))
     }
 
     /// Resolve handle references after reading a DXF file.

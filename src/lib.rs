@@ -147,8 +147,8 @@ pub use types::{
 
 // Re-export entity types
 pub use entities::{
-    Arc, Circle, Ellipse, Entity, EntityType, Line, LwPolyline, MText, Point, Polyline, Spline,
-    Text,
+    Arc, Circle, Ellipse, Entity, EntityType, EntityVariant, Line, LwPolyline, MText, Point,
+    Polyline, Spline, Text,
 };
 
 // Re-export table types
