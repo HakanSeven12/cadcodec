@@ -987,6 +987,85 @@ fn dxf_roundtrip_tables_preserved() {
     assert_eq!(rt.app_ids.len(), orig_appids, "AppId count changed");
 }
 
+#[test]
+fn dxf_roundtrip_geodata_spatialfilter_payload() {
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    let root_owner = doc.header.named_objects_dict_handle;
+
+    let mut geodata = acadrust::objects::GeoData::new();
+    geodata.handle = Handle::new(0x860);
+    geodata.owner = root_owner;
+    geodata.version = 5;
+    geodata.coordinate_type = 3;
+    geodata.design_point = Vector3::new(1234.5, 6789.0, 0.0);
+    geodata.reference_point = Vector3::new(37.6188056, -122.3754167, 15.0);
+    geodata.north_direction = Vector2::new(0.2, 0.98);
+    geodata.horizontal_unit_scale = 1.0;
+    geodata.vertical_unit_scale = 0.9996;
+    doc.objects.insert(
+        geodata.handle,
+        acadrust::objects::ObjectType::GeoData(geodata.clone()),
+    );
+
+    let mut spatial = acadrust::objects::SpatialFilter::new();
+    spatial.handle = Handle::new(0x861);
+    spatial.owner = root_owner;
+    spatial.is_enabled = true;
+    spatial.is_front_clipping_on = true;
+    spatial.front_clipping_distance = 12.5;
+    spatial.is_back_clipping_on = true;
+    spatial.back_clipping_distance = 25.0;
+    spatial.clip_boundary_points = vec![
+        Vector2::new(0.0, 0.0),
+        Vector2::new(10.0, 0.0),
+        Vector2::new(10.0, 5.0),
+        Vector2::new(0.0, 5.0),
+    ];
+    doc.objects.insert(
+        spatial.handle,
+        acadrust::objects::ObjectType::SpatialFilter(spatial.clone()),
+    );
+
+    let rt = dxf_roundtrip(doc);
+
+    let geo_rt = rt
+        .objects
+        .values()
+        .find_map(|o| {
+            if let acadrust::objects::ObjectType::GeoData(v) = o {
+                Some(v)
+            } else {
+                None
+            }
+        })
+        .expect("Expected a GeoData object after DXF roundtrip");
+    assert_eq!(geo_rt.version, 5);
+    assert_eq!(geo_rt.coordinate_type, 3);
+    assert!((geo_rt.design_point.x - 1234.5).abs() < 1e-12);
+    assert!((geo_rt.reference_point.y - (-122.3754167)).abs() < 1e-12);
+    assert!((geo_rt.north_direction.x - 0.2).abs() < 1e-12);
+    assert!((geo_rt.vertical_unit_scale - 0.9996).abs() < 1e-12);
+
+    let spatial_rt = rt
+        .objects
+        .values()
+        .find_map(|o| {
+            if let acadrust::objects::ObjectType::SpatialFilter(v) = o {
+                Some(v)
+            } else {
+                None
+            }
+        })
+        .expect("Expected a SpatialFilter object after DXF roundtrip");
+    assert!(spatial_rt.is_enabled);
+    assert!(spatial_rt.is_front_clipping_on);
+    assert!(spatial_rt.is_back_clipping_on);
+    assert!((spatial_rt.front_clipping_distance - 12.5).abs() < 1e-12);
+    assert!((spatial_rt.back_clipping_distance - 25.0).abs() < 1e-12);
+    assert_eq!(spatial_rt.clip_boundary_points.len(), 4);
+    assert!((spatial_rt.clip_boundary_points[2].y - 5.0).abs() < 1e-12);
+}
+
 // ── DXF: Individual entity type roundtrip ─────────────────────────────
 
 macro_rules! dxf_entity_roundtrip {

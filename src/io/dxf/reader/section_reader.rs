@@ -1111,12 +1111,14 @@ impl<'a> SectionReader<'a> {
                         }
                     }
                     "GEODATA" => {
-                        let obj = self.read_stub_object::<GeoData>()?;
-                        document.objects.insert(obj.handle, ObjectType::GeoData(obj));
+                        if let Some(obj) = self.read_geodata()? {
+                            document.objects.insert(obj.handle, ObjectType::GeoData(obj));
+                        }
                     }
-                    "SPATIALFILTER" => {
-                        let obj = self.read_stub_object::<SpatialFilter>()?;
-                        document.objects.insert(obj.handle, ObjectType::SpatialFilter(obj));
+                    "SPATIALFILTER" | "SPATIAL_FILTER" => {
+                        if let Some(obj) = self.read_spatial_filter()? {
+                            document.objects.insert(obj.handle, ObjectType::SpatialFilter(obj));
+                        }
                     }
                     "RASTERVARIABLES" => {
                         if let Some(obj) = self.read_raster_variables()? {
@@ -1390,6 +1392,167 @@ impl<'a> SectionReader<'a> {
                 _ => {}
             }
         }
+        Ok(Some(obj))
+    }
+
+    /// Read a GEODATA object
+    fn read_geodata(&mut self) -> Result<Option<GeoData>> {
+        let mut obj = GeoData::new();
+        while let Some(pair) = self.reader.read_pair()? {
+            if pair.code == 0 {
+                self.reader.push_back(pair);
+                break;
+            }
+
+            match pair.code {
+                5 => {
+                    if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
+                        obj.handle = Handle::new(h);
+                    }
+                }
+                330 => {
+                    if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
+                        obj.owner = Handle::new(h);
+                    }
+                }
+                90 => {
+                    if let Some(v) = pair.as_i32() {
+                        obj.version = v;
+                    }
+                }
+                70 => {
+                    if let Some(v) = pair.as_i16() {
+                        obj.coordinate_type = v;
+                    }
+                }
+                10 => {
+                    if let Some(v) = pair.as_double() {
+                        obj.design_point.x = v;
+                    }
+                }
+                20 => {
+                    if let Some(v) = pair.as_double() {
+                        obj.design_point.y = v;
+                    }
+                }
+                30 => {
+                    if let Some(v) = pair.as_double() {
+                        obj.design_point.z = v;
+                    }
+                }
+                11 => {
+                    if let Some(v) = pair.as_double() {
+                        obj.reference_point.x = v;
+                    }
+                }
+                21 => {
+                    if let Some(v) = pair.as_double() {
+                        obj.reference_point.y = v;
+                    }
+                }
+                31 => {
+                    if let Some(v) = pair.as_double() {
+                        obj.reference_point.z = v;
+                    }
+                }
+                12 => {
+                    if let Some(v) = pair.as_double() {
+                        obj.north_direction.x = v;
+                    }
+                }
+                22 => {
+                    if let Some(v) = pair.as_double() {
+                        obj.north_direction.y = v;
+                    }
+                }
+                40 => {
+                    if let Some(v) = pair.as_double() {
+                        obj.horizontal_unit_scale = v;
+                    }
+                }
+                41 => {
+                    if let Some(v) = pair.as_double() {
+                        obj.vertical_unit_scale = v;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(Some(obj))
+    }
+
+    /// Read a SPATIALFILTER / SPATIAL_FILTER object
+    fn read_spatial_filter(&mut self) -> Result<Option<SpatialFilter>> {
+        let mut obj = SpatialFilter::new();
+        let mut pending_x: Option<f64> = None;
+
+        while let Some(pair) = self.reader.read_pair()? {
+            if pair.code == 0 {
+                self.reader.push_back(pair);
+                break;
+            }
+
+            match pair.code {
+                5 => {
+                    if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
+                        obj.handle = Handle::new(h);
+                    }
+                }
+                330 => {
+                    if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
+                        obj.owner = Handle::new(h);
+                    }
+                }
+                70 => {
+                    if let Some(v) = pair.as_bool() {
+                        obj.is_enabled = v;
+                    } else if let Some(v) = pair.as_i16() {
+                        obj.is_enabled = v != 0;
+                    }
+                }
+                71 => {
+                    if let Some(v) = pair.as_bool() {
+                        obj.is_front_clipping_on = v;
+                    } else if let Some(v) = pair.as_i16() {
+                        obj.is_front_clipping_on = v != 0;
+                    }
+                }
+                72 => {
+                    if let Some(v) = pair.as_bool() {
+                        obj.is_back_clipping_on = v;
+                    } else if let Some(v) = pair.as_i16() {
+                        obj.is_back_clipping_on = v != 0;
+                    }
+                }
+                40 => {
+                    if let Some(v) = pair.as_double() {
+                        obj.front_clipping_distance = v;
+                    }
+                }
+                41 => {
+                    if let Some(v) = pair.as_double() {
+                        obj.back_clipping_distance = v;
+                    }
+                }
+                90 => {
+                    if let Some(count) = pair.as_i32() {
+                        if count > 0 {
+                            obj.clip_boundary_points.reserve(count as usize);
+                        }
+                    }
+                }
+                10 => {
+                    pending_x = pair.as_double();
+                }
+                20 => {
+                    if let (Some(x), Some(y)) = (pending_x.take(), pair.as_double()) {
+                        obj.clip_boundary_points.push(Vector2::new(x, y));
+                    }
+                }
+                _ => {}
+            }
+        }
+
         Ok(Some(obj))
     }
 

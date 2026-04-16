@@ -10,7 +10,7 @@ use crate::objects::{
     Dictionary, DictionaryVariable, DictionaryWithDefault, Group, ImageDefinition,
     ImageDefinitionReactor, Layout, MLineStyle, Material, MultiLeaderStyle,
     ObjectType, PlotSettings, RasterVariables, Scale, SortEntitiesTable,
-    TableStyle, VisualStyle, BookColor, WipeoutVariables, XRecord,
+    TableStyle, VisualStyle, BookColor, WipeoutVariables, XRecord, GeoData, SpatialFilter,
 };
 use crate::tables::*;
 use crate::types::{Color, DxfVersion, Handle, Vector3};
@@ -2332,8 +2332,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 ObjectType::VisualStyle(obj) => self.write_visualstyle(obj)?,
                 ObjectType::Material(obj) => self.write_material(obj)?,
                 ObjectType::ImageDefinitionReactor(obj) => self.write_imagedef_reactor(obj)?,
-                ObjectType::GeoData(obj) => self.write_stub_handle_only("GEODATA", obj.handle, obj.owner)?,
-                ObjectType::SpatialFilter(obj) => self.write_stub_handle_only("SPATIAL_FILTER", obj.handle, obj.owner)?,
+                ObjectType::GeoData(obj) => self.write_geodata(obj)?,
+                ObjectType::SpatialFilter(obj) => self.write_spatial_filter(obj)?,
                 ObjectType::RasterVariables(obj) => self.write_raster_variables(obj)?,
                 ObjectType::BookColor(obj) => self.write_bookcolor(obj)?,
                 ObjectType::PlaceHolder(obj) => self.write_stub_handle_only("ACDBPLACEHOLDER", obj.handle, obj.owner)?,
@@ -3052,6 +3052,62 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if !obj.description.is_empty() {
             self.writer.write_string(2, &obj.description)?;
         }
+        Ok(())
+    }
+
+    /// Write a GEODATA object
+    fn write_geodata(&mut self, obj: &GeoData) -> Result<()> {
+        self.writer.write_string(0, "GEODATA")?;
+        self.writer.write_handle(5, obj.handle)?;
+        self.writer.write_handle(330, obj.owner)?;
+        self.writer.write_subclass("AcDbGeoData")?;
+
+        self.writer.write_i32(90, obj.version)?;
+        self.writer.write_i16(70, obj.coordinate_type)?;
+
+        self.writer.write_double(10, obj.design_point.x)?;
+        self.writer.write_double(20, obj.design_point.y)?;
+        self.writer.write_double(30, obj.design_point.z)?;
+
+        self.writer.write_double(11, obj.reference_point.x)?;
+        self.writer.write_double(21, obj.reference_point.y)?;
+        self.writer.write_double(31, obj.reference_point.z)?;
+
+        self.writer.write_double(12, obj.north_direction.x)?;
+        self.writer.write_double(22, obj.north_direction.y)?;
+
+        self.writer
+            .write_double(40, obj.horizontal_unit_scale)?;
+        self.writer
+            .write_double(41, obj.vertical_unit_scale)?;
+
+        Ok(())
+    }
+
+    /// Write a SPATIAL_FILTER object
+    fn write_spatial_filter(&mut self, obj: &SpatialFilter) -> Result<()> {
+        self.writer.write_string(0, "SPATIAL_FILTER")?;
+        self.writer.write_handle(5, obj.handle)?;
+        self.writer.write_handle(330, obj.owner)?;
+        self.writer.write_subclass("AcDbSpatialFilter")?;
+
+        self.writer.write_bool(70, obj.is_enabled)?;
+        self.writer
+            .write_bool(71, obj.is_front_clipping_on)?;
+        self.writer
+            .write_double(40, obj.front_clipping_distance)?;
+        self.writer
+            .write_bool(72, obj.is_back_clipping_on)?;
+        self.writer
+            .write_double(41, obj.back_clipping_distance)?;
+        self.writer
+            .write_i32(90, obj.clip_boundary_points.len() as i32)?;
+
+        for point in &obj.clip_boundary_points {
+            self.writer.write_double(10, point.x)?;
+            self.writer.write_double(20, point.y)?;
+        }
+
         Ok(())
     }
 
