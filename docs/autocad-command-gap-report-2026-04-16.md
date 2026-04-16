@@ -146,12 +146,12 @@ Status legend:
 
 ## P0 - High impact gaps (roundtrip and interoperability risk)
 
-1. DWG writer does not fully serialize ACAD_TABLE semantics.
+1. ACAD_TABLE DWG class serialization and typed read-path are implemented.
 
-- Evidence: `src/io/dwg/dwg_stream_writers/object_writer/entities.rs`
-- Current behavior: `UNDERLAY` uses class-based DWG write and typed read mapping; `ACAD_TABLE` writes through an INSERT fallback when its block record can be resolved.
-- Mitigation added: fallback path preserves placement/block-reference presence and emits diagnostics for degraded handling.
-- Remaining risk: rich table data (rows/cells/styles/break settings) is not encoded in DWG yet; unresolved table block handles still skip.
+- Evidence: `src/io/dwg/dwg_stream_writers/object_writer/entities.rs`, `src/io/dwg/dwg_stream_readers/object_reader/entities.rs`, `src/io/dwg/dwg_document_builder.rs`
+- Current behavior: `UNDERLAY` and `ACAD_TABLE` now use class-based DWG entity mapping; ACAD_TABLE row/cell/style/break data is written and reconstructed as typed `EntityType::Table`.
+- Validation added: targeted tests `write_table_entity_full_serialization`, `test_table_roundtrip_payload`, and `dwg_roundtrip_table_entity_semantics`.
+- Remaining risk: broader external interoperability corpus testing is still needed for highly-styled tables and linked-data edge cases.
 
 2. DWG writer cannot serialize several typed object variants.
 
@@ -339,7 +339,7 @@ Current assessment:
 Use this as a release checklist for command-family parity:
 
 - [ ] No degraded DWG fallbacks for supported entity/object domains.
-- [ ] Roundtrip tests for underlay/table/object edge cases.
+- [ ] Roundtrip tests for remaining object edge cases (underlay/table cases covered).
 - [ ] Geometry kernel foundation (intersection/offset/trim/extend).
 - [ ] Modify command wrappers with deterministic APIs and tests.
 - [ ] 3D procedural op APIs with solid model output.

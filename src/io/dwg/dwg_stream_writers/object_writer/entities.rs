@@ -68,7 +68,7 @@ impl<'a> DwgObjectWriter<'a> {
             EntityType::Solid3D(e) => self.write_solid3d(e),
             EntityType::Region(e) => self.write_region(e),
             EntityType::Body(e) => self.write_body(e),
-            EntityType::Table(e) => self.write_table_insert_fallback(e),
+            EntityType::Table(e) => self.write_table(e),
             EntityType::Underlay(e) => self.write_underlay(e),
             EntityType::Unknown(e) => {
                 // Write raw DWG data verbatim if available
@@ -2344,38 +2344,175 @@ impl<'a> DwgObjectWriter<'a> {
         self.register_object(e.common.handle);
     }
 
-    fn write_table_insert_fallback(&mut self, e: &Table) {
-        let Some(block_handle) = e.block_record_handle else {
-            self.warn_skipped_entity("ACAD_TABLE", e.common.handle);
-            return;
-        };
-
-        let Some(block_name) = self
+    fn write_table(&mut self, e: &Table) {
+        let Some(type_code) = self
             .document
-            .block_records
-            .iter()
-            .find(|br| br.handle == block_handle)
-            .map(|br| br.name.clone())
+            .classes
+            .get_by_name("ACAD_TABLE")
+            .map(|c| c.class_number)
         else {
             self.warn_skipped_entity("ACAD_TABLE", e.common.handle);
             return;
         };
 
-        eprintln!(
-            "DWG writer: writing ACAD_TABLE as INSERT fallback (handle {:#X})",
-            e.common.handle.value()
-        );
+        self.entity_preamble(type_code, &e.common);
 
-        let mut insert = Insert::new(block_name, e.insertion_point);
-        insert.common = e.common.clone();
-        insert.normal = e.normal;
-        insert.rotation = if e.horizontal_direction.x == 0.0 && e.horizontal_direction.y == 0.0 {
-            0.0
-        } else {
-            e.horizontal_direction.y.atan2(e.horizontal_direction.x)
+        let row_count = e.rows.len();
+        let col_count = e
+            .columns
+            .len()
+            .max(e.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0));
+
+        self.writer.write_3bit_double(e.insertion_point);
+        self.writer.write_3bit_double(e.horizontal_direction);
+        self.writer.write_bit_extrusion(e.normal);
+
+        let table_style = e.table_style_handle.unwrap_or(Handle::NULL);
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, table_style.value());
+        let block_record = e.block_record_handle.unwrap_or(Handle::NULL);
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, block_record.value());
+
+        self.writer.write_bit_short(e.data_version);
+        self.writer.write_bit_long(e.value_flags);
+        self.writer.write_bit(e.override_flag);
+        self.writer.write_bit(e.override_border_color);
+        self.writer.write_bit(e.override_border_line_weight);
+        self.writer.write_bit(e.override_border_visibility);
+
+        self.writer.write_bit_long(row_count as i32);
+        self.writer.write_bit_long(col_count as i32);
+
+        for row in &e.rows {
+            self.writer.write_bit_double(row.height);
+        }
+
+        for col_idx in 0..col_count {
+            let col = e.columns.get(col_idx);
+            self.writer.write_bit_double(col.map(|c| c.width).unwrap_or(2.5));
+            self.writer
+                .write_variable_text(col.map(|c| c.name.as_str()).unwrap_or(""));
+            self.writer
+                .write_bit_long(col.map(|c| c.custom_data).unwrap_or(0));
+            self.write_table_style(col.and_then(|c| c.style.as_ref()));
+        }
+
+        for row in &e.rows {
+            self.writer.write_bit_long(row.custom_data);
+            self.write_table_style(row.style.as_ref());
+
+            for col_idx in 0..col_count {
+                if let Some(cell) = row.cells.get(col_idx) {
+                    self.write_table_cell(cell);
+                } else {
+                    let default_cell = TableCell::new();
+                    self.write_table_cell(&default_cell);
+                }
+            }
+        }
+
+        self.writer.write_bit_long(e.break_options.bits() as i32);
+        self.writer.write_byte(e.break_flow_direction as u8);
+        self.writer.write_bit_double(e.break_spacing);
+
+        self.register_object(e.common.handle);
+    }
+
+    fn write_table_cell(&mut self, cell: &TableCell) {
+        self.writer.write_byte(cell.cell_type as u8);
+        self.writer.write_bit_long(cell.state.bits() as i32);
+        self.writer.write_bit_long(cell.flag);
+        self.writer.write_bit_long(cell.merged);
+        self.writer.write_bit_long(cell.merge_width);
+        self.writer.write_bit_long(cell.merge_height);
+        self.writer.write_bit_short(cell.virtual_edge);
+        self.writer.write_bit_double(cell.rotation);
+        self.writer.write_bit(cell.auto_fit);
+        self.writer.write_bit(cell.has_linked_data);
+        self.writer.write_bit_long(cell.custom_data);
+        self.writer.write_variable_text(&cell.tooltip);
+
+        self.writer.write_bit_long(cell.contents.len() as i32);
+        for content in &cell.contents {
+            self.write_table_content(content);
+        }
+
+        self.write_table_style(cell.style.as_ref());
+    }
+
+    fn write_table_content(&mut self, content: &CellContent) {
+        self.writer.write_byte(content.content_type as u8);
+        self.writer.write_bit_long(content.value.value_type as i32);
+        self.writer.write_bit_long(content.value.unit_type as i32);
+        self.writer.write_bit_long(content.value.flags);
+        self.writer.write_variable_text(&content.value.text);
+        self.writer.write_variable_text(&content.value.format);
+        self.writer
+            .write_variable_text(&content.value.formatted_value);
+        self.writer.write_bit_double(content.value.numeric_value);
+
+        let value_handle = content.value.handle_value.unwrap_or(Handle::NULL);
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, value_handle.value());
+
+        let block_handle = content.block_handle.unwrap_or(Handle::NULL);
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, block_handle.value());
+
+        let text_style_handle = content.text_style_handle.unwrap_or(Handle::NULL);
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, text_style_handle.value());
+
+        self.writer.write_cm_color(&content.color);
+        self.writer.write_bit_double(content.rotation);
+        self.writer.write_bit_double(content.scale);
+        self.writer.write_bit_double(content.text_height);
+    }
+
+    fn write_table_style(&mut self, style: Option<&CellStyle>) {
+        self.writer.write_bit(style.is_some());
+        let Some(style) = style else {
+            return;
         };
 
-        self.write_insert(&insert);
+        self.writer.write_byte(style.style_type as u8);
+        self.writer.write_bit_long(style.property_flags.bits() as i32);
+        self.writer.write_cm_color(&style.background_color);
+        self.writer.write_cm_color(&style.content_color);
+
+        let text_style_handle = style.text_style_handle.unwrap_or(Handle::NULL);
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, text_style_handle.value());
+
+        self.writer.write_bit_double(style.text_height);
+        self.writer.write_bit_double(style.rotation);
+        self.writer.write_bit_double(style.scale);
+        self.writer.write_bit_long(style.alignment);
+        self.writer.write_bit(style.fill_enabled);
+        self.writer.write_bit_long(style.layout_flags.bits() as i32);
+
+        self.writer.write_bit_double(style.margin_left);
+        self.writer.write_bit_double(style.margin_top);
+        self.writer.write_bit_double(style.margin_right);
+        self.writer.write_bit_double(style.margin_bottom);
+        self.writer.write_bit_double(style.horizontal_spacing);
+        self.writer.write_bit_double(style.vertical_spacing);
+
+        self.write_table_border(&style.top_border);
+        self.write_table_border(&style.right_border);
+        self.write_table_border(&style.bottom_border);
+        self.write_table_border(&style.left_border);
+    }
+
+    fn write_table_border(&mut self, border: &CellBorder) {
+        self.writer.write_bit_short(border.border_type as i16);
+        self.writer.write_cm_color(&border.color);
+        self.writer
+            .write_bit_long(border.line_weight.as_i16() as i32);
+        self.writer.write_bit(border.invisible);
+        self.writer.write_bit_double(border.double_spacing);
+        self.writer.write_bit_long(border.override_flags.bits() as i32);
     }
 
     // â”€â”€ OLE2Frame â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -3298,7 +3435,10 @@ impl<'a> DwgObjectWriter<'a> {
 mod tests {
     use super::*;
     use crate::document::CadDocument;
-    use crate::entities::{EntityCommon, Line, Point, Table, Underlay, UnderlayType};
+    use crate::entities::{
+        BreakFlowDirection, BreakOptionFlags, EntityCommon, Line, Point, Table, Underlay,
+        UnderlayType,
+    };
     use crate::types::{Handle, Vector3};
 
     fn make_doc_with_entity(entity: EntityType) -> CadDocument {
@@ -3365,7 +3505,7 @@ mod tests {
     }
 
     #[test]
-    fn write_table_entity_via_insert_fallback() {
+    fn write_table_entity_full_serialization() {
         let mut doc = CadDocument::new();
         let table_handle = Handle::new(0x103);
         let model_space_handle = doc.block_records.get("*Model_Space").unwrap().handle;
@@ -3376,6 +3516,14 @@ mod tests {
             ..Default::default()
         };
         table.block_record_handle = Some(model_space_handle);
+        table.data_version = 1;
+        table.value_flags = 7;
+        table.override_flag = true;
+        table.break_options = BreakOptionFlags::ENABLE_BREAKS;
+        table.break_flow_direction = BreakFlowDirection::Vertical;
+        table.break_spacing = 0.25;
+        table.set_cell_text(0, 0, "A");
+        table.set_cell_text(1, 1, "B");
 
         let idx = doc.entities.len();
         doc.entities.push(EntityType::Table(table));

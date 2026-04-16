@@ -6,7 +6,13 @@
 
 use crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader;
 use crate::io::dwg::dwg_version::DwgVersion;
-use crate::types::{Color, Handle, Vector2, Vector3, DxfVersion};
+use crate::types::{Color, DxfVersion, Handle, LineWeight, Vector2, Vector3};
+use crate::entities::table::{
+    BorderPropertyFlags, BorderType, BreakFlowDirection, BreakOptionFlags, CellBorder,
+    CellContent, CellStateFlags, CellStyle, CellStylePropertyFlags, CellStyleType,
+    CellType, CellValue, CellValueType, ContentLayoutFlags, TableCell,
+    TableCellContentType, TableColumn, TableRow, ValueUnitType,
+};
 use crate::entities::multileader::*;
 use crate::entities::solid3d::{Wire, WireType, Silhouette};
 use super::safe_count;
@@ -1082,6 +1088,27 @@ pub struct UnderlayData {
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TableData {
+    pub insertion_point: Vector3,
+    pub horizontal_direction: Vector3,
+    pub normal: Vector3,
+    pub table_style_handle: u64,
+    pub block_record_handle: u64,
+    pub data_version: i16,
+    pub value_flags: i32,
+    pub override_flag: bool,
+    pub override_border_color: bool,
+    pub override_border_line_weight: bool,
+    pub override_border_visibility: bool,
+    pub rows: Vec<TableRow>,
+    pub columns: Vec<TableColumn>,
+    pub break_options: BreakOptionFlags,
+    pub break_flow_direction: BreakFlowDirection,
+    pub break_spacing: f64,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ole2FrameData {
     pub version: i16,
     pub mode: i16,
@@ -1644,6 +1671,247 @@ pub fn read_raster_image(reader: &mut DwgMergedReader, version: DwgVersion) -> R
 pub fn read_wipeout(reader: &mut DwgMergedReader, version: DwgVersion) -> RasterImageData {
     // Wipeout uses the same data layout as RasterImage
     read_raster_image(reader, version)
+}
+
+fn read_table_border(reader: &mut DwgMergedReader) -> CellBorder {
+    let border_type = BorderType::from(reader.read_bit_short());
+    let color = reader.read_cm_color();
+    let line_weight = LineWeight::from_value(reader.read_bit_long() as i16);
+    let invisible = reader.read_bit();
+    let double_spacing = reader.read_bit_double();
+    let override_flags = BorderPropertyFlags::from_bits_truncate(reader.read_bit_long() as u32);
+
+    CellBorder {
+        border_type,
+        color,
+        line_weight,
+        invisible,
+        double_spacing,
+        override_flags,
+    }
+}
+
+fn read_table_style(reader: &mut DwgMergedReader) -> Option<CellStyle> {
+    if !reader.read_bit() {
+        return None;
+    }
+
+    let style_type = CellStyleType::from(reader.read_byte());
+    let property_flags = CellStylePropertyFlags::from_bits_truncate(reader.read_bit_long() as u32);
+    let background_color = reader.read_cm_color();
+    let content_color = reader.read_cm_color();
+    let text_style_handle = match reader.read_handle() {
+        0 => None,
+        h => Some(Handle::from(h)),
+    };
+    let text_height = reader.read_bit_double();
+    let rotation = reader.read_bit_double();
+    let scale = reader.read_bit_double();
+    let alignment = reader.read_bit_long();
+    let fill_enabled = reader.read_bit();
+    let layout_flags = ContentLayoutFlags::from_bits_truncate(reader.read_bit_long() as u32);
+
+    let margin_left = reader.read_bit_double();
+    let margin_top = reader.read_bit_double();
+    let margin_right = reader.read_bit_double();
+    let margin_bottom = reader.read_bit_double();
+    let horizontal_spacing = reader.read_bit_double();
+    let vertical_spacing = reader.read_bit_double();
+
+    let top_border = read_table_border(reader);
+    let right_border = read_table_border(reader);
+    let bottom_border = read_table_border(reader);
+    let left_border = read_table_border(reader);
+
+    Some(CellStyle {
+        style_type,
+        property_flags,
+        background_color,
+        content_color,
+        text_style_handle,
+        text_height,
+        rotation,
+        scale,
+        alignment,
+        fill_enabled,
+        layout_flags,
+        margin_left,
+        margin_top,
+        margin_right,
+        margin_bottom,
+        horizontal_spacing,
+        vertical_spacing,
+        top_border,
+        right_border,
+        bottom_border,
+        left_border,
+    })
+}
+
+fn read_table_content(reader: &mut DwgMergedReader) -> CellContent {
+    let content_type = TableCellContentType::from(reader.read_byte());
+    let value_type = CellValueType::from(reader.read_bit_long() as u32);
+    let unit_type = ValueUnitType::from(reader.read_bit_long() as u32);
+    let flags = reader.read_bit_long();
+    let text = reader.read_variable_text();
+    let format = reader.read_variable_text();
+    let formatted_value = reader.read_variable_text();
+    let numeric_value = reader.read_bit_double();
+    let value_handle = reader.read_handle();
+
+    let block_handle = match reader.read_handle() {
+        0 => None,
+        h => Some(Handle::from(h)),
+    };
+    let text_style_handle = match reader.read_handle() {
+        0 => None,
+        h => Some(Handle::from(h)),
+    };
+
+    let color = reader.read_cm_color();
+    let rotation = reader.read_bit_double();
+    let scale = reader.read_bit_double();
+    let text_height = reader.read_bit_double();
+
+    CellContent {
+        content_type,
+        value: CellValue {
+            value_type,
+            unit_type,
+            flags,
+            text,
+            format,
+            formatted_value,
+            numeric_value,
+            handle_value: if value_handle == 0 {
+                None
+            } else {
+                Some(Handle::from(value_handle))
+            },
+        },
+        block_handle,
+        text_style_handle,
+        color,
+        rotation,
+        scale,
+        text_height,
+    }
+}
+
+fn read_table_cell(reader: &mut DwgMergedReader) -> TableCell {
+    let cell_type = CellType::from(reader.read_byte());
+    let state = CellStateFlags::from_bits_truncate(reader.read_bit_long() as u32);
+    let flag = reader.read_bit_long();
+    let merged = reader.read_bit_long();
+    let merge_width = reader.read_bit_long();
+    let merge_height = reader.read_bit_long();
+    let virtual_edge = reader.read_bit_short();
+    let rotation = reader.read_bit_double();
+    let auto_fit = reader.read_bit();
+    let has_linked_data = reader.read_bit();
+    let custom_data = reader.read_bit_long();
+    let tooltip = reader.read_variable_text();
+
+    let content_count = safe_count(reader.read_bit_long()) as usize;
+    let mut contents = Vec::with_capacity(content_count);
+    for _ in 0..content_count {
+        contents.push(read_table_content(reader));
+    }
+
+    let style = read_table_style(reader);
+
+    TableCell {
+        cell_type,
+        state,
+        contents,
+        style,
+        tooltip,
+        rotation,
+        auto_fit,
+        merge_width,
+        merge_height,
+        flag,
+        merged,
+        virtual_edge,
+        has_linked_data,
+        custom_data,
+    }
+}
+
+pub fn read_table(reader: &mut DwgMergedReader) -> TableData {
+    let insertion_point = reader.read_3bit_double();
+    let horizontal_direction = reader.read_3bit_double();
+    let normal = reader.read_bit_extrusion();
+    let table_style_handle = reader.read_handle();
+    let block_record_handle = reader.read_handle();
+    let data_version = reader.read_bit_short();
+    let value_flags = reader.read_bit_long();
+    let override_flag = reader.read_bit();
+    let override_border_color = reader.read_bit();
+    let override_border_line_weight = reader.read_bit();
+    let override_border_visibility = reader.read_bit();
+
+    let row_count = safe_count(reader.read_bit_long()) as usize;
+    let col_count = safe_count(reader.read_bit_long()) as usize;
+
+    let mut row_heights = Vec::with_capacity(row_count);
+    for _ in 0..row_count {
+        row_heights.push(reader.read_bit_double());
+    }
+
+    let mut columns = Vec::with_capacity(col_count);
+    for _ in 0..col_count {
+        let width = reader.read_bit_double();
+        let name = reader.read_variable_text();
+        let custom_data = reader.read_bit_long();
+        let style = read_table_style(reader);
+        columns.push(TableColumn {
+            name,
+            width,
+            style,
+            custom_data,
+        });
+    }
+
+    let mut rows = Vec::with_capacity(row_count);
+    for row_idx in 0..row_count {
+        let custom_data = reader.read_bit_long();
+        let style = read_table_style(reader);
+        let mut cells = Vec::with_capacity(col_count);
+        for _ in 0..col_count {
+            cells.push(read_table_cell(reader));
+        }
+
+        rows.push(TableRow {
+            height: row_heights.get(row_idx).copied().unwrap_or(0.25),
+            cells,
+            style,
+            custom_data,
+        });
+    }
+
+    let break_options = BreakOptionFlags::from_bits_truncate(reader.read_bit_long() as u32);
+    let break_flow_direction = BreakFlowDirection::from(reader.read_byte());
+    let break_spacing = reader.read_bit_double();
+
+    TableData {
+        insertion_point,
+        horizontal_direction,
+        normal,
+        table_style_handle,
+        block_record_handle,
+        data_version,
+        value_flags,
+        override_flag,
+        override_border_color,
+        override_border_line_weight,
+        override_border_visibility,
+        rows,
+        columns,
+        break_options,
+        break_flow_direction,
+        break_spacing,
+    }
 }
 
 pub fn read_underlay(reader: &mut DwgMergedReader, version: DwgVersion) -> UnderlayData {
@@ -2560,6 +2828,102 @@ mod tests {
         assert_eq!(sp.degree, 3);
         assert_eq!(sp.knots.len(), 6);
         assert_eq!(sp.control_points.len(), 3);
+    }
+
+    #[test]
+    fn test_table_roundtrip_payload() {
+        let v = DwgVersion::AC15;
+        let d = DxfVersion::AC1015;
+        let mut r = make_reader(v, d, |w| {
+            w.write_3bit_double(Vector3::new(12.0, 34.0, 0.0));
+            w.write_3bit_double(Vector3::new(1.0, 0.0, 0.0));
+            w.write_bit_extrusion(Vector3::UNIT_Z);
+            w.write_handle(crate::io::dwg::dwg_reference_type::DwgReferenceType::HardPointer, 0x40);
+            w.write_handle(crate::io::dwg::dwg_reference_type::DwgReferenceType::HardPointer, 0x41);
+            w.write_bit_short(1);
+            w.write_bit_long(9);
+            w.write_bit(true);
+            w.write_bit(false);
+            w.write_bit(true);
+            w.write_bit(false);
+
+            w.write_bit_long(2);
+            w.write_bit_long(2);
+
+            w.write_bit_double(0.7);
+            w.write_bit_double(0.8);
+
+            for col_idx in 0..2 {
+                w.write_bit_double(2.0 + col_idx as f64);
+                w.write_variable_text(&format!("C{}", col_idx + 1));
+                w.write_bit_long(col_idx);
+                w.write_bit(false); // no column style
+            }
+
+            for row_idx in 0..2 {
+                w.write_bit_long(row_idx);
+                w.write_bit(false); // no row style
+
+                for col_idx in 0..2 {
+                    w.write_byte(CellType::Text as u8);
+                    w.write_bit_long(0);
+                    w.write_bit_long(0);
+                    w.write_bit_long(0);
+                    w.write_bit_long(1);
+                    w.write_bit_long(1);
+                    w.write_bit_short(0);
+                    w.write_bit_double(0.0);
+                    w.write_bit(false);
+                    w.write_bit(false);
+                    w.write_bit_long(0);
+                    w.write_variable_text("");
+
+                    w.write_bit_long(1);
+                    w.write_byte(TableCellContentType::Value as u8);
+                    w.write_bit_long(CellValueType::String as i32);
+                    w.write_bit_long(ValueUnitType::NoUnits as i32);
+                    w.write_bit_long(0);
+
+                    let txt = format!("R{}C{}", row_idx, col_idx);
+                    w.write_variable_text(&txt);
+                    w.write_variable_text("");
+                    w.write_variable_text(&txt);
+                    w.write_bit_double(0.0);
+
+                    w.write_handle(crate::io::dwg::dwg_reference_type::DwgReferenceType::HardPointer, 0);
+                    w.write_handle(crate::io::dwg::dwg_reference_type::DwgReferenceType::HardPointer, 0);
+                    w.write_handle(crate::io::dwg::dwg_reference_type::DwgReferenceType::HardPointer, 0);
+
+                    w.write_cm_color(&Color::ByBlock);
+                    w.write_bit_double(0.0);
+                    w.write_bit_double(1.0);
+                    w.write_bit_double(0.18);
+
+                    w.write_bit(false); // no cell style
+                }
+            }
+
+            let break_options =
+                (BreakOptionFlags::ENABLE_BREAKS | BreakOptionFlags::REPEAT_TOP_LABELS).bits()
+                    as i32;
+            w.write_bit_long(break_options);
+            w.write_byte(BreakFlowDirection::Vertical as u8);
+            w.write_bit_double(0.35);
+        });
+
+        let t = read_table(&mut r);
+        assert_eq!(t.insertion_point, Vector3::new(12.0, 34.0, 0.0));
+        assert_eq!(t.table_style_handle, 0x40);
+        assert_eq!(t.block_record_handle, 0x41);
+        assert_eq!(t.rows.len(), 2);
+        assert_eq!(t.columns.len(), 2);
+        assert_eq!(t.rows[0].height, 0.7);
+        assert_eq!(t.columns[1].width, 3.0);
+        assert_eq!(t.rows[0].cells[0].text_value(), "R0C0");
+        assert_eq!(t.rows[1].cells[1].text_value(), "R1C1");
+        assert!(t.break_options.contains(BreakOptionFlags::ENABLE_BREAKS));
+        assert_eq!(t.break_flow_direction, BreakFlowDirection::Vertical);
+        assert_eq!(t.break_spacing, 0.35);
     }
 
     #[test]

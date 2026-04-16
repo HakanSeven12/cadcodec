@@ -92,6 +92,7 @@ pub const OBJ_HATCH: i16 = 78;         // standard fixed type
 pub const OBJ_IMAGE: i16 = -1;         // UNLISTED: always use class number
 pub const OBJ_MESH: i16 = -2;          // UNLISTED: always use class number
 pub const OBJ_MULTILEADER: i16 = -3;   // UNLISTED: always use class number
+pub const OBJ_ACAD_TABLE: i16 = -8;    // UNLISTED: always use class number
 
 // Fixed-type non-graphical objects (standard type codes from ODA spec)
 pub const OBJ_XRECORD: i16 = 79;        // 0x4F

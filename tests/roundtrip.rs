@@ -1409,6 +1409,66 @@ dwg_entity_roundtrip!(
     EntityType::Viewport(Viewport::new())
 );
 
+#[test]
+fn dwg_roundtrip_table_entity_semantics() {
+    let mut table = Table::new(Vector3::new(12.0, 34.0, 0.0), 2, 2);
+    table.data_version = 1;
+    table.value_flags = 9;
+    table.override_flag = true;
+    table.override_border_color = true;
+    table.break_options = BreakOptionFlags::ENABLE_BREAKS | BreakOptionFlags::REPEAT_TOP_LABELS;
+    table.break_flow_direction = BreakFlowDirection::Vertical;
+    table.break_spacing = 0.35;
+
+    table.set_row_height(0, 0.7);
+    table.set_row_height(1, 0.8);
+    table.set_column_width(0, 2.0);
+    table.set_column_width(1, 3.0);
+    table.columns[0].name = "C1".to_string();
+    table.columns[1].name = "C2".to_string();
+
+    table.set_cell_text(0, 0, "R0C0");
+    table.set_cell_text(1, 1, "R1C1");
+
+    if let Some(cell) = table.cell_mut(0, 1) {
+        cell.tooltip = "tip".to_string();
+        cell.auto_fit = true;
+        let mut style = CellStyle::new();
+        style.fill_enabled = true;
+        style.alignment = 5;
+        style.content_color = Color::Index(4);
+        style.background_color = Color::Index(2);
+        cell.style = Some(style);
+    }
+
+    let doc = build_minimal_document(DxfVersion::AC1032, EntityType::Table(table));
+    let rt = dwg_roundtrip(&doc);
+
+    let table_rt = rt
+        .entities()
+        .find_map(|e| {
+            if let EntityType::Table(t) = e {
+                Some(t)
+            } else {
+                None
+            }
+        })
+        .expect("ACAD_TABLE entity missing after DWG roundtrip");
+
+    assert_eq!(table_rt.row_count(), 2);
+    assert_eq!(table_rt.column_count(), 2);
+    assert_eq!(table_rt.rows[0].height, 0.7);
+    assert_eq!(table_rt.columns[1].width, 3.0);
+    assert_eq!(table_rt.columns[0].name, "C1");
+    assert_eq!(table_rt.rows[0].cells[0].text_value(), "R0C0");
+    assert_eq!(table_rt.rows[1].cells[1].text_value(), "R1C1");
+    assert_eq!(table_rt.rows[0].cells[1].tooltip, "tip");
+    assert!(table_rt.rows[0].cells[1].auto_fit);
+    assert!(table_rt.break_options.contains(BreakOptionFlags::ENABLE_BREAKS));
+    assert_eq!(table_rt.break_flow_direction, BreakFlowDirection::Vertical);
+    assert!((table_rt.break_spacing - 0.35).abs() < 1e-12);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  CROSS-FORMAT ROUNDTRIP TESTS
 // ═══════════════════════════════════════════════════════════════════════════

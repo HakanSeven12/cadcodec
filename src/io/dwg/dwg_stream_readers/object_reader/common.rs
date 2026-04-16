@@ -107,6 +107,7 @@ pub const OBJ_WIPEOUT: i16 = -4;
 pub const OBJ_UNDERLAY_PDF: i16 = -5;
 pub const OBJ_UNDERLAY_DWF: i16 = -6;
 pub const OBJ_UNDERLAY_DGN: i16 = -7;
+pub const OBJ_ACAD_TABLE: i16 = -8;
 
 // Class-based non-entity objects — also resolved via class mapping for
 // portable type codes.  The values here match ACadSharp's ObjectType.
@@ -128,10 +129,10 @@ pub const OBJ_TABLESTYLE: i16 = 0x6A;       // 106
 pub fn is_entity_type(type_code: i16) -> bool {
     // Fixed entity types: 1–47, 74 (OLE2FRAME), 77 (LWPOLYLINE), 78 (HATCH)
     // EXCEPT: 42 (OBJ_DICTIONARY) is a non-graphical object, not an entity.
-    // Class-based entity sentinels: -7..-1 (UNDERLAY, WIPEOUT, MULTILEADER, MESH, IMAGE)
+    // Class-based entity sentinels: -8..-1 (ACAD_TABLE, UNDERLAY, WIPEOUT, MULTILEADER, MESH, IMAGE)
     // Class-based entity types (≥500) are NOT included here; the builder
     // checks the class's is_an_entity flag directly.
-    matches!(type_code, -7..=-1 | 1..=41 | 43..=47 | 74 | 77 | 78)
+    matches!(type_code, -8..=-1 | 1..=41 | 43..=47 | 74 | 77 | 78)
 }
 
 /// Returns true if the type code is a table control or entry.
@@ -153,6 +154,7 @@ pub fn dxf_name_to_type_code(dxf_name: &str) -> Option<i16> {
         "PDFREFERENCE" => Some(OBJ_UNDERLAY_PDF),
         "DWFREFERENCE" => Some(OBJ_UNDERLAY_DWF),
         "DGNREFERENCE" => Some(OBJ_UNDERLAY_DGN),
+        "ACAD_TABLE" => Some(OBJ_ACAD_TABLE),
         "MESH" => Some(OBJ_MESH),
         "MULTILEADER" => Some(OBJ_MULTILEADER),
         "OLE2FRAME" => Some(OBJ_OLE2FRAME),

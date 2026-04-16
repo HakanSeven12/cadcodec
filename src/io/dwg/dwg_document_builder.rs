@@ -1805,6 +1805,42 @@ impl DwgDocumentBuilder {
                     }
                     let _ = document.add_entity(EntityType::Wipeout(e));
                 },
+                OBJ_ACAD_TABLE => {
+                    let data = entities::read_table(&mut reader);
+
+                    let mut e = Table::new(
+                        data.insertion_point,
+                        data.rows.len(),
+                        data.columns.len(),
+                    );
+                    e.common = entity_common;
+                    e.insertion_point = data.insertion_point;
+                    e.horizontal_direction = data.horizontal_direction;
+                    e.normal = data.normal;
+                    e.table_style_handle = if data.table_style_handle != 0 {
+                        Some(Handle::from(data.table_style_handle))
+                    } else {
+                        None
+                    };
+                    e.block_record_handle = if data.block_record_handle != 0 {
+                        Some(Handle::from(data.block_record_handle))
+                    } else {
+                        None
+                    };
+                    e.data_version = data.data_version;
+                    e.value_flags = data.value_flags;
+                    e.override_flag = data.override_flag;
+                    e.override_border_color = data.override_border_color;
+                    e.override_border_line_weight = data.override_border_line_weight;
+                    e.override_border_visibility = data.override_border_visibility;
+                    e.rows = data.rows;
+                    e.columns = data.columns;
+                    e.break_options = data.break_options;
+                    e.break_flow_direction = data.break_flow_direction;
+                    e.break_spacing = data.break_spacing;
+
+                    let _ = document.add_entity(EntityType::Table(e));
+                },
                 OBJ_UNDERLAY_PDF | OBJ_UNDERLAY_DWF | OBJ_UNDERLAY_DGN => {
                     let data = entities::read_underlay(
                         &mut reader,
