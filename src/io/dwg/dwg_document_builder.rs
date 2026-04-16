@@ -2256,6 +2256,137 @@ impl DwgDocumentBuilder {
                         crate::objects::ObjectType::MultiLeaderStyle(obj),
                     );
                 },
+                OBJ_TABLESTYLE => {
+                    let data = objects::read_table_style(&mut reader);
+                    let mut obj = crate::objects::TableStyle::new(&data.name);
+                    obj.handle = Handle::from(handle);
+                    obj.owner_handle = owner_handle;
+                    obj.description = data.description;
+                    obj.version = data.version;
+                    obj.flow_direction = crate::objects::TableFlowDirection::from(data.flow_direction);
+                    obj.flags = crate::objects::TableStyleFlags::from_bits_truncate(data.flags);
+                    obj.horizontal_margin = data.horizontal_margin;
+                    obj.vertical_margin = data.vertical_margin;
+                    obj.title_suppressed = data.title_suppressed;
+                    obj.header_suppressed = data.header_suppressed;
+
+                    let to_border = |b: &objects::TableCellBorderData| crate::objects::TableCellBorder {
+                        property_flags: crate::objects::TableBorderPropertyFlags::from_bits_truncate(b.property_flags),
+                        border_type: crate::objects::TableBorderType::from(b.border_type),
+                        line_weight: LineWeight::from_value(b.line_weight as i16),
+                        color: b.color,
+                        is_invisible: b.is_invisible,
+                        double_line_spacing: b.double_line_spacing,
+                    };
+
+                    let to_row_style = |s: &objects::RowCellStyleData| crate::objects::RowCellStyle {
+                        text_style_name: s.text_style_name.clone(),
+                        text_style_handle: if s.text_style_handle != 0 {
+                            Some(Handle::from(s.text_style_handle))
+                        } else {
+                            None
+                        },
+                        text_height: s.text_height,
+                        alignment: crate::objects::CellAlignment::from(s.alignment),
+                        text_color: s.text_color,
+                        fill_color: s.fill_color,
+                        fill_enabled: s.fill_enabled,
+                        data_type: s.data_type,
+                        unit_type: s.unit_type,
+                        format_string: s.format_string.clone(),
+                        left_border: to_border(&s.left_border),
+                        right_border: to_border(&s.right_border),
+                        top_border: to_border(&s.top_border),
+                        bottom_border: to_border(&s.bottom_border),
+                        horizontal_inside_border: to_border(&s.horizontal_inside_border),
+                        vertical_inside_border: to_border(&s.vertical_inside_border),
+                    };
+
+                    obj.data_row_style = to_row_style(&data.data_row_style);
+                    obj.header_row_style = to_row_style(&data.header_row_style);
+                    obj.title_row_style = to_row_style(&data.title_row_style);
+
+                    document.objects.insert(
+                        Handle::from(handle),
+                        crate::objects::ObjectType::TableStyle(obj),
+                    );
+                },
+                OBJ_VISUALSTYLE => {
+                    let data = objects::read_visual_style(&mut reader);
+                    let mut obj = crate::objects::VisualStyle::new();
+                    obj.handle = Handle::from(handle);
+                    obj.owner = owner_handle;
+                    obj.description = data.description;
+                    obj.style_type = data.style_type;
+                    obj.face_lighting_model = data.face_lighting_model;
+                    obj.face_lighting_quality = data.face_lighting_quality;
+                    obj.face_color_mode = data.face_color_mode;
+                    obj.face_modifier = data.face_modifier;
+                    obj.edge_model = data.edge_model;
+                    obj.edge_style = data.edge_style;
+                    obj.edge_color_mode = data.edge_color_mode;
+                    obj.face_opacity = data.face_opacity;
+                    obj.edge_opacity = data.edge_opacity;
+                    obj.face_tint_color = data.face_tint_color;
+                    obj.internal_use_only = data.internal_use_only;
+
+                    document.objects.insert(
+                        Handle::from(handle),
+                        crate::objects::ObjectType::VisualStyle(obj),
+                    );
+                },
+                OBJ_MATERIAL => {
+                    let data = objects::read_material(&mut reader);
+                    let mut obj = crate::objects::Material::new();
+                    obj.handle = Handle::from(handle);
+                    obj.owner = owner_handle;
+                    obj.name = data.name;
+                    obj.description = data.description;
+                    obj.ambient_color = data.ambient_color;
+                    obj.diffuse_color = data.diffuse_color;
+                    obj.roughness = data.roughness;
+                    obj.opacity = data.opacity;
+
+                    document.objects.insert(
+                        Handle::from(handle),
+                        crate::objects::ObjectType::Material(obj),
+                    );
+                },
+                OBJ_GEODATA => {
+                    let data = objects::read_geodata(&mut reader);
+                    let mut obj = crate::objects::GeoData::new();
+                    obj.handle = Handle::from(handle);
+                    obj.owner = owner_handle;
+                    obj.version = data.version;
+                    obj.coordinate_type = data.coordinate_type;
+                    obj.design_point = data.design_point;
+                    obj.reference_point = data.reference_point;
+                    obj.north_direction = data.north_direction;
+                    obj.horizontal_unit_scale = data.horizontal_unit_scale;
+                    obj.vertical_unit_scale = data.vertical_unit_scale;
+
+                    document.objects.insert(
+                        Handle::from(handle),
+                        crate::objects::ObjectType::GeoData(obj),
+                    );
+                },
+                OBJ_SPATIALFILTER => {
+                    let data = objects::read_spatial_filter(&mut reader);
+                    let mut obj = crate::objects::SpatialFilter::new();
+                    obj.handle = Handle::from(handle);
+                    obj.owner = owner_handle;
+                    obj.is_enabled = data.is_enabled;
+                    obj.is_front_clipping_on = data.is_front_clipping_on;
+                    obj.front_clipping_distance = data.front_clipping_distance;
+                    obj.is_back_clipping_on = data.is_back_clipping_on;
+                    obj.back_clipping_distance = data.back_clipping_distance;
+                    obj.clip_boundary_points = data.clip_boundary_points;
+
+                    document.objects.insert(
+                        Handle::from(handle),
+                        crate::objects::ObjectType::SpatialFilter(obj),
+                    );
+                },
                 OBJ_IMAGEDEF => {
                     let data = objects::read_image_definition(&mut reader);
                     let mut obj = crate::objects::ImageDefinition::new(&data.file_name);

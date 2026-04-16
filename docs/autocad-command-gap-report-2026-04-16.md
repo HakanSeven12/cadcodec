@@ -153,12 +153,17 @@ Status legend:
 - Validation added: targeted tests `write_table_entity_full_serialization`, `test_table_roundtrip_payload`, and `dwg_roundtrip_table_entity_semantics`.
 - Remaining risk: broader external interoperability corpus testing is still needed for highly-styled tables and linked-data edge cases.
 
-2. DWG writer cannot serialize several typed object variants.
+2. Highest-loss typed-object DWG variants now have dedicated write/read paths.
 
-- Evidence: `src/io/dwg/dwg_stream_writers/object_writer/objects.rs`
-- Stub/unsupported typed variants are skipped (visual/material/geodata/spatial filter/table style).
-- Mitigation added: skips now emit diagnostics; unknown objects with raw DWG payload are allowed as dictionary-writable and can roundtrip verbatim.
-- Remaining risk: metadata loss for typed variants that lack raw payload and have no dedicated DWG writer.
+- Evidence: `src/io/dwg/dwg_stream_writers/object_writer/objects.rs`, `src/io/dwg/dwg_stream_readers/object_reader/objects.rs`, `src/io/dwg/dwg_document_builder.rs`
+- Current behavior: `TABLESTYLE`, `VISUALSTYLE`, `MATERIAL`, `GEODATA`, and `SPATIAL_FILTER` are serialized as typed DWG objects and reconstructed back into typed `ObjectType` variants.
+- Deeper payload coverage added:
+  - `VISUALSTYLE`: edge color mode, face/edge opacity, face tint color.
+  - `MATERIAL`: ambient/diffuse colors, roughness, opacity.
+  - `GEODATA`: design/reference points, north direction, horizontal/vertical unit scale.
+  - `SPATIAL_FILTER`: enable/clip flags, front/back clipping distances, polygon clip boundary points.
+- Validation added: targeted tests `write_tablestyle_object`, `write_visualstyle_object`, `write_material_object`, `write_geodata_and_spatialfilter_objects`, `test_table_style_roundtrip`, `test_visual_style_roundtrip`, `test_material_geodata_spatial_filter_roundtrip`, and `dwg_roundtrip_typed_objects_preserved`.
+- Remaining risk: payload depth is now beyond core stubs but still partial versus full AutoCAD/ODA object specs; richer vendor-specific subfields still need broader corpus validation.
 
 3. Unknown/non-supported parse fallback paths are intentionally lossy in operation semantics.
 
@@ -339,7 +344,7 @@ Current assessment:
 Use this as a release checklist for command-family parity:
 
 - [ ] No degraded DWG fallbacks for supported entity/object domains.
-- [ ] Roundtrip tests for remaining object edge cases (underlay/table cases covered).
+- [ ] Roundtrip tests for remaining advanced object edge cases (underlay/table and core typed-object cases covered).
 - [ ] Geometry kernel foundation (intersection/offset/trim/extend).
 - [ ] Modify command wrappers with deterministic APIs and tests.
 - [ ] 3D procedural op APIs with solid model output.

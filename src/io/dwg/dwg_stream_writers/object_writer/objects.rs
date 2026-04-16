@@ -48,12 +48,11 @@ impl<'a> DwgObjectWriter<'a> {
             ObjectType::PlaceHolder(p) => self.write_placeholder(p),
             ObjectType::BookColor(b) => self.write_book_color(b),
             ObjectType::WipeoutVariables(w) => self.write_wipeout_variables(w),
-            // Stub / unsupported objects — report and skip
-            ObjectType::GeoData(o) => self.warn_skipped_object("GEODATA", o.handle),
-            ObjectType::SpatialFilter(o) => self.warn_skipped_object("SPATIALFILTER", o.handle),
-            ObjectType::VisualStyle(o) => self.warn_skipped_object("VISUALSTYLE", o.handle),
-            ObjectType::Material(o) => self.warn_skipped_object("MATERIAL", o.handle),
-            ObjectType::TableStyle(o) => self.warn_skipped_object("TABLESTYLE", o.handle),
+            ObjectType::GeoData(o) => self.write_geodata(o),
+            ObjectType::SpatialFilter(o) => self.write_spatial_filter(o),
+            ObjectType::VisualStyle(o) => self.write_visual_style(o),
+            ObjectType::Material(o) => self.write_material(o),
+            ObjectType::TableStyle(o) => self.write_table_style_object(o),
             ObjectType::Unknown { handle, raw_dwg_data, raw_dwg_handle_bits, .. } => {
                 if let Some(ref raw) = raw_dwg_data {
                     self.register_raw_object(*handle, raw, *raw_dwg_handle_bits);
@@ -75,16 +74,27 @@ impl<'a> DwgObjectWriter<'a> {
         match self.document.objects.get(handle) {
             None => false,
             Some(obj) => match obj {
-                ObjectType::GeoData(_)
-                | ObjectType::SpatialFilter(_)
-                | ObjectType::VisualStyle(_)
-                | ObjectType::Material(_)
-                | ObjectType::TableStyle(_) => false,
                 ObjectType::Unknown { raw_dwg_data, .. } => {
                     raw_dwg_data.is_some()
                 }
                 _ => true,
             },
+        }
+    }
+
+    fn required_class_type_code(
+        &self,
+        class_name: &str,
+        fallback: i16,
+        logical_name: &str,
+        handle: Handle,
+    ) -> Option<i16> {
+        let type_code = self.class_type_code(class_name, fallback);
+        if type_code < 0 {
+            self.warn_skipped_object(logical_name, handle);
+            None
+        } else {
+            Some(type_code)
         }
     }
 
@@ -736,6 +746,182 @@ impl<'a> DwgObjectWriter<'a> {
         self.register_object(style.handle);
     }
 
+    // ── TableStyle ─────────────────────────────────────────────────
+
+    fn write_table_style_object(&mut self, style: &TableStyle) {
+        let Some(type_code) = self.required_class_type_code(
+            "TABLESTYLE",
+            common::OBJ_TABLESTYLE,
+            "TABLESTYLE",
+            style.handle,
+        ) else {
+            return;
+        };
+
+        self.write_common_non_entity_data(
+            type_code,
+            style.handle,
+            style.owner_handle,
+            &[],
+            &None,
+        );
+
+        self.writer.write_byte(style.version as u8);
+        self.writer.write_variable_text(&style.name);
+        self.writer.write_variable_text(&style.description);
+        self.writer.write_bit_short(style.flow_direction as i16);
+        self.writer.write_bit_short(style.flags.bits());
+        self.writer.write_bit_double(style.horizontal_margin);
+        self.writer.write_bit_double(style.vertical_margin);
+        self.writer.write_bit(style.title_suppressed);
+        self.writer.write_bit(style.header_suppressed);
+
+        self.write_table_style_row_cell(&style.data_row_style);
+        self.write_table_style_row_cell(&style.header_row_style);
+        self.write_table_style_row_cell(&style.title_row_style);
+
+        self.register_object(style.handle);
+    }
+
+    fn write_table_style_row_cell(&mut self, style: &RowCellStyle) {
+        self.writer.write_variable_text(&style.text_style_name);
+        let text_style = style.text_style_handle.unwrap_or(Handle::NULL);
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, text_style.value());
+
+        self.writer.write_bit_double(style.text_height);
+        self.writer.write_bit_short(style.alignment as i16);
+        self.writer.write_cm_color(&style.text_color);
+        self.writer.write_bit(style.fill_enabled);
+        self.writer.write_cm_color(&style.fill_color);
+        self.writer.write_bit_long(style.data_type);
+        self.writer.write_bit_long(style.unit_type);
+        self.writer.write_variable_text(&style.format_string);
+
+        self.write_table_style_border(&style.left_border);
+        self.write_table_style_border(&style.right_border);
+        self.write_table_style_border(&style.top_border);
+        self.write_table_style_border(&style.bottom_border);
+        self.write_table_style_border(&style.horizontal_inside_border);
+        self.write_table_style_border(&style.vertical_inside_border);
+    }
+
+    fn write_table_style_border(&mut self, border: &TableCellBorder) {
+        self.writer.write_bit_long(border.property_flags.bits());
+        self.writer.write_bit_short(border.border_type as i16);
+        self.writer
+            .write_bit_long(border.line_weight.as_i16() as i32);
+        self.writer.write_cm_color(&border.color);
+        self.writer.write_bit(border.is_invisible);
+        self.writer.write_bit_double(border.double_line_spacing);
+    }
+
+    // ── VisualStyle ────────────────────────────────────────────────
+
+    fn write_visual_style(&mut self, obj: &VisualStyle) {
+        let Some(type_code) = self.required_class_type_code(
+            "VISUALSTYLE",
+            common::OBJ_VISUALSTYLE,
+            "VISUALSTYLE",
+            obj.handle,
+        ) else {
+            return;
+        };
+
+        self.write_common_non_entity_data(type_code, obj.handle, obj.owner, &[], &None);
+
+        self.writer.write_variable_text(&obj.description);
+        self.writer.write_bit_short(obj.style_type);
+        self.writer.write_bit_short(obj.face_lighting_model);
+        self.writer.write_bit_short(obj.face_lighting_quality);
+        self.writer.write_bit_short(obj.face_color_mode);
+        self.writer.write_bit_long(obj.face_modifier);
+        self.writer.write_bit_long(obj.edge_model);
+        self.writer.write_bit_long(obj.edge_style);
+        self.writer.write_bit_short(obj.edge_color_mode);
+        self.writer.write_bit_short(obj.face_opacity);
+        self.writer.write_bit_short(obj.edge_opacity);
+        self.writer.write_bit_long(obj.face_tint_color);
+        self.writer.write_bit(obj.internal_use_only);
+
+        self.register_object(obj.handle);
+    }
+
+    // ── Material ───────────────────────────────────────────────────
+
+    fn write_material(&mut self, obj: &Material) {
+        let Some(type_code) = self.required_class_type_code(
+            "MATERIAL",
+            common::OBJ_MATERIAL,
+            "MATERIAL",
+            obj.handle,
+        ) else {
+            return;
+        };
+
+        self.write_common_non_entity_data(type_code, obj.handle, obj.owner, &[], &None);
+
+        self.writer.write_variable_text(&obj.name);
+        self.writer.write_variable_text(&obj.description);
+        self.writer.write_cm_color(&obj.ambient_color);
+        self.writer.write_cm_color(&obj.diffuse_color);
+        self.writer.write_bit_double(obj.roughness);
+        self.writer.write_bit_double(obj.opacity);
+
+        self.register_object(obj.handle);
+    }
+
+    // ── GeoData ────────────────────────────────────────────────────
+
+    fn write_geodata(&mut self, obj: &GeoData) {
+        let Some(type_code) = self.required_class_type_code(
+            "GEODATA",
+            common::OBJ_GEODATA,
+            "GEODATA",
+            obj.handle,
+        ) else {
+            return;
+        };
+
+        self.write_common_non_entity_data(type_code, obj.handle, obj.owner, &[], &None);
+        self.writer.write_bit_long(obj.version);
+        self.writer.write_bit_short(obj.coordinate_type);
+        self.writer.write_3bit_double(obj.design_point);
+        self.writer.write_3bit_double(obj.reference_point);
+        self.writer.write_2bit_double(obj.north_direction);
+        self.writer.write_bit_double(obj.horizontal_unit_scale);
+        self.writer.write_bit_double(obj.vertical_unit_scale);
+        self.register_object(obj.handle);
+    }
+
+    // ── Spatial Filter ─────────────────────────────────────────────
+
+    fn write_spatial_filter(&mut self, obj: &SpatialFilter) {
+        let Some(type_code) = self.required_class_type_code(
+            "SPATIAL_FILTER",
+            common::OBJ_SPATIALFILTER,
+            "SPATIALFILTER",
+            obj.handle,
+        ) else {
+            return;
+        };
+
+        self.write_common_non_entity_data(type_code, obj.handle, obj.owner, &[], &None);
+        self.writer.write_bit(obj.is_enabled);
+        self.writer.write_bit(obj.is_front_clipping_on);
+        self.writer
+            .write_bit_double(obj.front_clipping_distance);
+        self.writer.write_bit(obj.is_back_clipping_on);
+        self.writer
+            .write_bit_double(obj.back_clipping_distance);
+        self.writer
+            .write_bit_long(obj.clip_boundary_points.len() as i32);
+        for point in &obj.clip_boundary_points {
+            self.writer.write_2bit_double(*point);
+        }
+        self.register_object(obj.handle);
+    }
+
     // ── Image Definition ────────────────────────────────────────────
 
     fn write_image_definition(&mut self, def: &ImageDefinition) {
@@ -967,5 +1153,94 @@ mod tests {
         assert!(!writer.output.is_empty());
         // Should have enqueued the child handle
         assert!(writer.object_queue.contains(&Handle::new(0x20)));
+    }
+
+    #[test]
+    fn write_tablestyle_object() {
+        let doc = CadDocument::new();
+        let mut writer = DwgObjectWriter::new(&doc).unwrap();
+
+        let mut style = TableStyle::new("Standard");
+        style.handle = Handle::new(0x120);
+        style.horizontal_margin = 0.08;
+        style.vertical_margin = 0.09;
+        style.data_row_style.format_string = "%lu2%pr2".to_string();
+
+        writer.write_table_style_object(&style);
+        assert!(!writer.output.is_empty());
+        assert!(writer.handle_map.iter().any(|(h, _)| *h == style.handle.value()));
+    }
+
+    #[test]
+    fn write_visualstyle_object() {
+        let doc = CadDocument::new();
+        let mut writer = DwgObjectWriter::new(&doc).unwrap();
+
+        let mut obj = VisualStyle::new();
+        obj.handle = Handle::new(0x121);
+        obj.description = "Conceptual".to_string();
+        obj.style_type = 2;
+        obj.face_modifier = 3;
+        obj.edge_style = 4;
+        obj.edge_color_mode = 5;
+        obj.face_opacity = 80;
+        obj.edge_opacity = 60;
+        obj.face_tint_color = 23;
+        obj.internal_use_only = true;
+
+        writer.write_visual_style(&obj);
+        assert!(!writer.output.is_empty());
+        assert!(writer.handle_map.iter().any(|(h, _)| *h == obj.handle.value()));
+    }
+
+    #[test]
+    fn write_material_object() {
+        let doc = CadDocument::new();
+        let mut writer = DwgObjectWriter::new(&doc).unwrap();
+
+        let mut obj = Material::new();
+        obj.handle = Handle::new(0x122);
+        obj.name = "Concrete".to_string();
+        obj.description = "Gray matte".to_string();
+        obj.ambient_color = crate::types::Color::Index(8);
+        obj.diffuse_color = crate::types::Color::Index(253);
+        obj.roughness = 0.4;
+        obj.opacity = 0.85;
+
+        writer.write_material(&obj);
+        assert!(!writer.output.is_empty());
+        assert!(writer.handle_map.iter().any(|(h, _)| *h == obj.handle.value()));
+    }
+
+    #[test]
+    fn write_geodata_and_spatialfilter_objects() {
+        let doc = CadDocument::new();
+        let mut writer = DwgObjectWriter::new(&doc).unwrap();
+
+        let mut geo = GeoData::new();
+        geo.handle = Handle::new(0x123);
+        geo.version = 2;
+        geo.coordinate_type = 3;
+        geo.design_point = crate::types::Vector3::new(100.0, 200.0, 0.0);
+        geo.reference_point = crate::types::Vector3::new(37.5, -122.4, 0.0);
+        geo.north_direction = crate::types::Vector2::new(0.0, 1.0);
+        geo.horizontal_unit_scale = 1.0;
+        geo.vertical_unit_scale = 0.9996;
+        writer.write_geodata(&geo);
+
+        let mut filter = SpatialFilter::new();
+        filter.handle = Handle::new(0x124);
+        filter.is_enabled = true;
+        filter.is_front_clipping_on = true;
+        filter.front_clipping_distance = 10.0;
+        filter.clip_boundary_points = vec![
+            crate::types::Vector2::new(0.0, 0.0),
+            crate::types::Vector2::new(5.0, 0.0),
+            crate::types::Vector2::new(5.0, 5.0),
+        ];
+        writer.write_spatial_filter(&filter);
+
+        assert!(writer.handle_map.iter().any(|(h, _)| *h == geo.handle.value()));
+        assert!(writer.handle_map.iter().any(|(h, _)| *h == filter.handle.value()));
     }
 }

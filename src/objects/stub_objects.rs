@@ -3,7 +3,7 @@
 //! These are minimal representations of DXF objects that ACadSharp supports
 //! but that don't require full rich data models for typical usage.
 
-use crate::types::Handle;
+use crate::types::{Color, Handle, Vector2, Vector3};
 
 /// Trait for minimal stub objects that only need handle + owner fields.
 /// Used by the generic `read_stub_object` reader.
@@ -42,6 +42,14 @@ pub struct VisualStyle {
     pub edge_model: i32,
     /// Edge style (code 92)
     pub edge_style: i32,
+    /// Edge color mode
+    pub edge_color_mode: i16,
+    /// Face opacity
+    pub face_opacity: i16,
+    /// Edge opacity
+    pub edge_opacity: i16,
+    /// Face color tint value
+    pub face_tint_color: i32,
     /// Internal use only flag (code 291)
     pub internal_use_only: bool,
 }
@@ -60,6 +68,10 @@ impl VisualStyle {
             face_modifier: 0,
             edge_model: 0,
             edge_style: 0,
+            edge_color_mode: 0,
+            face_opacity: 0,
+            edge_opacity: 0,
+            face_tint_color: 0,
             internal_use_only: false,
         }
     }
@@ -81,6 +93,14 @@ pub struct Material {
     pub name: String,
     /// Description
     pub description: String,
+    /// Ambient color
+    pub ambient_color: Color,
+    /// Diffuse color
+    pub diffuse_color: Color,
+    /// Roughness value [0..1]
+    pub roughness: f64,
+    /// Opacity value [0..1]
+    pub opacity: f64,
 }
 
 impl Material {
@@ -91,6 +111,10 @@ impl Material {
             owner: Handle::NULL,
             name: String::new(),
             description: String::new(),
+            ambient_color: Color::ByBlock,
+            diffuse_color: Color::ByBlock,
+            roughness: 0.5,
+            opacity: 1.0,
         }
     }
 }
@@ -111,6 +135,16 @@ pub struct GeoData {
     pub version: i32,
     /// Coordinate type (code 70): 0 = unknown, 1 = local grid, 2 = projected grid, 3 = geographic
     pub coordinate_type: i16,
+    /// Design point in drawing coordinates
+    pub design_point: Vector3,
+    /// Reference point in geodetic coordinates
+    pub reference_point: Vector3,
+    /// North direction vector (XY)
+    pub north_direction: Vector2,
+    /// Horizontal unit scale
+    pub horizontal_unit_scale: f64,
+    /// Vertical unit scale
+    pub vertical_unit_scale: f64,
 }
 
 impl GeoData {
@@ -121,6 +155,11 @@ impl GeoData {
             owner: Handle::NULL,
             version: 2,
             coordinate_type: 0,
+            design_point: Vector3::ZERO,
+            reference_point: Vector3::ZERO,
+            north_direction: Vector2::new(0.0, 1.0),
+            horizontal_unit_scale: 1.0,
+            vertical_unit_scale: 1.0,
         }
     }
 }
@@ -137,6 +176,18 @@ pub struct SpatialFilter {
     pub handle: Handle,
     /// Owner handle
     pub owner: Handle,
+    /// Whether clip boundary is enabled
+    pub is_enabled: bool,
+    /// Whether front clipping is enabled
+    pub is_front_clipping_on: bool,
+    /// Distance to front clipping plane
+    pub front_clipping_distance: f64,
+    /// Whether back clipping is enabled
+    pub is_back_clipping_on: bool,
+    /// Distance to back clipping plane
+    pub back_clipping_distance: f64,
+    /// 2D clip boundary polygon points
+    pub clip_boundary_points: Vec<Vector2>,
 }
 
 impl SpatialFilter {
@@ -145,6 +196,12 @@ impl SpatialFilter {
         SpatialFilter {
             handle: Handle::NULL,
             owner: Handle::NULL,
+            is_enabled: false,
+            is_front_clipping_on: false,
+            front_clipping_distance: 0.0,
+            is_back_clipping_on: false,
+            back_clipping_distance: 0.0,
+            clip_boundary_points: Vec::new(),
         }
     }
 }

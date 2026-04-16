@@ -108,6 +108,10 @@ pub const OBJ_UNDERLAY_PDF: i16 = -5;
 pub const OBJ_UNDERLAY_DWF: i16 = -6;
 pub const OBJ_UNDERLAY_DGN: i16 = -7;
 pub const OBJ_ACAD_TABLE: i16 = -8;
+pub const OBJ_VISUALSTYLE: i16 = -9;
+pub const OBJ_MATERIAL: i16 = -10;
+pub const OBJ_GEODATA: i16 = -11;
+pub const OBJ_SPATIALFILTER: i16 = -12;
 
 // Class-based non-entity objects — also resolved via class mapping for
 // portable type codes.  The values here match ACadSharp's ObjectType.
@@ -175,6 +179,10 @@ pub fn dxf_name_to_type_code(dxf_name: &str) -> Option<i16> {
         "WIPEOUTVARIABLES" => Some(OBJ_WIPEOUTVARIABLES),
         "TABLECONTENT" => Some(OBJ_TABLECONTENT),
         "TABLESTYLE" => Some(OBJ_TABLESTYLE),
+        "VISUALSTYLE" => Some(OBJ_VISUALSTYLE),
+        "MATERIAL" => Some(OBJ_MATERIAL),
+        "GEODATA" => Some(OBJ_GEODATA),
+        "SPATIAL_FILTER" | "SPATIALFILTER" => Some(OBJ_SPATIALFILTER),
         _ => None,
     }
 }

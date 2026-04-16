@@ -114,6 +114,13 @@ pub const OBJ_SORTENTSTABLE: i16 = 0x7F;    // 127
 pub const OBJ_RASTERVARIABLES: i16 = 0x80;  // 128
 pub const OBJ_DBCOLOR: i16 = 0x81;          // 129
 pub const OBJ_WIPEOUTVARIABLES: i16 = 0x82; // 130
+pub const OBJ_TABLESTYLE: i16 = 0x6A;       // 106
+
+// Class-only object fallbacks (negative => class missing / not resolvable)
+pub const OBJ_VISUALSTYLE: i16 = -9;
+pub const OBJ_MATERIAL: i16 = -10;
+pub const OBJ_GEODATA: i16 = -11;
+pub const OBJ_SPATIALFILTER: i16 = -12;
 
 // ── Methods on DwgObjectWriter ──────────────────────────────────────
 impl<'a> DwgObjectWriter<'a> {

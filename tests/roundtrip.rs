@@ -1469,6 +1469,144 @@ fn dwg_roundtrip_table_entity_semantics() {
     assert!((table_rt.break_spacing - 0.35).abs() < 1e-12);
 }
 
+#[test]
+fn dwg_roundtrip_typed_objects_preserved() {
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    let root_owner = doc.header.named_objects_dict_handle;
+
+    let mut table_style = acadrust::objects::TableStyle::new("MyTableStyle");
+    table_style.handle = Handle::new(0x730);
+    table_style.owner_handle = root_owner;
+    table_style.description = "Table style for DWG test".to_string();
+    table_style.horizontal_margin = 0.11;
+    table_style.vertical_margin = 0.12;
+    table_style.header_suppressed = true;
+    table_style.data_row_style.text_height = 0.22;
+    table_style.data_row_style.text_color = Color::Index(4);
+    table_style.data_row_style.fill_enabled = true;
+    doc.objects.insert(
+        table_style.handle,
+        acadrust::objects::ObjectType::TableStyle(table_style.clone()),
+    );
+
+    let mut visual = acadrust::objects::VisualStyle::new();
+    visual.handle = Handle::new(0x731);
+    visual.owner = root_owner;
+    visual.description = "Conceptual".to_string();
+    visual.style_type = 2;
+    visual.face_modifier = 7;
+    visual.edge_style = 9;
+    visual.edge_color_mode = 4;
+    visual.face_opacity = 82;
+    visual.edge_opacity = 66;
+    visual.face_tint_color = 21;
+    visual.internal_use_only = true;
+    doc.objects.insert(
+        visual.handle,
+        acadrust::objects::ObjectType::VisualStyle(visual.clone()),
+    );
+
+    let mut material = acadrust::objects::Material::new();
+    material.handle = Handle::new(0x732);
+    material.owner = root_owner;
+    material.name = "Concrete".to_string();
+    material.description = "Gray matte".to_string();
+    material.ambient_color = Color::Index(8);
+    material.diffuse_color = Color::Index(253);
+    material.roughness = 0.35;
+    material.opacity = 0.8;
+    doc.objects.insert(
+        material.handle,
+        acadrust::objects::ObjectType::Material(material.clone()),
+    );
+
+    let mut geodata = acadrust::objects::GeoData::new();
+    geodata.handle = Handle::new(0x733);
+    geodata.owner = root_owner;
+    geodata.version = 2;
+    geodata.coordinate_type = 3;
+    geodata.design_point = Vector3::new(1000.0, 2000.0, 0.0);
+    geodata.reference_point = Vector3::new(37.6188056, -122.3754167, 0.0);
+    geodata.horizontal_unit_scale = 1.0;
+    geodata.vertical_unit_scale = 0.9996;
+    doc.objects.insert(
+        geodata.handle,
+        acadrust::objects::ObjectType::GeoData(geodata.clone()),
+    );
+
+    let mut spatial = acadrust::objects::SpatialFilter::new();
+    spatial.handle = Handle::new(0x734);
+    spatial.owner = root_owner;
+    spatial.is_enabled = true;
+    spatial.is_front_clipping_on = true;
+    spatial.front_clipping_distance = 12.5;
+    spatial.clip_boundary_points = vec![
+        Vector2::new(0.0, 0.0),
+        Vector2::new(10.0, 0.0),
+        Vector2::new(10.0, 5.0),
+        Vector2::new(0.0, 5.0),
+    ];
+    doc.objects.insert(
+        spatial.handle,
+        acadrust::objects::ObjectType::SpatialFilter(spatial.clone()),
+    );
+
+    let rt = dwg_roundtrip(&doc);
+
+    let ts_rt = match rt.objects.get(&table_style.handle) {
+        Some(acadrust::objects::ObjectType::TableStyle(v)) => v,
+        other => panic!("Expected TableStyle at handle {:?}, got {:?}", table_style.handle, other),
+    };
+    assert_eq!(ts_rt.name, "MyTableStyle");
+    assert_eq!(ts_rt.description, "Table style for DWG test");
+    assert!(ts_rt.header_suppressed);
+    assert!((ts_rt.horizontal_margin - 0.11).abs() < 1e-12);
+    assert_eq!(ts_rt.data_row_style.text_color, Color::Index(4));
+
+    let vs_rt = match rt.objects.get(&visual.handle) {
+        Some(acadrust::objects::ObjectType::VisualStyle(v)) => v,
+        other => panic!("Expected VisualStyle at handle {:?}, got {:?}", visual.handle, other),
+    };
+    assert_eq!(vs_rt.description, "Conceptual");
+    assert_eq!(vs_rt.style_type, 2);
+    assert_eq!(vs_rt.edge_style, 9);
+    assert_eq!(vs_rt.edge_color_mode, 4);
+    assert_eq!(vs_rt.face_opacity, 82);
+    assert_eq!(vs_rt.edge_opacity, 66);
+    assert_eq!(vs_rt.face_tint_color, 21);
+    assert!(vs_rt.internal_use_only);
+
+    let mat_rt = match rt.objects.get(&material.handle) {
+        Some(acadrust::objects::ObjectType::Material(v)) => v,
+        other => panic!("Expected Material at handle {:?}, got {:?}", material.handle, other),
+    };
+    assert_eq!(mat_rt.name, "Concrete");
+    assert_eq!(mat_rt.description, "Gray matte");
+    assert_eq!(mat_rt.ambient_color, Color::Index(8));
+    assert_eq!(mat_rt.diffuse_color, Color::Index(253));
+    assert!((mat_rt.roughness - 0.35).abs() < 1e-12);
+    assert!((mat_rt.opacity - 0.8).abs() < 1e-12);
+
+    let geo_rt = match rt.objects.get(&geodata.handle) {
+        Some(acadrust::objects::ObjectType::GeoData(v)) => v,
+        other => panic!("Expected GeoData at handle {:?}, got {:?}", geodata.handle, other),
+    };
+    assert_eq!(geo_rt.version, 2);
+    assert_eq!(geo_rt.coordinate_type, 3);
+    assert!((geo_rt.design_point.x - 1000.0).abs() < 1e-12);
+    assert!((geo_rt.reference_point.y - (-122.3754167)).abs() < 1e-12);
+    assert!((geo_rt.vertical_unit_scale - 0.9996).abs() < 1e-12);
+
+    let spatial_rt = match rt.objects.get(&spatial.handle) {
+        Some(acadrust::objects::ObjectType::SpatialFilter(v)) => v,
+        other => panic!("Expected SpatialFilter at handle {:?}, got {:?}", spatial.handle, other),
+    };
+    assert!(spatial_rt.is_enabled);
+    assert!(spatial_rt.is_front_clipping_on);
+    assert!((spatial_rt.front_clipping_distance - 12.5).abs() < 1e-12);
+    assert_eq!(spatial_rt.clip_boundary_points.len(), 4);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  CROSS-FORMAT ROUNDTRIP TESTS
 // ═══════════════════════════════════════════════════════════════════════════

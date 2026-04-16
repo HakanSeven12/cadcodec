@@ -6,7 +6,7 @@
 
 use crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader;
 use crate::io::dwg::dwg_version::DwgVersion;
-use crate::types::{Color, Vector2, Vector3, DxfVersion};
+use crate::types::{Color, DxfVersion, Vector2, Vector3};
 use super::safe_count;
 
 // ════════════════════════════════════════════════════════════════════════
@@ -251,6 +251,107 @@ pub struct BookColorData {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WipeoutVariablesData {
     pub display_frame: i16,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TableCellBorderData {
+    pub property_flags: i32,
+    pub border_type: i16,
+    pub line_weight: i32,
+    pub color: Color,
+    pub is_invisible: bool,
+    pub double_line_spacing: f64,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RowCellStyleData {
+    pub text_style_name: String,
+    pub text_style_handle: u64,
+    pub text_height: f64,
+    pub alignment: i16,
+    pub text_color: Color,
+    pub fill_enabled: bool,
+    pub fill_color: Color,
+    pub data_type: i32,
+    pub unit_type: i32,
+    pub format_string: String,
+    pub left_border: TableCellBorderData,
+    pub right_border: TableCellBorderData,
+    pub top_border: TableCellBorderData,
+    pub bottom_border: TableCellBorderData,
+    pub horizontal_inside_border: TableCellBorderData,
+    pub vertical_inside_border: TableCellBorderData,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TableStyleData {
+    pub version: i16,
+    pub name: String,
+    pub description: String,
+    pub flow_direction: i16,
+    pub flags: i16,
+    pub horizontal_margin: f64,
+    pub vertical_margin: f64,
+    pub title_suppressed: bool,
+    pub header_suppressed: bool,
+    pub data_row_style: RowCellStyleData,
+    pub header_row_style: RowCellStyleData,
+    pub title_row_style: RowCellStyleData,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct VisualStyleData {
+    pub description: String,
+    pub style_type: i16,
+    pub face_lighting_model: i16,
+    pub face_lighting_quality: i16,
+    pub face_color_mode: i16,
+    pub face_modifier: i32,
+    pub edge_model: i32,
+    pub edge_style: i32,
+    pub edge_color_mode: i16,
+    pub face_opacity: i16,
+    pub edge_opacity: i16,
+    pub face_tint_color: i32,
+    pub internal_use_only: bool,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MaterialData {
+    pub name: String,
+    pub description: String,
+    pub ambient_color: Color,
+    pub diffuse_color: Color,
+    pub roughness: f64,
+    pub opacity: f64,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct GeoDataData {
+    pub version: i32,
+    pub coordinate_type: i16,
+    pub design_point: Vector3,
+    pub reference_point: Vector3,
+    pub north_direction: Vector2,
+    pub horizontal_unit_scale: f64,
+    pub vertical_unit_scale: f64,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SpatialFilterData {
+    pub is_enabled: bool,
+    pub is_front_clipping_on: bool,
+    pub front_clipping_distance: f64,
+    pub is_back_clipping_on: bool,
+    pub back_clipping_distance: f64,
+    pub clip_boundary_points: Vec<Vector2>,
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -610,6 +711,150 @@ pub fn read_wipeout_variables(reader: &mut DwgMergedReader) -> WipeoutVariablesD
     WipeoutVariablesData { display_frame }
 }
 
+fn read_table_cell_border(reader: &mut DwgMergedReader) -> TableCellBorderData {
+    TableCellBorderData {
+        property_flags: reader.read_bit_long(),
+        border_type: reader.read_bit_short(),
+        line_weight: reader.read_bit_long(),
+        color: reader.read_cm_color(),
+        is_invisible: reader.read_bit(),
+        double_line_spacing: reader.read_bit_double(),
+    }
+}
+
+fn read_row_cell_style(reader: &mut DwgMergedReader) -> RowCellStyleData {
+    let text_style_name = reader.read_variable_text();
+    let text_style_handle = reader.read_handle();
+    let text_height = reader.read_bit_double();
+    let alignment = reader.read_bit_short();
+    let text_color = reader.read_cm_color();
+    let fill_enabled = reader.read_bit();
+    let fill_color = reader.read_cm_color();
+    let data_type = reader.read_bit_long();
+    let unit_type = reader.read_bit_long();
+    let format_string = reader.read_variable_text();
+
+    let left_border = read_table_cell_border(reader);
+    let right_border = read_table_cell_border(reader);
+    let top_border = read_table_cell_border(reader);
+    let bottom_border = read_table_cell_border(reader);
+    let horizontal_inside_border = read_table_cell_border(reader);
+    let vertical_inside_border = read_table_cell_border(reader);
+
+    RowCellStyleData {
+        text_style_name,
+        text_style_handle,
+        text_height,
+        alignment,
+        text_color,
+        fill_enabled,
+        fill_color,
+        data_type,
+        unit_type,
+        format_string,
+        left_border,
+        right_border,
+        top_border,
+        bottom_border,
+        horizontal_inside_border,
+        vertical_inside_border,
+    }
+}
+
+pub fn read_table_style(reader: &mut DwgMergedReader) -> TableStyleData {
+    let version = reader.read_byte() as i16;
+    let name = reader.read_variable_text();
+    let description = reader.read_variable_text();
+    let flow_direction = reader.read_bit_short();
+    let flags = reader.read_bit_short();
+    let horizontal_margin = reader.read_bit_double();
+    let vertical_margin = reader.read_bit_double();
+    let title_suppressed = reader.read_bit();
+    let header_suppressed = reader.read_bit();
+
+    let data_row_style = read_row_cell_style(reader);
+    let header_row_style = read_row_cell_style(reader);
+    let title_row_style = read_row_cell_style(reader);
+
+    TableStyleData {
+        version,
+        name,
+        description,
+        flow_direction,
+        flags,
+        horizontal_margin,
+        vertical_margin,
+        title_suppressed,
+        header_suppressed,
+        data_row_style,
+        header_row_style,
+        title_row_style,
+    }
+}
+
+pub fn read_visual_style(reader: &mut DwgMergedReader) -> VisualStyleData {
+    VisualStyleData {
+        description: reader.read_variable_text(),
+        style_type: reader.read_bit_short(),
+        face_lighting_model: reader.read_bit_short(),
+        face_lighting_quality: reader.read_bit_short(),
+        face_color_mode: reader.read_bit_short(),
+        face_modifier: reader.read_bit_long(),
+        edge_model: reader.read_bit_long(),
+        edge_style: reader.read_bit_long(),
+        edge_color_mode: reader.read_bit_short(),
+        face_opacity: reader.read_bit_short(),
+        edge_opacity: reader.read_bit_short(),
+        face_tint_color: reader.read_bit_long(),
+        internal_use_only: reader.read_bit(),
+    }
+}
+
+pub fn read_material(reader: &mut DwgMergedReader) -> MaterialData {
+    MaterialData {
+        name: reader.read_variable_text(),
+        description: reader.read_variable_text(),
+        ambient_color: reader.read_cm_color(),
+        diffuse_color: reader.read_cm_color(),
+        roughness: reader.read_bit_double(),
+        opacity: reader.read_bit_double(),
+    }
+}
+
+pub fn read_geodata(reader: &mut DwgMergedReader) -> GeoDataData {
+    GeoDataData {
+        version: reader.read_bit_long(),
+        coordinate_type: reader.read_bit_short(),
+        design_point: reader.read_3bit_double(),
+        reference_point: reader.read_3bit_double(),
+        north_direction: reader.read_2bit_double(),
+        horizontal_unit_scale: reader.read_bit_double(),
+        vertical_unit_scale: reader.read_bit_double(),
+    }
+}
+
+pub fn read_spatial_filter(reader: &mut DwgMergedReader) -> SpatialFilterData {
+    let is_enabled = reader.read_bit();
+    let is_front_clipping_on = reader.read_bit();
+    let front_clipping_distance = reader.read_bit_double();
+    let is_back_clipping_on = reader.read_bit();
+    let back_clipping_distance = reader.read_bit_double();
+    let count = safe_count(reader.read_bit_long());
+    let mut clip_boundary_points = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        clip_boundary_points.push(reader.read_2bit_double());
+    }
+
+    SpatialFilterData {
+        is_enabled,
+        is_front_clipping_on,
+        front_clipping_distance,
+        is_back_clipping_on,
+        back_clipping_distance,
+        clip_boundary_points,
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════════
 //  Tests
 // ════════════════════════════════════════════════════════════════════════
@@ -784,5 +1029,142 @@ mod tests {
         let st = read_sort_entities_table(&mut r);
         assert_eq!(st.entries.len(), 1);
         assert_eq!(st.block_owner_handle, 0x30);
+    }
+
+    #[test]
+    fn test_table_style_roundtrip() {
+        let v = DwgVersion::AC15;
+        let d = DxfVersion::AC1015;
+        let mut r = make_reader(v, d, |w| {
+            w.write_byte(1);
+            w.write_variable_text("Standard");
+            w.write_variable_text("Table style description");
+            w.write_bit_short(0);
+            w.write_bit_short(3);
+            w.write_bit_double(0.06);
+            w.write_bit_double(0.07);
+            w.write_bit(false);
+            w.write_bit(true);
+
+            for i in 0..3 {
+                w.write_variable_text("Standard");
+                w.write_handle(DwgReferenceType::HardPointer, 0x100 + i);
+                w.write_bit_double(0.18 + (i as f64 * 0.01));
+                w.write_bit_short(5);
+                w.write_cm_color(&Color::ByBlock);
+                w.write_bit(i == 0);
+                w.write_cm_color(&Color::Index(7));
+                w.write_bit_long(512);
+                w.write_bit_long(0);
+                w.write_variable_text("%lu2");
+
+                for _ in 0..6 {
+                    w.write_bit_long(0);
+                    w.write_bit_short(1);
+                    w.write_bit_long(-2);
+                    w.write_cm_color(&Color::ByBlock);
+                    w.write_bit(false);
+                    w.write_bit_double(0.0);
+                }
+            }
+        });
+
+        let ts = read_table_style(&mut r);
+        assert_eq!(ts.version, 1);
+        assert_eq!(ts.name, "Standard");
+        assert_eq!(ts.description, "Table style description");
+        assert_eq!(ts.flags, 3);
+        assert!(ts.header_suppressed);
+        assert!((ts.data_row_style.text_height - 0.18).abs() < 1e-12);
+        assert_eq!(ts.header_row_style.text_style_handle, 0x101);
+    }
+
+    #[test]
+    fn test_visual_style_roundtrip() {
+        let v = DwgVersion::AC15;
+        let d = DxfVersion::AC1015;
+        let mut r = make_reader(v, d, |w| {
+            w.write_variable_text("Conceptual");
+            w.write_bit_short(2);
+            w.write_bit_short(1);
+            w.write_bit_short(2);
+            w.write_bit_short(3);
+            w.write_bit_long(10);
+            w.write_bit_long(11);
+            w.write_bit_long(12);
+            w.write_bit_short(4);
+            w.write_bit_short(85);
+            w.write_bit_short(65);
+            w.write_bit_long(42);
+            w.write_bit(true);
+        });
+
+        let vs = read_visual_style(&mut r);
+        assert_eq!(vs.description, "Conceptual");
+        assert_eq!(vs.style_type, 2);
+        assert_eq!(vs.edge_style, 12);
+        assert_eq!(vs.edge_color_mode, 4);
+        assert_eq!(vs.face_opacity, 85);
+        assert_eq!(vs.edge_opacity, 65);
+        assert_eq!(vs.face_tint_color, 42);
+        assert!(vs.internal_use_only);
+    }
+
+    #[test]
+    fn test_material_geodata_spatial_filter_roundtrip() {
+        let v = DwgVersion::AC15;
+        let d = DxfVersion::AC1015;
+
+        let mut r_mat = make_reader(v, d, |w| {
+            w.write_variable_text("Concrete");
+            w.write_variable_text("Gray matte");
+            w.write_cm_color(&Color::Index(8));
+            w.write_cm_color(&Color::Index(253));
+            w.write_bit_double(0.35);
+            w.write_bit_double(0.8);
+        });
+        let mat = read_material(&mut r_mat);
+        assert_eq!(mat.name, "Concrete");
+        assert_eq!(mat.description, "Gray matte");
+        assert_eq!(mat.ambient_color, Color::Index(8));
+        assert_eq!(mat.diffuse_color, Color::Index(253));
+        assert!((mat.roughness - 0.35).abs() < 1e-12);
+        assert!((mat.opacity - 0.8).abs() < 1e-12);
+
+        let mut r_geo = make_reader(v, d, |w| {
+            w.write_bit_long(2);
+            w.write_bit_short(3);
+            w.write_3bit_double(Vector3::new(100.0, 200.0, 0.0));
+            w.write_3bit_double(Vector3::new(37.5, -122.4, 0.0));
+            w.write_2bit_double(Vector2::new(0.0, 1.0));
+            w.write_bit_double(1.0);
+            w.write_bit_double(0.9996);
+        });
+        let geo = read_geodata(&mut r_geo);
+        assert_eq!(geo.version, 2);
+        assert_eq!(geo.coordinate_type, 3);
+        assert!((geo.design_point.x - 100.0).abs() < 1e-12);
+        assert!((geo.reference_point.y - (-122.4)).abs() < 1e-12);
+        assert!((geo.north_direction.y - 1.0).abs() < 1e-12);
+        assert!((geo.vertical_unit_scale - 0.9996).abs() < 1e-12);
+
+        let mut r_sp = make_reader(v, d, |w| {
+            w.write_bit(true);
+            w.write_bit(true);
+            w.write_bit_double(12.0);
+            w.write_bit(false);
+            w.write_bit_double(0.0);
+            w.write_bit_long(3);
+            w.write_2bit_double(Vector2::new(0.0, 0.0));
+            w.write_2bit_double(Vector2::new(10.0, 0.0));
+            w.write_2bit_double(Vector2::new(10.0, 5.0));
+        });
+        let sp = read_spatial_filter(&mut r_sp);
+        assert!(sp.is_enabled);
+        assert!(sp.is_front_clipping_on);
+        assert!((sp.front_clipping_distance - 12.0).abs() < 1e-12);
+        assert!(!sp.is_back_clipping_on);
+        assert_eq!(sp.clip_boundary_points.len(), 3);
+        assert!((sp.clip_boundary_points[2].y - 5.0).abs() < 1e-12);
     }
 }

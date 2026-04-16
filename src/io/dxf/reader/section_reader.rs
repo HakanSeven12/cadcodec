@@ -5538,7 +5538,7 @@ mod tests {
         line.normal = Vector3::new(0.0, 1.0, 0.0);
         line.thickness = 2.5;
         line.common.layer = "TestLayer".to_string();
-        doc.add_entity(EntityType::Line(line));
+        doc.add_entity(EntityType::Line(line)).expect("add_entity");
 
         let doc2 = roundtrip(doc);
         let entities: Vec<_> = doc2.entities().collect();
@@ -5564,7 +5564,7 @@ mod tests {
         circle.radius = 5.0;
         circle.normal = Vector3::new(0.0, 0.0, -1.0);
         circle.thickness = 1.5;
-        doc.add_entity(EntityType::Circle(circle));
+        doc.add_entity(EntityType::Circle(circle)).expect("add_entity");
 
         let doc2 = roundtrip(doc);
         let entities: Vec<_> = doc2.entities().collect();
@@ -5588,7 +5588,7 @@ mod tests {
         arc.end_angle = 90.0;
         arc.normal = Vector3::new(1.0, 0.0, 0.0);
         arc.thickness = 3.0;
-        doc.add_entity(EntityType::Arc(arc));
+        doc.add_entity(EntityType::Arc(arc)).expect("add_entity");
 
         let doc2 = roundtrip(doc);
         let entities: Vec<_> = doc2.entities().collect();
@@ -5615,7 +5615,7 @@ mod tests {
         text.horizontal_alignment = TextHorizontalAlignment::Center;
         text.vertical_alignment = TextVerticalAlignment::Middle;
         text.normal = Vector3::new(0.0, 1.0, 0.0);
-        doc.add_entity(EntityType::Text(text));
+        doc.add_entity(EntityType::Text(text)).expect("add_entity");
 
         let doc2 = roundtrip(doc);
         let entities: Vec<_> = doc2.entities().collect();
@@ -5649,7 +5649,7 @@ mod tests {
         mtext.drawing_direction = DrawingDirection::TopToBottom;
         mtext.line_spacing_factor = 1.5;
         mtext.normal = Vector3::new(0.0, 0.0, -1.0);
-        doc.add_entity(EntityType::MText(mtext));
+        doc.add_entity(EntityType::MText(mtext)).expect("add_entity");
 
         let doc2 = roundtrip(doc);
         let entities: Vec<_> = doc2.entities().collect();
@@ -5684,7 +5684,7 @@ mod tests {
             LwVertex::new(Vector2::new(10.0, 0.0)),
             LwVertex::new(Vector2::new(10.0, 10.0)),
         ];
-        doc.add_entity(EntityType::LwPolyline(lwpoly));
+        doc.add_entity(EntityType::LwPolyline(lwpoly)).expect("add_entity");
 
         let doc2 = roundtrip(doc);
         let entities: Vec<_> = doc2.entities().collect();
@@ -5715,7 +5715,7 @@ mod tests {
             LwVertex { location: Vector2::new(20.0, 0.0), bulge: 0.0, start_width: 0.0, end_width: 0.0 },
             LwVertex { location: Vector2::new(30.0, 0.0), bulge: -0.3, start_width: 0.5, end_width: 0.5 },
         ];
-        doc.add_entity(EntityType::LwPolyline(lwpoly));
+        doc.add_entity(EntityType::LwPolyline(lwpoly)).expect("add_entity");
 
         let doc2 = roundtrip(doc);
         let entities: Vec<_> = doc2.entities().collect();
@@ -5865,7 +5865,7 @@ mod tests {
         line.end = Vector3::new(10.0, 0.0, 0.0);
         line.common.linetype = "DASHED".to_string();
         line.common.linetype_scale = 2.5;
-        doc.add_entity(EntityType::Line(line));
+        doc.add_entity(EntityType::Line(line)).expect("add_entity");
 
         let doc2 = roundtrip(doc);
         let entities: Vec<_> = doc2.entities().collect();
@@ -5884,7 +5884,7 @@ mod tests {
         let mut doc = CadDocument::new();
         let line = crate::entities::line::Line::new();
         // normal defaults to UNIT_Z
-        doc.add_entity(EntityType::Line(line));
+        doc.add_entity(EntityType::Line(line)).expect("add_entity");
 
         let writer = crate::io::dxf::writer::DxfWriter::new(&doc);
         let bytes = writer.write_to_vec().expect("write_to_vec");
@@ -5892,6 +5892,7 @@ mod tests {
         // 210 should NOT appear as a group code for default normal
         // (searching for "\n210\n" to avoid matching other uses of 210)
         let has_210 = content.lines().any(|l| l.trim() == "210");
+        assert!(!has_210, "Default normal should not emit group code 210");
         // The line 210 should not appear in ENTITIES section for default normals
         // This is a soft test - just verify roundtrip still works
         let cursor = std::io::Cursor::new(bytes);
@@ -5923,7 +5924,7 @@ mod tests {
         line.start = Vector3::new(1.0, 2.0, 3.0);
         line.end = Vector3::new(4.0, 5.0, 6.0);
         line.thickness = 1.5;
-        doc.add_entity(EntityType::Line(line));
+        doc.add_entity(EntityType::Line(line)).expect("add_entity");
 
         let doc2 = roundtrip_binary(doc);
         let entities: Vec<_> = doc2.entities().collect();
@@ -5943,7 +5944,7 @@ mod tests {
         let mut mtext = crate::entities::mtext::MText::new();
         mtext.value = "Hello\nWorld".to_string();
         mtext.insertion_point = Vector3::new(10.0, 20.0, 0.0);
-        doc.add_entity(EntityType::MText(mtext));
+        doc.add_entity(EntityType::MText(mtext)).expect("add_entity");
 
         let doc2 = roundtrip_binary(doc);
         let entities: Vec<_> = doc2.entities().collect();
@@ -5963,7 +5964,7 @@ mod tests {
         let mut circle = crate::entities::circle::Circle::new();
         circle.center = Vector3::new(5.0, 10.0, 0.0);
         circle.radius = 3.5;
-        doc.add_entity(EntityType::Circle(circle));
+        doc.add_entity(EntityType::Circle(circle)).expect("add_entity");
 
         let doc2 = roundtrip_binary(doc);
         let entities: Vec<_> = doc2.entities().collect();
