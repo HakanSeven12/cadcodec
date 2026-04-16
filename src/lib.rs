@@ -137,6 +137,7 @@ pub mod io;
 pub mod xdata;
 pub mod objects;
 pub mod api;
+pub mod geometry;
 
 // Re-export commonly used types
 pub use error::{DxfError, Result};

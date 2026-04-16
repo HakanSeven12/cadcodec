@@ -233,13 +233,35 @@ Goal: close interoperability risk gaps first.
 
 Goal: support the most expected non-UI AutoCAD modify commands.
 
-- Add geometry kernel modules for:
+- Implement geometry kernel modules for:
   - intersections
   - offsets (line/polyline/arc first)
   - trim/extend against boundaries
   - fillet/chamfer for linear and circular primitives
-- Add document-level wrappers:
+- Implement document-level wrappers:
   - `trim_entities`, `extend_entities`, `offset_entity`, `fillet_entities`, `chamfer_entities`, `join_entities`, `break_entity`.
+
+Current implementation status (baseline complete):
+
+- Geometry kernel added under `src/geometry/`:
+  - `intersections.rs`
+  - `offsets.rs`
+  - `modify.rs`
+- Document-level wrappers added in `src/document.rs`:
+  - `trim_entities` / `extend_entities` (LINE targets; LINE/ARC boundaries)
+  - `offset_entity` (LINE, ARC, LWPOLYLINE, POLYLINE2D)
+  - `fillet_entities` / `chamfer_entities` (LINE + LINE)
+  - `join_entities` (LINE set to LWPOLYLINE)
+  - `break_entity` (LINE)
+- Validation added:
+  - geometry unit tests in `src/geometry/*`
+  - integration tests in `tests/modify_phase2.rs`
+
+Remaining for full command parity:
+
+- Add robust multi-entity trimming/extension for curves and splines.
+- Improve offset quality for complex/self-intersecting polylines.
+- Extend fillet/chamfer/join/break support to arc/polyline families.
 
 ## Phase 3 (3D command layer)
 

@@ -19,6 +19,7 @@
 
 use crate::classes::DxfClassCollection;
 use crate::entities::{EntityCommon, EntityType};
+use crate::geometry::{intersections, modify, offsets};
 use crate::objects::ObjectType;
 use crate::tables::*;
 use crate::types::{BoundingBox3D, DxfVersion, Color, Handle, Vector2, Vector3};
@@ -2324,6 +2325,398 @@ impl CadDocument {
         } else {
             false
         }
+    }
+
+    /// Trim line entities against a boundary entity.
+    ///
+    /// Current implementation supports:
+    /// - boundary: `LINE`, `ARC`
+    /// - targets: `LINE`
+    ///
+    /// Returns the number of target entities successfully modified.
+    pub fn trim_entities(
+        &mut self,
+        boundary: Handle,
+        targets: &[Handle],
+        pick_point: Vector3,
+    ) -> Result<usize> {
+        let boundary_entity = self
+            .get_entity(boundary)
+            .cloned()
+            .ok_or_else(|| crate::error::DxfError::ObjectNotFound(boundary.value()))?;
+
+        if !matches!(boundary_entity, EntityType::Line(_) | EntityType::Arc(_)) {
+            return Err(crate::error::DxfError::NotImplemented(
+                "trim_entities currently supports LINE/ARC boundaries".to_string(),
+            ));
+        }
+
+        let mut modified_count = 0usize;
+
+        for &target in targets {
+            if target == boundary {
+                continue;
+            }
+
+            let Some(target_line) = self
+                .get_entity(target)
+                .and_then(|e| e.as_line())
+                .cloned()
+            else {
+                continue;
+            };
+
+            let hits = Self::intersections_with_boundary_line(&boundary_entity, &target_line, true);
+            let Some(hit) = Self::nearest_point(&hits, pick_point) else {
+                continue;
+            };
+
+            let Some(trimmed) = modify::trim_line_at_intersection(&target_line, hit, pick_point) else {
+                continue;
+            };
+
+            let mut changed = false;
+            if let Some(EntityType::Line(line_mut)) = self.get_entity_mut(target) {
+                *line_mut = trimmed;
+                changed = true;
+            }
+
+            if changed {
+                self.events.entity_modified(target, "trim");
+                modified_count += 1;
+            }
+        }
+
+        Ok(modified_count)
+    }
+
+    /// Extend line entities until they intersect a boundary entity.
+    ///
+    /// Current implementation supports:
+    /// - boundary: `LINE`, `ARC`
+    /// - targets: `LINE`
+    ///
+    /// Returns the number of target entities successfully modified.
+    pub fn extend_entities(
+        &mut self,
+        boundary: Handle,
+        targets: &[Handle],
+        pick_point: Vector3,
+    ) -> Result<usize> {
+        let boundary_entity = self
+            .get_entity(boundary)
+            .cloned()
+            .ok_or_else(|| crate::error::DxfError::ObjectNotFound(boundary.value()))?;
+
+        if !matches!(boundary_entity, EntityType::Line(_) | EntityType::Arc(_)) {
+            return Err(crate::error::DxfError::NotImplemented(
+                "extend_entities currently supports LINE/ARC boundaries".to_string(),
+            ));
+        }
+
+        let mut modified_count = 0usize;
+
+        for &target in targets {
+            if target == boundary {
+                continue;
+            }
+
+            let Some(target_line) = self
+                .get_entity(target)
+                .and_then(|e| e.as_line())
+                .cloned()
+            else {
+                continue;
+            };
+
+            let hits = Self::intersections_with_boundary_line(&boundary_entity, &target_line, false);
+            let Some(hit) = Self::nearest_point(&hits, pick_point) else {
+                continue;
+            };
+
+            let Some(extended) = modify::extend_line_to_intersection(&target_line, hit, pick_point) else {
+                continue;
+            };
+
+            let mut changed = false;
+            if let Some(EntityType::Line(line_mut)) = self.get_entity_mut(target) {
+                *line_mut = extended;
+                changed = true;
+            }
+
+            if changed {
+                self.events.entity_modified(target, "extend");
+                modified_count += 1;
+            }
+        }
+
+        Ok(modified_count)
+    }
+
+    /// Create an offset copy of a supported entity and return the new handle.
+    ///
+    /// Current implementation supports:
+    /// - `LINE`
+    /// - `ARC`
+    /// - `LWPOLYLINE`
+    /// - `POLYLINE` (2D)
+    pub fn offset_entity(&mut self, handle: Handle, distance: f64) -> Result<Handle> {
+        let source = self
+            .get_entity(handle)
+            .cloned()
+            .ok_or_else(|| crate::error::DxfError::ObjectNotFound(handle.value()))?;
+
+        let owner = source.common().owner_handle;
+
+        let mut out = match source {
+            EntityType::Line(line) => {
+                let line = offsets::offset_line_2d(&line, distance).ok_or_else(|| {
+                    crate::error::DxfError::Custom("Failed to offset line entity".to_string())
+                })?;
+                EntityType::Line(line)
+            }
+            EntityType::Arc(arc) => {
+                let arc = offsets::offset_arc_2d(&arc, distance).ok_or_else(|| {
+                    crate::error::DxfError::Custom("Failed to offset arc entity".to_string())
+                })?;
+                EntityType::Arc(arc)
+            }
+            EntityType::LwPolyline(poly) => {
+                let poly = offsets::offset_lwpolyline_2d(&poly, distance).ok_or_else(|| {
+                    crate::error::DxfError::Custom("Failed to offset lwpolyline entity".to_string())
+                })?;
+                EntityType::LwPolyline(poly)
+            }
+            EntityType::Polyline2D(poly) => {
+                let poly = offsets::offset_polyline2d_2d(&poly, distance).ok_or_else(|| {
+                    crate::error::DxfError::Custom("Failed to offset 2D polyline entity".to_string())
+                })?;
+                EntityType::Polyline2D(poly)
+            }
+            other => {
+                return Err(crate::error::DxfError::NotImplemented(format!(
+                    "offset_entity is not implemented for {}",
+                    other.as_entity().entity_type(),
+                )));
+            }
+        };
+
+        out.common_mut().handle = Handle::NULL;
+        if !owner.is_null() {
+            out.common_mut().owner_handle = owner;
+        }
+
+        self.add_entity(out)
+    }
+
+    /// Fillet two line entities and insert the resulting arc.
+    ///
+    /// Returns the handle of the inserted fillet arc.
+    pub fn fillet_entities(&mut self, first: Handle, second: Handle, radius: f64) -> Result<Handle> {
+        let first_line = self
+            .get_entity(first)
+            .and_then(|e| e.as_line())
+            .cloned()
+            .ok_or_else(|| crate::error::DxfError::NotImplemented(
+                "fillet_entities currently supports LINE + LINE".to_string(),
+            ))?;
+
+        let second_line = self
+            .get_entity(second)
+            .and_then(|e| e.as_line())
+            .cloned()
+            .ok_or_else(|| crate::error::DxfError::NotImplemented(
+                "fillet_entities currently supports LINE + LINE".to_string(),
+            ))?;
+
+        let fillet = modify::fillet_lines(&first_line, &second_line, radius).ok_or_else(|| {
+            crate::error::DxfError::Custom("Unable to construct fillet for selected lines".to_string())
+        })?;
+
+        let mut changed_first = false;
+        if let Some(EntityType::Line(line_mut)) = self.get_entity_mut(first) {
+            *line_mut = fillet.first.clone();
+            changed_first = true;
+        }
+        if changed_first {
+            self.events.entity_modified(first, "fillet");
+        }
+
+        let mut changed_second = false;
+        if let Some(EntityType::Line(line_mut)) = self.get_entity_mut(second) {
+            *line_mut = fillet.second.clone();
+            changed_second = true;
+        }
+        if changed_second {
+            self.events.entity_modified(second, "fillet");
+        }
+
+        let mut arc = fillet.arc;
+        arc.common = first_line.common.clone();
+        arc.common.handle = Handle::NULL;
+
+        self.add_entity(EntityType::Arc(arc))
+    }
+
+    /// Chamfer two line entities and insert the chamfer segment.
+    ///
+    /// Returns the handle of the inserted chamfer line.
+    pub fn chamfer_entities(
+        &mut self,
+        first: Handle,
+        second: Handle,
+        first_distance: f64,
+        second_distance: f64,
+    ) -> Result<Handle> {
+        let first_line = self
+            .get_entity(first)
+            .and_then(|e| e.as_line())
+            .cloned()
+            .ok_or_else(|| crate::error::DxfError::NotImplemented(
+                "chamfer_entities currently supports LINE + LINE".to_string(),
+            ))?;
+
+        let second_line = self
+            .get_entity(second)
+            .and_then(|e| e.as_line())
+            .cloned()
+            .ok_or_else(|| crate::error::DxfError::NotImplemented(
+                "chamfer_entities currently supports LINE + LINE".to_string(),
+            ))?;
+
+        let chamfer = modify::chamfer_lines(&first_line, &second_line, first_distance, second_distance)
+            .ok_or_else(|| {
+                crate::error::DxfError::Custom("Unable to construct chamfer for selected lines".to_string())
+            })?;
+
+        let mut changed_first = false;
+        if let Some(EntityType::Line(line_mut)) = self.get_entity_mut(first) {
+            *line_mut = chamfer.first.clone();
+            changed_first = true;
+        }
+        if changed_first {
+            self.events.entity_modified(first, "chamfer");
+        }
+
+        let mut changed_second = false;
+        if let Some(EntityType::Line(line_mut)) = self.get_entity_mut(second) {
+            *line_mut = chamfer.second.clone();
+            changed_second = true;
+        }
+        if changed_second {
+            self.events.entity_modified(second, "chamfer");
+        }
+
+        let mut chamfer_line = chamfer.chamfer;
+        chamfer_line.common = first_line.common.clone();
+        chamfer_line.common.handle = Handle::NULL;
+
+        self.add_entity(EntityType::Line(chamfer_line))
+    }
+
+    /// Join multiple line entities into a single `LWPOLYLINE`.
+    ///
+    /// Returns the handle of the new joined polyline.
+    pub fn join_entities(&mut self, handles: &[Handle], tolerance: f64) -> Result<Handle> {
+        if handles.len() < 2 {
+            return Err(crate::error::DxfError::Custom(
+                "join_entities requires at least two entities".to_string(),
+            ));
+        }
+
+        let mut lines = Vec::with_capacity(handles.len());
+        for &h in handles {
+            let line = self
+                .get_entity(h)
+                .and_then(|e| e.as_line())
+                .cloned()
+                .ok_or_else(|| crate::error::DxfError::NotImplemented(
+                    "join_entities currently supports LINE entities only".to_string(),
+                ))?;
+            lines.push(line);
+        }
+
+        let mut joined = modify::join_lines_to_lwpolyline(&lines, tolerance).ok_or_else(|| {
+            crate::error::DxfError::Custom("Unable to join selected lines".to_string())
+        })?;
+        joined.common = lines[0].common.clone();
+        joined.common.handle = Handle::NULL;
+
+        for &h in handles {
+            let _ = self.remove_entity(h);
+        }
+
+        self.add_entity(EntityType::LwPolyline(joined))
+    }
+
+    /// Break a line entity at one point (split) or two points (remove middle segment).
+    ///
+    /// Returns handles of the newly created line segments.
+    pub fn break_entity(
+        &mut self,
+        handle: Handle,
+        first_point: Vector3,
+        second_point: Option<Vector3>,
+    ) -> Result<Vec<Handle>> {
+        let source = self
+            .get_entity(handle)
+            .and_then(|e| e.as_line())
+            .cloned()
+            .ok_or_else(|| crate::error::DxfError::NotImplemented(
+                "break_entity currently supports LINE entities only".to_string(),
+            ))?;
+
+        let pieces = modify::break_line(&source, first_point, second_point);
+        if pieces.is_empty() {
+            return Err(crate::error::DxfError::Custom(
+                "Unable to break line at the requested point(s)".to_string(),
+            ));
+        }
+
+        let _ = self.remove_entity(handle);
+
+        let mut out = Vec::with_capacity(pieces.len());
+        for mut piece in pieces {
+            piece.common = source.common.clone();
+            piece.common.handle = Handle::NULL;
+            let h = self.add_entity(EntityType::Line(piece))?;
+            out.push(h);
+        }
+
+        Ok(out)
+    }
+
+    fn intersections_with_boundary_line(
+        boundary: &EntityType,
+        target_line: &crate::entities::Line,
+        segment_only: bool,
+    ) -> Vec<Vector3> {
+        match boundary {
+            EntityType::Line(boundary_line) => intersections::line_line_2d(
+                target_line,
+                boundary_line,
+                segment_only,
+            )
+            .map(|i| vec![i.point])
+            .unwrap_or_default(),
+            EntityType::Arc(boundary_arc) => intersections::line_arc_2d(
+                target_line,
+                boundary_arc,
+                segment_only,
+            ),
+            _ => Vec::new(),
+        }
+    }
+
+    fn nearest_point(points: &[Vector3], reference: Vector3) -> Option<Vector3> {
+        points
+            .iter()
+            .min_by(|a, b| {
+                a.distance(&reference)
+                    .partial_cmp(&b.distance(&reference))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .copied()
     }
 
     /// Compute an approximate distance between two entities by handle.
