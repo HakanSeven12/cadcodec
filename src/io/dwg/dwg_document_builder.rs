@@ -2257,6 +2257,12 @@ impl DwgDocumentBuilder {
                     );
                 },
                 OBJ_TABLESTYLE => {
+                    // Capture the raw merged-stream bytes BEFORE reading
+                    // fields so the DWG writer can replay them verbatim.
+                    // This avoids data loss for trailing fields or version-
+                    // specific data that our reader does not (yet) parse.
+                    let raw_data = reader.raw_merged_data();
+                    let raw_handle_bits = reader.get_handle_bits();
                     let data = objects::read_table_style(&mut reader);
                     let mut obj = crate::objects::TableStyle::new(&data.name);
                     obj.handle = Handle::from(handle);
@@ -2305,6 +2311,8 @@ impl DwgDocumentBuilder {
                     obj.data_row_style = to_row_style(&data.data_row_style);
                     obj.header_row_style = to_row_style(&data.header_row_style);
                     obj.title_row_style = to_row_style(&data.title_row_style);
+                    obj.raw_dwg_data = Some(raw_data);
+                    obj.raw_dwg_handle_bits = raw_handle_bits;
 
                     document.objects.insert(
                         Handle::from(handle),

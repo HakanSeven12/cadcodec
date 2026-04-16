@@ -11,7 +11,8 @@
 //!
 //! Output files written next to the source:
 //!   <stem>_rt.dwg   – DWG roundtripped copy
-//!   <stem>_rt.dxf   – DXF roundtripped copy
+//!   <stem>_rt.dxf   – ASCII DXF roundtripped copy
+//!   <stem>_rt_bin.dxf – Binary DXF roundtripped copy
 //!   <stem>_rt2.dwg  – DWG double-roundtripped copy (stability check)
 
 use std::collections::BTreeMap;
@@ -641,8 +642,8 @@ fn main() {
         print_document_summary("DWG ROUNDTRIPPED", rt);
     }
 
-    // ── Step 3: DXF roundtrip ─────────────────────────────────────
-    println!("Performing DXF roundtrip (write → read → disk)...");
+    // ── Step 3: ASCII DXF roundtrip ───────────────────────────────
+    println!("Performing ASCII DXF roundtrip (write → read → disk)...");
     let dxf_out_path = sibling_path(&source_path, "_rt", "dxf");
     let dxf_rt = {
         let writer = DxfWriter::new(&original);
@@ -671,10 +672,43 @@ fn main() {
     };
 
     if let Some(ref rt) = dxf_rt {
-        print_document_summary("DXF ROUNDTRIPPED", rt);
+        print_document_summary("DXF ASCII ROUNDTRIPPED", rt);
     }
 
-    // ── Step 4: Data loss analysis ────────────────────────────────
+    // ── Step 4: Binary DXF roundtrip ──────────────────────────────
+    println!("Performing Binary DXF roundtrip (write → read → disk)...");
+    let dxf_bin_out_path = sibling_path(&source_path, "_rt_bin", "dxf");
+    let dxf_bin_rt = {
+        let writer = DxfWriter::new_binary(&original);
+        match writer.write_to_vec() {
+            Ok(bytes) => {
+                save_bytes(&dxf_bin_out_path, &bytes);
+                match DxfReader::from_reader(Cursor::new(bytes)) {
+                    Ok(r) => match r.read() {
+                        Ok(doc) => Some(doc),
+                        Err(e) => {
+                            eprintln!("  WARNING: Binary DXF re-read failed: {}", e);
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("  WARNING: Binary DXF reader init failed: {}", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("  WARNING: Binary DXF write failed: {}", e);
+                None
+            }
+        }
+    };
+
+    if let Some(ref rt) = dxf_bin_rt {
+        print_document_summary("DXF BINARY ROUNDTRIPPED", rt);
+    }
+
+    // ── Step 5: Data loss analysis ────────────────────────────────
     println!("\n=================================================================");
     println!("  DATA LOSS ANALYSIS");
     println!("=================================================================\n");
@@ -689,15 +723,24 @@ fn main() {
     }
 
     if let Some(ref rt) = dxf_rt {
-        let report = compare_documents(&original, rt, "DXF");
+        let report = compare_documents(&original, rt, "DXF ASCII");
         report.print();
         println!();
-        deep_analysis(&original, rt, "DXF");
+        deep_analysis(&original, rt, "DXF ASCII");
     } else {
-        println!("DXF roundtrip: FAILED (could not complete write→read cycle)");
+        println!("DXF ASCII roundtrip: FAILED (could not complete write→read cycle)");
     }
 
-    // ── Step 5: DWG double roundtrip stability ────────────────────
+    if let Some(ref rt) = dxf_bin_rt {
+        let report = compare_documents(&original, rt, "DXF BINARY");
+        report.print();
+        println!();
+        deep_analysis(&original, rt, "DXF BINARY");
+    } else {
+        println!("DXF BINARY roundtrip: FAILED (could not complete write→read cycle)");
+    }
+
+    // ── Step 6: DWG double roundtrip stability ────────────────────
     println!("=================================================================");
     println!("  DWG DOUBLE-ROUNDTRIP STABILITY");
     println!("=================================================================\n");
@@ -729,6 +772,7 @@ fn main() {
     println!("  Output files:");
     println!("    {}", dwg_out_path.display());
     println!("    {}", dxf_out_path.display());
+    println!("    {}", dxf_bin_out_path.display());
     println!("    {}", sibling_path(&source_path, "_rt2", "dwg").display());
     println!("=================================================================");
 }

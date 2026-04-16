@@ -484,6 +484,19 @@ pub struct TableStyle {
 
     /// Title row cell style.
     pub title_row_style: RowCellStyle,
+
+    /// Raw DWG merged-stream bytes for lossless round-trip.
+    ///
+    /// When present, the DWG writer emits these bytes verbatim instead of
+    /// re-serialising field by field.  This avoids data loss for fields or
+    /// trailing data that our reader does not (yet) fully parse.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_dwg_data: Option<Vec<u8>>,
+
+    /// R2010+ handle-stream bit count (from the MC framing field).
+    /// Only meaningful when `raw_dwg_data` is `Some`.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_dwg_handle_bits: i64,
 }
 
 impl TableStyle {
@@ -513,6 +526,8 @@ impl TableStyle {
             data_row_style: RowCellStyle::data_row(),
             header_row_style: RowCellStyle::header_row(),
             title_row_style: RowCellStyle::title_row(),
+            raw_dwg_data: None,
+            raw_dwg_handle_bits: 0,
         }
     }
 

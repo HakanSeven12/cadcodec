@@ -17,6 +17,35 @@ use crate::types::{DxfVersion, Handle};
 use super::common;
 use super::DwgObjectWriter;
 
+fn normalized_table_style_flags(style: &TableStyle) -> TableStyleFlags {
+    let mut flags = style.flags;
+
+    if style.title_suppressed {
+        flags.insert(TableStyleFlags::TITLE_SUPPRESSED);
+    } else {
+        flags.remove(TableStyleFlags::TITLE_SUPPRESSED);
+    }
+
+    if style.header_suppressed {
+        flags.insert(TableStyleFlags::HEADER_SUPPRESSED);
+    } else {
+        flags.remove(TableStyleFlags::HEADER_SUPPRESSED);
+    }
+
+    flags
+}
+
+fn sanitized_table_border_property_flags(
+    flags: TableBorderPropertyFlags,
+) -> TableBorderPropertyFlags {
+    // Current DWG serializer does not emit a border linetype handle payload.
+    // Clearing LINE_TYPE avoids writing a flag that would imply extra data.
+    flags & (TableBorderPropertyFlags::LINE_WEIGHT
+        | TableBorderPropertyFlags::COLOR
+        | TableBorderPropertyFlags::VISIBILITY
+        | TableBorderPropertyFlags::DOUBLE_LINE_SPACING)
+}
+
 impl<'a> DwgObjectWriter<'a> {
     fn warn_skipped_object(&self, type_name: &str, handle: Handle) {
         eprintln!(
@@ -52,7 +81,16 @@ impl<'a> DwgObjectWriter<'a> {
             ObjectType::SpatialFilter(o) => self.write_spatial_filter(o),
             ObjectType::VisualStyle(o) => self.write_visual_style(o),
             ObjectType::Material(o) => self.write_material(o),
-            ObjectType::TableStyle(o) => self.write_table_style_object(o),
+            ObjectType::TableStyle(o) => {
+                if let Some(ref raw) = o.raw_dwg_data {
+                    // Prefer lossless raw-data round-trip to avoid payload
+                    // truncation when our field-by-field writer doesn't
+                    // cover every version-specific field.
+                    self.register_raw_object(o.handle, raw, o.raw_dwg_handle_bits);
+                } else {
+                    self.write_table_style_object(o);
+                }
+            }
             ObjectType::Unknown { handle, raw_dwg_data, raw_dwg_handle_bits, .. } => {
                 if let Some(ref raw) = raw_dwg_data {
                     self.register_raw_object(*handle, raw, *raw_dwg_handle_bits);
@@ -749,15 +787,13 @@ impl<'a> DwgObjectWriter<'a> {
     // ── TableStyle ─────────────────────────────────────────────────
 
     fn write_table_style_object(&mut self, style: &TableStyle) {
-        let Some(type_code) = self.required_class_type_code(
-            "TABLESTYLE",
-            common::OBJ_TABLESTYLE,
-            "TABLESTYLE",
-            style.handle,
-        ) else {
-            return;
-        };
-
+        // TABLESTYLE is an UNLISTED (class-based) object: it has no fixed
+        // object-type code, so we must resolve the DXF class number from
+        // the CLASSES section.  Using the literal `OBJ_TABLESTYLE` (106)
+        // produces an object that AutoCAD's AUDIT cannot decode, which
+        // cascades into the containing ACAD_TABLESTYLE dictionary entry
+        // being removed and CTABLESTYLE being set to Null.
+        let type_code = self.class_type_code("TABLESTYLE", common::OBJ_TABLESTYLE);
         self.write_common_non_entity_data(
             type_code,
             style.handle,
@@ -770,7 +806,8 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_variable_text(&style.name);
         self.writer.write_variable_text(&style.description);
         self.writer.write_bit_short(style.flow_direction as i16);
-        self.writer.write_bit_short(style.flags.bits());
+        self.writer
+            .write_bit_short(normalized_table_style_flags(style).bits());
         self.writer.write_bit_double(style.horizontal_margin);
         self.writer.write_bit_double(style.vertical_margin);
         self.writer.write_bit(style.title_suppressed);
@@ -807,7 +844,8 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_table_style_border(&mut self, border: &TableCellBorder) {
-        self.writer.write_bit_long(border.property_flags.bits());
+        self.writer
+            .write_bit_long(sanitized_table_border_property_flags(border.property_flags).bits());
         self.writer.write_bit_short(border.border_type as i16);
         self.writer
             .write_bit_long(border.line_weight.as_i16() as i32);
@@ -1132,6 +1170,30 @@ impl<'a> DwgObjectWriter<'a> {
 mod tests {
     use super::*;
     use crate::document::CadDocument;
+
+    #[test]
+    fn normalized_table_style_flags_follow_booleans() {
+        let mut style = TableStyle::new("Standard");
+        style.flags = TableStyleFlags::NONE;
+        style.title_suppressed = true;
+        style.header_suppressed = false;
+
+        let flags = normalized_table_style_flags(&style);
+        assert!(flags.contains(TableStyleFlags::TITLE_SUPPRESSED));
+        assert!(!flags.contains(TableStyleFlags::HEADER_SUPPRESSED));
+    }
+
+    #[test]
+    fn sanitized_table_border_flags_strip_line_type() {
+        let flags = TableBorderPropertyFlags::LINE_WEIGHT
+            | TableBorderPropertyFlags::LINE_TYPE
+            | TableBorderPropertyFlags::COLOR;
+        let sanitized = sanitized_table_border_property_flags(flags);
+
+        assert!(sanitized.contains(TableBorderPropertyFlags::LINE_WEIGHT));
+        assert!(sanitized.contains(TableBorderPropertyFlags::COLOR));
+        assert!(!sanitized.contains(TableBorderPropertyFlags::LINE_TYPE));
+    }
 
     #[test]
     fn write_empty_dictionary() {
