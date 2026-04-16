@@ -71,9 +71,7 @@ impl<'a> DwgObjectWriter<'a> {
             EntityType::Table(e) => {
                 self.warn_skipped_entity("ACAD_TABLE", e.common.handle);
             }
-            EntityType::Underlay(e) => {
-                self.warn_skipped_entity(e.entity_name(), e.common.handle);
-            }
+            EntityType::Underlay(e) => self.write_underlay(e),
             EntityType::Unknown(e) => {
                 // Write raw DWG data verbatim if available
                 if let Some(ref raw_data) = e.raw_dwg_data {
@@ -2300,6 +2298,54 @@ impl<'a> DwgObjectWriter<'a> {
         self.register_object(e.common.handle);
     }
 
+    // â”€â”€ Underlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    fn write_underlay(&mut self, e: &Underlay) {
+        // Underlay references are class-based entities in DWG.
+        let class_name = match e.underlay_type {
+            crate::entities::underlay::UnderlayType::Pdf => "PDFREFERENCE",
+            crate::entities::underlay::UnderlayType::Dwf => "DWFREFERENCE",
+            crate::entities::underlay::UnderlayType::Dgn => "DGNREFERENCE",
+        };
+
+        let Some(type_code) = self
+            .document
+            .classes
+            .get_by_name(class_name)
+            .map(|c| c.class_number)
+        else {
+            self.warn_skipped_entity(e.entity_name(), e.common.handle);
+            return;
+        };
+
+        self.entity_preamble(type_code, &e.common);
+
+        self.writer.write_3bit_double(e.insertion_point);
+        self.writer.write_bit_double(e.x_scale);
+        self.writer.write_bit_double(e.y_scale);
+        self.writer.write_bit_double(e.z_scale);
+        self.writer.write_bit_double(e.rotation);
+        self.writer.write_bit_extrusion(e.normal);
+        self.writer.write_byte(e.flags.bits());
+        self.writer.write_byte(e.contrast);
+        self.writer.write_byte(e.fade);
+
+        self.writer
+            .write_bit_long(e.clip_boundary_vertices.len() as i32);
+        for v in &e.clip_boundary_vertices {
+            self.writer.write_2raw_double(*v);
+        }
+
+        if self.version.r2010_plus() {
+            self.writer.write_bit(e.clip_inverted);
+        }
+
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, e.definition_handle.value());
+
+        self.register_object(e.common.handle);
+    }
+
     // â”€â”€ OLE2Frame â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn write_ole2frame(&mut self, e: &Ole2Frame) {
@@ -3220,7 +3266,7 @@ impl<'a> DwgObjectWriter<'a> {
 mod tests {
     use super::*;
     use crate::document::CadDocument;
-    use crate::entities::{EntityCommon, Line, Point};
+    use crate::entities::{EntityCommon, Line, Point, Underlay, UnderlayType};
     use crate::types::{Handle, Vector3};
 
     fn make_doc_with_entity(entity: EntityType) -> CadDocument {
@@ -3265,6 +3311,22 @@ mod tests {
             normal: Vector3::UNIT_Z,
         };
         let doc = make_doc_with_entity(EntityType::Line(line));
+        let writer = DwgObjectWriter::new(&doc).unwrap();
+        let (output, _map, _, _) = writer.write();
+        assert!(!output.is_empty());
+    }
+
+    #[test]
+    fn write_underlay_entity() {
+        let mut underlay = Underlay::new(UnderlayType::Pdf);
+        underlay.common = EntityCommon {
+            handle: Handle::new(0x102),
+            ..Default::default()
+        };
+        underlay.definition_handle = Handle::new(0x202);
+        underlay.insertion_point = Vector3::new(5.0, 6.0, 0.0);
+
+        let doc = make_doc_with_entity(EntityType::Underlay(underlay));
         let writer = DwgObjectWriter::new(&doc).unwrap();
         let (output, _map, _, _) = writer.write();
         assert!(!output.is_empty());
