@@ -1066,6 +1066,87 @@ fn dxf_roundtrip_geodata_spatialfilter_payload() {
     assert!((spatial_rt.clip_boundary_points[2].y - 5.0).abs() < 1e-12);
 }
 
+#[test]
+fn dxf_roundtrip_visualstyle_material_payload() {
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    let root_owner = doc.header.named_objects_dict_handle;
+
+    let mut visual = acadrust::objects::VisualStyle::new();
+    visual.handle = Handle::new(0x862);
+    visual.owner = root_owner;
+    visual.description = "__VS_DXF_DEPTH_862__".to_string();
+    visual.style_type = 2;
+    visual.face_lighting_model = 1;
+    visual.face_lighting_quality = 2;
+    visual.face_color_mode = 3;
+    visual.face_modifier = 7;
+    visual.edge_model = 8;
+    visual.edge_style = 9;
+    visual.edge_color_mode = 4;
+    visual.face_opacity = 82;
+    visual.edge_opacity = 66;
+    visual.face_tint_color = 21;
+    visual.internal_use_only = true;
+    doc.objects.insert(
+        visual.handle,
+        acadrust::objects::ObjectType::VisualStyle(visual.clone()),
+    );
+
+    let mut material = acadrust::objects::Material::new();
+    material.handle = Handle::new(0x863);
+    material.owner = root_owner;
+    material.name = "__MAT_DXF_DEPTH_863__".to_string();
+    material.description = "__MAT_DXF_DEPTH_DESC__".to_string();
+    material.ambient_color = Color::from_rgb(12, 34, 56);
+    material.diffuse_color = Color::Index(253);
+    material.roughness = 0.47;
+    material.opacity = 0.72;
+    doc.objects.insert(
+        material.handle,
+        acadrust::objects::ObjectType::Material(material.clone()),
+    );
+
+    let rt = dxf_roundtrip(doc);
+
+    let visual_rt = rt
+        .objects
+        .values()
+        .find_map(|o| {
+            match o {
+                acadrust::objects::ObjectType::VisualStyle(v)
+                    if v.description == "__VS_DXF_DEPTH_862__" => Some(v),
+                _ => None,
+            }
+        })
+        .expect("Expected a VisualStyle object after DXF roundtrip");
+    assert_eq!(visual_rt.description, "__VS_DXF_DEPTH_862__");
+    assert_eq!(visual_rt.style_type, 2);
+    assert_eq!(visual_rt.edge_style, 9);
+    assert_eq!(visual_rt.edge_color_mode, 4);
+    assert_eq!(visual_rt.face_opacity, 82);
+    assert_eq!(visual_rt.edge_opacity, 66);
+    assert_eq!(visual_rt.face_tint_color, 21);
+    assert!(visual_rt.internal_use_only);
+
+    let material_rt = rt
+        .objects
+        .values()
+        .find_map(|o| {
+            match o {
+                acadrust::objects::ObjectType::Material(v)
+                    if v.name == "__MAT_DXF_DEPTH_863__" => Some(v),
+                _ => None,
+            }
+        })
+        .expect("Expected a Material object after DXF roundtrip");
+    assert_eq!(material_rt.name, "__MAT_DXF_DEPTH_863__");
+    assert_eq!(material_rt.description, "__MAT_DXF_DEPTH_DESC__");
+    assert_eq!(material_rt.ambient_color, Color::from_rgb(12, 34, 56));
+    assert_eq!(material_rt.diffuse_color, Color::Index(253));
+    assert!((material_rt.roughness - 0.47).abs() < 1e-12);
+    assert!((material_rt.opacity - 0.72).abs() < 1e-12);
+}
+
 // ── DXF: Individual entity type roundtrip ─────────────────────────────
 
 macro_rules! dxf_entity_roundtrip {

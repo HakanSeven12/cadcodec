@@ -1372,6 +1372,10 @@ impl<'a> SectionReader<'a> {
                 90 => { if let Some(v) = pair.as_i32() { obj.face_modifier = v; } }
                 91 => { if let Some(v) = pair.as_i32() { obj.edge_model = v; } }
                 92 => { if let Some(v) = pair.as_i32() { obj.edge_style = v; } }
+                74 => { if let Some(v) = pair.as_i16() { obj.edge_color_mode = v; } }
+                75 => { if let Some(v) = pair.as_i16() { obj.face_opacity = v; } }
+                76 => { if let Some(v) = pair.as_i16() { obj.edge_opacity = v; } }
+                93 => { if let Some(v) = pair.as_i32() { obj.face_tint_color = v; } }
                 291 => obj.internal_use_only = pair.as_bool().unwrap_or(false),
                 _ => {}
             }
@@ -1389,6 +1393,28 @@ impl<'a> SectionReader<'a> {
                 330 => { if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) { obj.owner = Handle::new(h); } }
                 1 => obj.name = pair.value_string.clone(),
                 2 => obj.description = pair.value_string.clone(),
+                62 => {
+                    if let Ok(v) = pair.value_string.trim().parse::<i16>() {
+                        obj.ambient_color = Color::from_index(v);
+                    }
+                }
+                63 => {
+                    if let Ok(v) = pair.value_string.trim().parse::<i16>() {
+                        obj.diffuse_color = Color::from_index(v);
+                    }
+                }
+                420 => {
+                    if let Ok(v) = pair.value_string.trim().parse::<i32>() {
+                        obj.ambient_color = Color::from_true_color_value(v);
+                    }
+                }
+                421 => {
+                    if let Ok(v) = pair.value_string.trim().parse::<i32>() {
+                        obj.diffuse_color = Color::from_true_color_value(v);
+                    }
+                }
+                40 => { if let Some(v) = pair.as_double() { obj.roughness = v; } }
+                41 => { if let Some(v) = pair.as_double() { obj.opacity = v; } }
                 _ => {}
             }
         }

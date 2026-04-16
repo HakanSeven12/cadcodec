@@ -3036,6 +3036,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_i32(90, obj.face_modifier)?;
         self.writer.write_i32(91, obj.edge_model)?;
         self.writer.write_i32(92, obj.edge_style)?;
+        self.writer.write_i16(74, obj.edge_color_mode)?;
+        self.writer.write_i16(75, obj.face_opacity)?;
+        self.writer.write_i16(76, obj.edge_opacity)?;
+        self.writer.write_i32(93, obj.face_tint_color)?;
         if obj.internal_use_only {
             self.writer.write_bool(291, obj.internal_use_only)?;
         }
@@ -3052,6 +3056,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if !obj.description.is_empty() {
             self.writer.write_string(2, &obj.description)?;
         }
+
+        self.write_color_i16(62, obj.ambient_color)?;
+        self.write_color_i16(63, obj.diffuse_color)?;
+        if let Some(v) = obj.ambient_color.to_true_color_value() {
+            self.writer.write_i32(420, v)?;
+        }
+        if let Some(v) = obj.diffuse_color.to_true_color_value() {
+            self.writer.write_i32(421, v)?;
+        }
+        self.writer.write_double(40, obj.roughness)?;
+        self.writer.write_double(41, obj.opacity)?;
+
         Ok(())
     }
 
