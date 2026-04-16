@@ -4620,3 +4620,112 @@ fn get_boundary_path_bits(flags: &BoundaryPathFlags) -> u32 {
     bits
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_pairs(bytes: &[u8]) -> Vec<(i32, String)> {
+        let text = String::from_utf8(bytes.to_vec()).expect("utf8 output");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len() % 2, 0, "expected code/value line pairs");
+
+        lines
+            .chunks(2)
+            .map(|chunk| {
+                let code = chunk[0]
+                    .trim()
+                    .parse::<i32>()
+                    .expect("group code parse");
+                let value = chunk[1].trim().to_string();
+                (code, value)
+            })
+            .collect()
+    }
+
+    fn pair_value<'a>(pairs: &'a [(i32, String)], code: i32) -> Option<&'a str> {
+        pairs
+            .iter()
+            .find(|(c, _)| *c == code)
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn test_write_visualstyle_deep_fields() {
+        let mut out = Vec::new();
+
+        {
+            let mut stream = crate::io::dxf::writer::DxfTextWriter::new(&mut out);
+            let mut writer = SectionWriter::new(&mut stream, 0x100, 0x200);
+
+            let mut obj = VisualStyle::new();
+            obj.handle = Handle::new(0x862);
+            obj.owner = Handle::new(0x1F);
+            obj.description = "__VS_WRITER_UNIT__".to_string();
+            obj.style_type = 2;
+            obj.edge_style = 9;
+            obj.edge_color_mode = 4;
+            obj.face_opacity = 82;
+            obj.edge_opacity = 66;
+            obj.face_tint_color = 21;
+            obj.internal_use_only = true;
+
+            writer
+                .write_visualstyle(&obj)
+                .expect("write_visualstyle");
+        }
+
+        let pairs = parse_pairs(&out);
+        assert_eq!(pair_value(&pairs, 0), Some("VISUALSTYLE"));
+        assert_eq!(pair_value(&pairs, 74), Some("4"));
+        assert_eq!(pair_value(&pairs, 75), Some("82"));
+        assert_eq!(pair_value(&pairs, 76), Some("66"));
+        assert_eq!(pair_value(&pairs, 93), Some("21"));
+        assert_eq!(pair_value(&pairs, 291), Some("1"));
+    }
+
+    #[test]
+    fn test_write_material_deep_fields() {
+        let mut out = Vec::new();
+
+        {
+            let mut stream = crate::io::dxf::writer::DxfTextWriter::new(&mut out);
+            let mut writer = SectionWriter::new(&mut stream, 0x100, 0x200);
+
+            let mut obj = Material::new();
+            obj.handle = Handle::new(0x863);
+            obj.owner = Handle::new(0x1F);
+            obj.name = "__MAT_WRITER_UNIT__".to_string();
+            obj.description = "__MAT_WRITER_DESC__".to_string();
+            obj.ambient_color = Color::from_rgb(12, 34, 56);
+            obj.diffuse_color = Color::Index(253);
+            obj.roughness = 0.47;
+            obj.opacity = 0.72;
+
+            writer.write_material(&obj).expect("write_material");
+        }
+
+        let pairs = parse_pairs(&out);
+        let ambient_true_color = Color::from_rgb(12, 34, 56)
+            .to_true_color_value()
+            .expect("ambient true color")
+            .to_string();
+
+        assert_eq!(pair_value(&pairs, 0), Some("MATERIAL"));
+        assert_eq!(pair_value(&pairs, 62), Some("7"));
+        assert_eq!(pair_value(&pairs, 63), Some("253"));
+        assert_eq!(pair_value(&pairs, 420), Some(ambient_true_color.as_str()));
+        assert!(pair_value(&pairs, 421).is_none());
+
+        let roughness = pair_value(&pairs, 40)
+            .expect("roughness code")
+            .parse::<f64>()
+            .expect("roughness value");
+        let opacity = pair_value(&pairs, 41)
+            .expect("opacity code")
+            .parse::<f64>()
+            .expect("opacity value");
+        assert!((roughness - 0.47).abs() < 1e-12);
+        assert!((opacity - 0.72).abs() < 1e-12);
+    }
+}
+

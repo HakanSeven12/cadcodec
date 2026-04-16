@@ -5719,6 +5719,90 @@ mod tests {
     }
 
     #[test]
+    fn test_read_visualstyle_deep_fields_from_pairs() {
+        let object_pairs = "\
+  5\r\n862\r\n\
+330\r\n1F\r\n\
+  2\r\n__VS_READER_UNIT__\r\n\
+ 70\r\n2\r\n\
+ 71\r\n1\r\n\
+ 72\r\n2\r\n\
+ 73\r\n3\r\n\
+ 90\r\n7\r\n\
+ 91\r\n8\r\n\
+ 92\r\n9\r\n\
+ 74\r\n4\r\n\
+ 75\r\n82\r\n\
+ 76\r\n66\r\n\
+ 93\r\n21\r\n\
+291\r\n1\r\n\
+  0\r\nENDSEC\r\n";
+
+        let cursor = std::io::Cursor::new(object_pairs.as_bytes());
+        let buf_reader = std::io::BufReader::new(cursor);
+        let mut stream: Box<dyn crate::io::dxf::reader::DxfStreamReader> =
+            Box::new(crate::io::dxf::reader::DxfTextReader::new(buf_reader).expect("text reader"));
+        let mut section = SectionReader::new(&mut stream);
+
+        let obj = section
+            .read_visualstyle()
+            .expect("read_visualstyle")
+            .expect("visualstyle object");
+
+        assert_eq!(obj.handle, Handle::new(0x862));
+        assert_eq!(obj.owner, Handle::new(0x1F));
+        assert_eq!(obj.description, "__VS_READER_UNIT__");
+        assert_eq!(obj.style_type, 2);
+        assert_eq!(obj.edge_style, 9);
+        assert_eq!(obj.edge_color_mode, 4);
+        assert_eq!(obj.face_opacity, 82);
+        assert_eq!(obj.edge_opacity, 66);
+        assert_eq!(obj.face_tint_color, 21);
+        assert!(obj.internal_use_only);
+    }
+
+    #[test]
+    fn test_read_material_deep_fields_from_pairs() {
+        let ambient_true_color = Color::from_rgb(12, 34, 56)
+            .to_true_color_value()
+            .expect("ambient true color");
+        let object_pairs = format!(
+            "\
+  5\r\n863\r\n\
+330\r\n1F\r\n\
+  1\r\n__MAT_READER_UNIT__\r\n\
+  2\r\n__MAT_READER_DESC__\r\n\
+ 62\r\n7\r\n\
+ 63\r\n253\r\n\
+420\r\n{}\r\n\
+ 40\r\n0.47\r\n\
+ 41\r\n0.72\r\n\
+  0\r\nENDSEC\r\n",
+            ambient_true_color
+        );
+
+        let cursor = std::io::Cursor::new(object_pairs.into_bytes());
+        let buf_reader = std::io::BufReader::new(cursor);
+        let mut stream: Box<dyn crate::io::dxf::reader::DxfStreamReader> =
+            Box::new(crate::io::dxf::reader::DxfTextReader::new(buf_reader).expect("text reader"));
+        let mut section = SectionReader::new(&mut stream);
+
+        let obj = section
+            .read_material()
+            .expect("read_material")
+            .expect("material object");
+
+        assert_eq!(obj.handle, Handle::new(0x863));
+        assert_eq!(obj.owner, Handle::new(0x1F));
+        assert_eq!(obj.name, "__MAT_READER_UNIT__");
+        assert_eq!(obj.description, "__MAT_READER_DESC__");
+        assert_eq!(obj.ambient_color, Color::from_rgb(12, 34, 56));
+        assert_eq!(obj.diffuse_color, Color::Index(253));
+        assert!((obj.roughness - 0.47).abs() < 1e-12);
+        assert!((obj.opacity - 0.72).abs() < 1e-12);
+    }
+
+    #[test]
     fn test_dxf_roundtrip_line_normal() {
         let mut doc = CadDocument::new();
         let mut line = crate::entities::line::Line::new();
