@@ -68,9 +68,7 @@ impl<'a> DwgObjectWriter<'a> {
             EntityType::Solid3D(e) => self.write_solid3d(e),
             EntityType::Region(e) => self.write_region(e),
             EntityType::Body(e) => self.write_body(e),
-            EntityType::Table(e) => {
-                self.warn_skipped_entity("ACAD_TABLE", e.common.handle);
-            }
+            EntityType::Table(e) => self.write_table_insert_fallback(e),
             EntityType::Underlay(e) => self.write_underlay(e),
             EntityType::Unknown(e) => {
                 // Write raw DWG data verbatim if available
@@ -2346,6 +2344,40 @@ impl<'a> DwgObjectWriter<'a> {
         self.register_object(e.common.handle);
     }
 
+    fn write_table_insert_fallback(&mut self, e: &Table) {
+        let Some(block_handle) = e.block_record_handle else {
+            self.warn_skipped_entity("ACAD_TABLE", e.common.handle);
+            return;
+        };
+
+        let Some(block_name) = self
+            .document
+            .block_records
+            .iter()
+            .find(|br| br.handle == block_handle)
+            .map(|br| br.name.clone())
+        else {
+            self.warn_skipped_entity("ACAD_TABLE", e.common.handle);
+            return;
+        };
+
+        eprintln!(
+            "DWG writer: writing ACAD_TABLE as INSERT fallback (handle {:#X})",
+            e.common.handle.value()
+        );
+
+        let mut insert = Insert::new(block_name, e.insertion_point);
+        insert.common = e.common.clone();
+        insert.normal = e.normal;
+        insert.rotation = if e.horizontal_direction.x == 0.0 && e.horizontal_direction.y == 0.0 {
+            0.0
+        } else {
+            e.horizontal_direction.y.atan2(e.horizontal_direction.x)
+        };
+
+        self.write_insert(&insert);
+    }
+
     // â”€â”€ OLE2Frame â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn write_ole2frame(&mut self, e: &Ole2Frame) {
@@ -3266,7 +3298,7 @@ impl<'a> DwgObjectWriter<'a> {
 mod tests {
     use super::*;
     use crate::document::CadDocument;
-    use crate::entities::{EntityCommon, Line, Point, Underlay, UnderlayType};
+    use crate::entities::{EntityCommon, Line, Point, Table, Underlay, UnderlayType};
     use crate::types::{Handle, Vector3};
 
     fn make_doc_with_entity(entity: EntityType) -> CadDocument {
@@ -3330,5 +3362,31 @@ mod tests {
         let writer = DwgObjectWriter::new(&doc).unwrap();
         let (output, _map, _, _) = writer.write();
         assert!(!output.is_empty());
+    }
+
+    #[test]
+    fn write_table_entity_via_insert_fallback() {
+        let mut doc = CadDocument::new();
+        let table_handle = Handle::new(0x103);
+        let model_space_handle = doc.block_records.get("*Model_Space").unwrap().handle;
+
+        let mut table = Table::new(Vector3::new(2.0, 3.0, 0.0), 2, 2);
+        table.common = EntityCommon {
+            handle: table_handle,
+            ..Default::default()
+        };
+        table.block_record_handle = Some(model_space_handle);
+
+        let idx = doc.entities.len();
+        doc.entities.push(EntityType::Table(table));
+        doc.entity_index.insert(table_handle, idx);
+        if let Some(br) = doc.block_records.get_mut("*Model_Space") {
+            br.entity_handles.push(table_handle);
+        }
+
+        let writer = DwgObjectWriter::new(&doc).unwrap();
+        let (output, map, _, _) = writer.write();
+        assert!(!output.is_empty());
+        assert!(map.iter().any(|(h, _)| *h == table_handle.value()));
     }
 }

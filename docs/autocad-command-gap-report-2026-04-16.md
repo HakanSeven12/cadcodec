@@ -134,7 +134,7 @@ Status legend:
 | Arrays and patterning | ARRAY, ARRAYPATH, ARRAYPOLAR, ARRAYRECT | Gap | No dedicated array command APIs. |
 | Constraint/parametric | AUTOCONSTRAIN, CONSTRAINTSETTINGS, PARAMETER families | Gap | No constraint solver / parametric command subsystem. |
 | 3D procedural modeling | EXTRUDE, REVOLVE, SWEEP, LOFT, PRESSPULL, UNION, SUBTRACT, INTERSECT | Gap | 3D entity storage exists, but operation commands are not implemented as modeling algorithms. |
-| Underlay workflows | PDFATTACH, DGNATTACH, DWFATTACH, CLIP underlays | Partial | Underlay entity exists and now has a DWG writer path; full interoperability still depends on broader class/object coverage (see Gap Register). |
+| Underlay workflows | PDFATTACH, DGNATTACH, DWFATTACH, CLIP underlays | Partial | Underlay entity now has class-based DWG read/write mapping; full interoperability still depends on broader class/object coverage (see Gap Register). |
 | Plot/publish workflows | PLOT, PAGESETUP, PUBLISH, EXPORT variants | Partial | Plot-related objects/fields exist; no end-to-end command workflow engine. |
 | Compare/audit/recovery style flows | COMPARE, AUDIT, RECOVER-like workflows | Partial | Validation exists, but not full command parity with UI-driven AutoCAD behavior. |
 | UI/palette/macros | CUI, TOOLBAR, palettes, action recorder commands | Gap | Out of scope for current SDK architecture. |
@@ -146,12 +146,12 @@ Status legend:
 
 ## P0 - High impact gaps (roundtrip and interoperability risk)
 
-1. DWG writer still skips ACAD_TABLE entities.
+1. DWG writer does not fully serialize ACAD_TABLE semantics.
 
 - Evidence: `src/io/dwg/dwg_stream_writers/object_writer/entities.rs`
-- Current behavior has explicit skip path for `ACAD_TABLE`; `UNDERLAY` now writes through a class-based DWG path.
-- Mitigation added: unsupported entity skips emit diagnostics to stderr instead of silently dropping data.
-- Remaining risk: table entities are still lost on DWG output until a dedicated binary serializer is implemented.
+- Current behavior: `UNDERLAY` uses class-based DWG write and typed read mapping; `ACAD_TABLE` writes through an INSERT fallback when its block record can be resolved.
+- Mitigation added: fallback path preserves placement/block-reference presence and emits diagnostics for degraded handling.
+- Remaining risk: rich table data (rows/cells/styles/break settings) is not encoded in DWG yet; unresolved table block handles still skip.
 
 2. DWG writer cannot serialize several typed object variants.
 
@@ -338,7 +338,7 @@ Current assessment:
 
 Use this as a release checklist for command-family parity:
 
-- [ ] No silent DWG skips for supported entity/object domains.
+- [ ] No degraded DWG fallbacks for supported entity/object domains.
 - [ ] Roundtrip tests for underlay/table/object edge cases.
 - [ ] Geometry kernel foundation (intersection/offset/trim/extend).
 - [ ] Modify command wrappers with deterministic APIs and tests.

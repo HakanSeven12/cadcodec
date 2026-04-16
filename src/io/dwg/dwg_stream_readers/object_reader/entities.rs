@@ -1065,6 +1065,23 @@ pub struct RasterImageData {
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct UnderlayData {
+    pub insertion_point: Vector3,
+    pub x_scale: f64,
+    pub y_scale: f64,
+    pub z_scale: f64,
+    pub rotation: f64,
+    pub normal: Vector3,
+    pub flags: u8,
+    pub contrast: u8,
+    pub fade: u8,
+    pub clip_boundary_vertices: Vec<Vector2>,
+    pub clip_inverted: bool,
+    pub definition_handle: u64,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ole2FrameData {
     pub version: i16,
     pub mode: i16,
@@ -1627,6 +1644,47 @@ pub fn read_raster_image(reader: &mut DwgMergedReader, version: DwgVersion) -> R
 pub fn read_wipeout(reader: &mut DwgMergedReader, version: DwgVersion) -> RasterImageData {
     // Wipeout uses the same data layout as RasterImage
     read_raster_image(reader, version)
+}
+
+pub fn read_underlay(reader: &mut DwgMergedReader, version: DwgVersion) -> UnderlayData {
+    let insertion_point = reader.read_3bit_double();
+    let x_scale = reader.read_bit_double();
+    let y_scale = reader.read_bit_double();
+    let z_scale = reader.read_bit_double();
+    let rotation = reader.read_bit_double();
+    let normal = reader.read_bit_extrusion();
+    let flags = reader.read_byte();
+    let contrast = reader.read_byte();
+    let fade = reader.read_byte();
+
+    let count = safe_count(reader.read_bit_long());
+    let mut clip_boundary_vertices = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        clip_boundary_vertices.push(reader.read_2raw_double());
+    }
+
+    let clip_inverted = if version.r2010_plus() {
+        reader.read_bit()
+    } else {
+        false
+    };
+
+    let definition_handle = reader.read_handle();
+
+    UnderlayData {
+        insertion_point,
+        x_scale,
+        y_scale,
+        z_scale,
+        rotation,
+        normal,
+        flags,
+        contrast,
+        fade,
+        clip_boundary_vertices,
+        clip_inverted,
+        definition_handle,
+    }
 }
 
 pub fn read_ole2frame(reader: &mut DwgMergedReader, version: DwgVersion) -> Ole2FrameData {
@@ -2502,6 +2560,43 @@ mod tests {
         assert_eq!(sp.degree, 3);
         assert_eq!(sp.knots.len(), 6);
         assert_eq!(sp.control_points.len(), 3);
+    }
+
+    #[test]
+    fn test_underlay_roundtrip_r2018() {
+        let v = DwgVersion::AC15;
+        let d = DxfVersion::AC1015;
+        let mut r = make_reader(v, d, |w| {
+            w.write_3bit_double(Vector3::new(15.0, 25.0, 0.0));
+            w.write_bit_double(1.2);
+            w.write_bit_double(0.9);
+            w.write_bit_double(1.0);
+            w.write_bit_double(0.25);
+            w.write_bit_extrusion(Vector3::UNIT_Z);
+            w.write_byte(3); // ON | CLIPPING
+            w.write_byte(65);
+            w.write_byte(15);
+            w.write_bit_long(4);
+            w.write_2raw_double(Vector2::new(0.0, 0.0));
+            w.write_2raw_double(Vector2::new(5.0, 0.0));
+            w.write_2raw_double(Vector2::new(5.0, 3.0));
+            w.write_2raw_double(Vector2::new(0.0, 3.0));
+            w.write_handle(crate::io::dwg::dwg_reference_type::DwgReferenceType::HardPointer, 0x50);
+        });
+
+        let u = read_underlay(&mut r, v);
+        assert_eq!(u.insertion_point, Vector3::new(15.0, 25.0, 0.0));
+        assert_eq!(u.x_scale, 1.2);
+        assert_eq!(u.y_scale, 0.9);
+        assert_eq!(u.z_scale, 1.0);
+        assert_eq!(u.rotation, 0.25);
+        assert_eq!(u.normal, Vector3::UNIT_Z);
+        assert_eq!(u.flags, 3);
+        assert_eq!(u.contrast, 65);
+        assert_eq!(u.fade, 15);
+        assert_eq!(u.clip_boundary_vertices.len(), 4);
+        assert!(!u.clip_inverted);
+        assert_eq!(u.definition_handle, 0x50);
     }
 
     #[test]

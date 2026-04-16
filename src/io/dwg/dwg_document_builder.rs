@@ -1805,6 +1805,34 @@ impl DwgDocumentBuilder {
                     }
                     let _ = document.add_entity(EntityType::Wipeout(e));
                 },
+                OBJ_UNDERLAY_PDF | OBJ_UNDERLAY_DWF | OBJ_UNDERLAY_DGN => {
+                    let data = entities::read_underlay(
+                        &mut reader,
+                        self.obj_reader.version(),
+                    );
+                    let underlay_type = match type_code {
+                        OBJ_UNDERLAY_DWF => crate::entities::underlay::UnderlayType::Dwf,
+                        OBJ_UNDERLAY_DGN => crate::entities::underlay::UnderlayType::Dgn,
+                        _ => crate::entities::underlay::UnderlayType::Pdf,
+                    };
+
+                    let mut e = Underlay::new(underlay_type);
+                    e.common = entity_common;
+                    e.insertion_point = data.insertion_point;
+                    e.x_scale = data.x_scale;
+                    e.y_scale = data.y_scale;
+                    e.z_scale = data.z_scale;
+                    e.rotation = data.rotation;
+                    e.normal = data.normal;
+                    e.flags = UnderlayDisplayFlags::from_bits_truncate(data.flags);
+                    e.contrast = data.contrast;
+                    e.fade = data.fade;
+                    e.clip_boundary_vertices = data.clip_boundary_vertices;
+                    e.clip_inverted = data.clip_inverted;
+                    e.definition_handle = Handle::from(data.definition_handle);
+
+                    let _ = document.add_entity(EntityType::Underlay(e));
+                },
 
                 // ── OLE2 Frame ──────────────────────────────────────
                 OBJ_OLE2FRAME => {
