@@ -1524,13 +1524,35 @@ mod tests {
         // Zero out all header handles
         doc.header.block_control_handle = Handle::NULL;
         doc.header.layer_control_handle = Handle::NULL;
+        doc.header.style_control_handle = Handle::NULL;
+        doc.header.linetype_control_handle = Handle::NULL;
+        doc.header.view_control_handle = Handle::NULL;
+        doc.header.ucs_control_handle = Handle::NULL;
+        doc.header.vport_control_handle = Handle::NULL;
+        doc.header.appid_control_handle = Handle::NULL;
+        doc.header.dimstyle_control_handle = Handle::NULL;
         doc.header.named_objects_dict_handle = Handle::NULL;
+        doc.header.acad_group_dict_handle = Handle::NULL;
+        doc.header.acad_mlinestyle_dict_handle = Handle::NULL;
+        doc.header.acad_layout_dict_handle = Handle::NULL;
+        doc.header.bylayer_linetype_handle = Handle::NULL;
+        doc.header.byblock_linetype_handle = Handle::NULL;
+        doc.header.continuous_linetype_handle = Handle::NULL;
+        doc.header.current_layer_handle = Handle::NULL;
+        doc.header.current_text_style_handle = Handle::NULL;
+        doc.header.current_dimstyle_handle = Handle::NULL;
+        doc.header.current_linetype_handle = Handle::NULL;
 
         // Writing should succeed (prepare_header syncs handles)
         let result = DwgWriter::write_to_vec(&doc);
         assert!(result.is_ok(), "Writing with NULL headers should succeed after sync");
         let bytes = result.unwrap();
         assert!(bytes.len() > 200, "Output should be non-trivial");
+
+        use crate::io::dwg::DwgReader;
+        let mut reader = DwgReader::from_stream(std::io::Cursor::new(bytes));
+        let parsed_doc = reader.read();
+        assert!(parsed_doc.is_ok(), "Written DWG file must be valid and readable");
     }
 
     // ── File-level DWG roundtrip tests for 3DSOLID / REGION / BODY ──
