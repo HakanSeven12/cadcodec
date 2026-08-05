@@ -2151,7 +2151,8 @@ impl CadDocument {
         // Dictionary and other objects created by initialize_defaults() may
         // have handles that collide with file-sourced handles.
         let mut remap: Vec<(Handle, Handle)> = Vec::new();
-        let obj_handles: Vec<Handle> = self.objects.keys().copied().collect();
+        let mut obj_handles: Vec<Handle> = self.objects.keys().copied().collect();
+        obj_handles.sort_by_key(|handle| handle.value());
         for old_h in obj_handles {
             if used_handles.contains(&old_h.value()) {
                 let new_h = Handle::new(self.next_handle); self.next_handle += 1;
