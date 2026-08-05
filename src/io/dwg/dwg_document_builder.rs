@@ -3941,6 +3941,55 @@ impl DwgDocumentBuilder {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::classes::DxfClass;
+
+    #[test]
+    fn unknown_object_type_name_uses_class_dxf_name() {
+        let mut document = CadDocument::new();
+        document.classes.clear();
+        let mut class = DxfClass::new("IRD_OBJ_RECORD", "AcDbIrdObjRecord");
+        class.class_number = 524;
+        document.classes.push_preserving(class);
+
+        assert_eq!(
+            DwgDocumentBuilder::unknown_object_type_name(&document, 524),
+            "IRD_OBJ_RECORD"
+        );
+    }
+
+    #[test]
+    fn unknown_object_type_name_falls_back_to_raw_class_number() {
+        let mut document = CadDocument::new();
+        document.classes.clear();
+
+        assert_eq!(
+            DwgDocumentBuilder::unknown_object_type_name(&document, 524),
+            "DWG_OBJ_524"
+        );
+    }
+
+    #[test]
+    fn unknown_object_type_name_uses_raw_number_after_type_resolution() {
+        let mut document = CadDocument::new();
+        document.classes.clear();
+        let mut class = DxfClass::new("IRD_OBJ_RECORD", "AcDbIrdObjRecord");
+        class.class_number = 524;
+        document.classes.push_preserving(class);
+
+        let mut class_map = HashMap::new();
+        class_map.insert(524, 82);
+
+        assert_eq!(DwgDocumentBuilder::resolve_type_code(524, &class_map), 82);
+        assert_eq!(
+            DwgDocumentBuilder::unknown_object_type_name(&document, 524),
+            "IRD_OBJ_RECORD"
+        );
+    }
+}
+
 /// Build a [`Matrix4`](crate::types::Matrix4) from 12 doubles holding a 3×4
 /// transform in row-major order (3 rows of 4: `[R | t]`); bottom row implied.
 /// Decode an `AcDbSectionSymbol` (DWG class 825) into its display geometry.
