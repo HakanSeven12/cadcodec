@@ -2085,6 +2085,7 @@ impl DwgDocumentBuilder {
                     dim.base.common = entity_common;
                     map_dimension_common(&mut dim.base, &data.common, &maps);
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
                     dim.rotation = data.rotation;
                     dim.ext_line_rotation = data.ext_line_rotation;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Linear(dim)));
@@ -2099,6 +2100,7 @@ impl DwgDocumentBuilder {
                     dim.base.common = entity_common;
                     map_dimension_common(&mut dim.base, &data.common, &maps);
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
                     dim.ext_line_rotation = data.ext_line_rotation;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Aligned(dim)));
                 }
@@ -2111,6 +2113,7 @@ impl DwgDocumentBuilder {
                     let mut dim = DimensionRadius::new(data.angle_vertex, data.definition_point);
                     dim.base.common = entity_common;
                     map_dimension_common(&mut dim.base, &data.common, &maps);
+                    dim.base.definition_point = data.definition_point;
                     dim.leader_length = data.leader_length;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Radius(dim)));
                 }
@@ -2123,6 +2126,7 @@ impl DwgDocumentBuilder {
                     let mut dim = DimensionDiameter::new(data.angle_vertex, data.definition_point);
                     dim.base.common = entity_common;
                     map_dimension_common(&mut dim.base, &data.common, &maps);
+                    dim.base.definition_point = data.definition_point;
                     dim.leader_length = data.leader_length;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Diameter(dim)));
                 }
@@ -2141,6 +2145,7 @@ impl DwgDocumentBuilder {
                     dim.second_point = data.second_point;
                     dim.angle_vertex = data.angle_vertex;
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Angular2Ln(dim)));
                 }
                 OBJ_DIMENSION_ANG_3PT => {
@@ -2156,6 +2161,7 @@ impl DwgDocumentBuilder {
                     dim.second_point = data.second_point;
                     dim.angle_vertex = data.angle_vertex;
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Angular3Pt(dim)));
                 }
                 OBJ_DIMENSION_ORDINATE => {
@@ -2172,6 +2178,7 @@ impl DwgDocumentBuilder {
                     dim.base.common = entity_common;
                     map_dimension_common(&mut dim.base, &data.common, &maps);
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Ordinate(dim)));
                 }
 
