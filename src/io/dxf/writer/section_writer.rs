@@ -53,6 +53,8 @@ pub struct SectionWriter<'a, W: DxfStreamWriter> {
     /// Handle of the root named-objects dictionary — owner fallback for
     /// dictionaries whose owner was dropped.
     root_dict_handle: Handle,
+    /// Normal plot-style placeholder used by layer records.
+    normal_plotstyle_handle: Handle,
 }
 
 impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
@@ -70,6 +72,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             byblock_linetype_handle: Handle::NULL,
             model_space_handle: Handle::NULL,
             root_dict_handle: Handle::NULL,
+            normal_plotstyle_handle: Handle::NULL,
         }
     }
 
@@ -114,6 +117,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         for r in document.vports.iter() { set.insert(r.handle()); }
         for r in document.ucss.iter() { set.insert(r.handle()); }
         self.root_dict_handle = Self::find_root_dict_handle(&document.objects);
+        self.normal_plotstyle_handle = document.objects.values().find_map(|object| {
+            if let ObjectType::DictionaryWithDefault(dict) = object {
+                if dict.entries.iter().any(|(name, _)| name == "Normal") {
+                    return dict.default_handle.into();
+                }
+            }
+            None
+        }).unwrap_or(Handle::NULL);
         self.valid_handles = set;
         // Store ByLayer/ByBlock linetype handles for use as default in MLeader etc.
         if let Some(lt) = document.line_types.get("ByLayer") {
@@ -149,7 +160,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$ACADVER", |w| {
             w.write_string(1, document.version.to_dxf_string())
         })?;
-        self.write_header_variable("$ACADMAINTVER", |w| w.write_i16(70, 0))?;
+        self.write_header_variable("$ACADMAINTVER", |w| w.write_i32(90, 0))?;
         self.write_header_variable("$DWGCODEPAGE", |w| w.write_string(3, &hdr.code_page))?;
 
         let handle_seed = self.handle_seed;
@@ -534,16 +545,21 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_table_header("LAYER", document.layers.len(), table_handle)?;
 
         for layer in document.layers.iter() {
-            self.write_layer_entry(layer, table_handle)?;
+            let handle = if layer.handle.is_null() {
+                self.allocate_handle()
+            } else {
+                layer.handle
+            };
+            self.write_layer_entry(layer, table_handle, handle)?;
         }
 
         self.write_table_end()?;
         Ok(())
     }
 
-    fn write_layer_entry(&mut self, layer: &Layer, owner: Handle) -> Result<()> {
+    fn write_layer_entry(&mut self, layer: &Layer, owner: Handle, handle: Handle) -> Result<()> {
         self.writer.write_string(0, "LAYER")?;
-        self.write_common_table_data(layer.handle(), owner)?;
+        self.write_common_table_data(handle, owner)?;
         self.writer.write_subclass("AcDbSymbolTableRecord")?;
         self.writer.write_subclass("AcDbLayerTableRecord")?;
         self.writer.write_string(2, layer.name())?;
@@ -585,6 +601,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // Lineweight
         self.writer.write_i16(370, layer.line_weight.value())?;
+
+        // R2000+ layer records require a hard pointer to a plot-style object.
+        if self.dxf_version >= DxfVersion::AC1015 {
+            let plotstyle_handle = if layer.plotstyle_handle.is_null() {
+                self.normal_plotstyle_handle
+            } else {
+                layer.plotstyle_handle
+            };
+            if !plotstyle_handle.is_null() {
+                self.writer.write_handle(390, plotstyle_handle)?;
+            }
+        }
 
         // Plot flag (code 290 is Bool type - single byte in binary)
         self.writer

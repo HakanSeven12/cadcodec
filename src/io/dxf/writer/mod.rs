@@ -172,6 +172,13 @@ fn count_extra_handles(document: &CadDocument) -> u64 {
         }
     }
 
+    // Null layer handles are allocated while writing the LAYER table.
+    count += document
+        .layers
+        .iter()
+        .filter(|layer| layer.handle.is_null())
+        .count() as u64;
+
     count
 }
 
