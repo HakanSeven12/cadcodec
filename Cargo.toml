@@ -29,9 +29,6 @@ byteorder = "1.5"
 # Compression
 flate2 = "1.0"
 
-# Math
-nalgebra = "0.32"
-
 # Collections
 indexmap = "2.0"
 ahash = { version = "0.8", features = ["serde"] }
