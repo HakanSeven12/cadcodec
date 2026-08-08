@@ -12,7 +12,7 @@
 //!
 //! Payload layout (ODA `.dwg` spec §28 "Extended Entity Data"), one item each:
 //!   * `0`  string   — R2007+: `u16` code-unit count + UTF-16LE; earlier:
-//!                      `u8` byte length + `u16` codepage + WINDOWS_1252 bytes.
+//!                      `u8` byte length + `u16` codepage + encoded bytes.
 //!   * `2`  control  — one byte: `0` = `{`, `1` = `}`.
 //!   * `3`  layer    — 8-byte little-endian layer table handle.
 //!   * `4`  binary   — `u8` length + raw bytes.
@@ -34,9 +34,26 @@ use crate::xdata::XDataValue;
 /// `wide` selects the R2007+ UTF-16 string encoding. `layer_handle` resolves a
 /// layer name to its table handle for [`XDataValue::LayerName`] items (returns
 /// `0` when the layer is unknown).
-pub(crate) fn encode_values(
+#[cfg(test)]
+fn encode_values(
     wide: bool,
     values: &[XDataValue],
+    layer_handle: impl Fn(&str) -> u64,
+) -> Vec<u8> {
+    encode_values_with_encoding(
+        wide,
+        values,
+        encoding_rs::WINDOWS_1252,
+        30,
+        layer_handle,
+    )
+}
+
+pub(crate) fn encode_values_with_encoding(
+    wide: bool,
+    values: &[XDataValue],
+    encoding: &'static encoding_rs::Encoding,
+    code_page: u16,
     layer_handle: impl Fn(&str) -> u64,
 ) -> Vec<u8> {
     let mut b = Vec::new();
@@ -49,9 +66,9 @@ pub(crate) fn encode_values(
                 b.extend_from_slice(&u.to_le_bytes());
             }
         } else {
-            let (encoded, _, _) = encoding_rs::WINDOWS_1252.encode(s);
+            let (encoded, _, _) = encoding.encode(s);
             b.push(encoded.len() as u8);
-            b.extend_from_slice(&0u16.to_le_bytes()); // codepage
+            b.extend_from_slice(&code_page.to_le_bytes());
             b.extend_from_slice(&encoded);
         }
     };
@@ -148,10 +165,15 @@ pub(crate) fn decode_values(
                     String::from_utf16_lossy(&units)
                 } else {
                     let n = *bytes.get(i)? as usize;
-                    i += 1 + 2; // length byte + codepage
+                    i += 1;
+                    let code_page = read_u16(bytes, i)?;
+                    i += 2;
                     let slice = bytes.get(i..i + n)?;
                     i += n;
-                    encoding_rs::WINDOWS_1252.decode(slice).0.into_owned()
+                    crate::io::dxf::code_page::encoding_from_dwg_code_page(code_page)
+                        .decode(slice)
+                        .0
+                        .into_owned()
                 };
                 values.push(XDataValue::String(s));
             }

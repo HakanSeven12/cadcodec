@@ -282,6 +282,41 @@ struct AC21SectionPageRecord {
     crc: u64,
 }
 
+struct EncodedDataPage {
+    bytes: Vec<u8>,
+    uncompressed_size: u64,
+    compressed_size: u64,
+    checksum: u64,
+    crc: u64,
+}
+
+fn encode_data_page(data: &[u8], encoding: u64, skip_lz77: bool) -> EncodedDataPage {
+    let checksum = dwg_ac21_page_checksum(0, data) as u64;
+    if encoding == 1 {
+        return EncodedDataPage {
+            bytes: data.to_vec(),
+            uncompressed_size: data.len() as u64,
+            compressed_size: data.len() as u64,
+            checksum,
+            crc: dwg_ac21_mirrored_crc64(0, data.len() as u32, data),
+        };
+    }
+
+    let compressed = compress_ac21(data);
+    let page_data = if skip_lz77 || compressed.len() >= data.len() {
+        data
+    } else {
+        compressed.as_slice()
+    };
+    EncodedDataPage {
+        bytes: rs_encode_data_page_interleaved(page_data, encoding),
+        uncompressed_size: data.len() as u64,
+        compressed_size: page_data.len() as u64,
+        checksum,
+        crc: dwg_ac21_mirrored_crc64(0, page_data.len() as u32, page_data),
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 //  Page alignment and system page size calculation (spec §5.3.1)
 // ════════════════════════════════════════════════════════════════════════════
@@ -450,6 +485,8 @@ impl DwgFileHeaderWriterAC21 {
         name: &str,
         data: &[u8],
     ) -> Result<(), DxfError> {
+        let perf = std::env::var_os("PERF").is_some();
+        let started = web_time::Instant::now();
         let hash_code = ac21_section_info::hash_code(name)
             .ok_or_else(|| DxfError::InvalidFormat(
                 format!("Unknown AC21 section: {}", name),
@@ -472,28 +509,43 @@ impl DwgFileHeaderWriterAC21 {
             pages: Vec::new(),
         };
 
-        // Partition data into pages
+        // Partition and encode pages in parallel. Stream offsets/page ids stay
+        // deterministic because completed pages are written serially in input
+        // order after CPU-heavy LZ77/RS work finishes.
         let page_size = max_page_size as usize;
-        let mut offset: usize = 0;
+        use crate::io::dwg::parallel::{map_chunks_indexed, worker_count};
+        let skip_lz77 = self.skip_lz77;
+        let batch_pages = worker_count().saturating_mul(2);
+        let batch_bytes = page_size.saturating_mul(batch_pages).max(page_size);
+        for (batch_index, batch) in data.chunks(batch_bytes).enumerate() {
+            let first_page = batch_index.saturating_mul(batch_pages);
+            let encoded: Vec<_> =
+                map_chunks_indexed(batch, page_size, |index, bytes| {
+                    (
+                        (first_page + index) as u64 * max_page_size,
+                        encode_data_page(bytes, encoding, skip_lz77),
+                    )
+                });
 
-        while offset < data.len() {
-            let remaining = data.len() - offset;
-            let chunk_size = remaining.min(page_size);
-            let chunk = &data[offset..offset + chunk_size];
-
-            let page_record = self.write_data_page(
-                output,
-                chunk,
-                encoding,
-                offset as u64,
-                max_page_size,
-            )?;
-
-            section.pages.push(page_record);
-            offset += chunk_size;
+            for (offset, page) in encoded {
+                let page_record =
+                    self.write_encoded_data_page(output, page, offset, max_page_size)?;
+                section.pages.push(page_record);
+            }
         }
 
+        let pages = section.pages.len();
         self.sections.push(section);
+        if perf {
+            eprintln!(
+                "[perf] dwg-write-section name={} format=ac21 time={:.1}ms bytes={} pages={} encoding={}",
+                name,
+                started.elapsed().as_secs_f64() * 1000.0,
+                data.len(),
+                pages,
+                encoding,
+            );
+        }
         Ok(())
     }
 
@@ -744,93 +796,39 @@ impl DwgFileHeaderWriterAC21 {
 
     /// Write a single data page to the output stream.
     ///
-    /// For encoding=1 (stored): writes raw data with 32-byte alignment.
-    /// For encoding=4 (compressed): LZ77 compress → RS-encode → 32-byte align.
-    fn write_data_page<W: Write + Seek>(
+    /// Write a pre-encoded page and assign its deterministic stream id/offset.
+    fn write_encoded_data_page<W: Write + Seek>(
         &mut self,
         output: &mut W,
-        data: &[u8],
-        encoding: u64,
+        page: EncodedDataPage,
         data_offset: u64,
         max_page_size: u64,
     ) -> Result<AC21SectionPageRecord, DxfError> {
         let page_id = self.next_page_id;
         self.next_page_id += 1;
 
-        let checksum = dwg_ac21_page_checksum(0, data) as u64;
-
-        if encoding == 1 {
-            // encoding=1: Store raw data without RS encoding.
-            // Analysis of AutoCAD-generated R2007 files shows encoding=1 pages
-            // are stored as raw (uncompressed, un-RS-encoded) data aligned to
-            // 32-byte boundaries.  The encoding field means "no LZ77" and also
-            // "no RS".  AutoCAD reads these pages directly without RS decoding.
-            let page_crc = dwg_ac21_mirrored_crc64(0, data.len() as u32, data);
-
-            let aligned_size = align32(data.len());
-            let offset = output.seek(SeekFrom::Current(0))?;
-            output.write_all(data)?;
-            // Pad to 32-byte alignment
-            let padding = aligned_size - data.len();
-            if padding > 0 {
-                output.write_all(&vec![0u8; padding])?;
-            }
-
-            self.page_records.push(AC21PageRecord {
-                id: page_id,
-                size: aligned_size as i64,
-                offset,
-            });
-
-            Ok(AC21SectionPageRecord {
-                data_offset,
-                page_size: max_page_size,
-                page_id,
-                uncompressed_size: data.len() as u64,
-                compressed_size: data.len() as u64,
-                checksum,
-                crc: page_crc,
-            })
-        } else {
-            // encoding=4: compress + RS encode
-            let compressed = compress_ac21(data);
-            // Use raw data if compression doesn't reduce size (matches AutoCAD behavior).
-            // The reader checks compressed_size == uncompressed_size to skip decompression.
-            // Also skip compression if skip_lz77 flag is set (for debugging).
-            let (page_data, comp_size) = if self.skip_lz77 || compressed.len() >= data.len() {
-                (data, data.len() as u64)
-            } else {
-                (compressed.as_slice(), compressed.len() as u64)
-            };
-            // CRC-64 is computed on the compressed page data BEFORE RS encoding (spec §5.4).
-            let page_crc = dwg_ac21_mirrored_crc64(0, page_data.len() as u32, page_data);
-            let encoded = rs_encode_data_page_interleaved(page_data, encoding);
-
-            // Align to 32-byte boundary
-            let aligned_size = align32(encoded.len());
-            let offset = output.seek(SeekFrom::Current(0))?;
-            output.write_all(&encoded)?;
-            let padding = aligned_size - encoded.len();
-            if padding > 0 {
-                output.write_all(&vec![0u8; padding])?;
-            }
-
-            self.page_records.push(AC21PageRecord {
-                id: page_id,
-                size: aligned_size as i64,
-                offset,
-            });
-
-            Ok(AC21SectionPageRecord {
-                data_offset,
-                page_size: max_page_size,
-                page_id,
-                uncompressed_size: data.len() as u64,
-                compressed_size: comp_size,
-                checksum,
-                crc: page_crc,
-            })
+        let aligned_size = align32(page.bytes.len());
+        let offset = output.seek(SeekFrom::Current(0))?;
+        output.write_all(&page.bytes)?;
+        let padding = aligned_size - page.bytes.len();
+        if padding > 0 {
+            output.write_all(&[0u8; PAGE_ALIGN_SIZE][..padding])?;
         }
+
+        self.page_records.push(AC21PageRecord {
+            id: page_id,
+            size: aligned_size as i64,
+            offset,
+        });
+        Ok(AC21SectionPageRecord {
+            data_offset,
+            page_size: max_page_size,
+            page_id,
+            uncompressed_size: page.uncompressed_size,
+            compressed_size: page.compressed_size,
+            checksum: page.checksum,
+            crc: page.crc,
+        })
     }
 
     // ── System page writing ──

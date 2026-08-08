@@ -17,6 +17,8 @@ pub struct LwVertex {
     pub start_width: f64,
     /// Ending width at this vertex
     pub end_width: f64,
+    /// Stable vertex identifier (DXF 91, R2010+ DWG).
+    pub vertex_id: i32,
 }
 
 impl LwVertex {
@@ -27,6 +29,7 @@ impl LwVertex {
             bulge: 0.0,
             start_width: 0.0,
             end_width: 0.0,
+            vertex_id: 0,
         }
     }
 
@@ -42,6 +45,7 @@ impl LwVertex {
             bulge,
             start_width: 0.0,
             end_width: 0.0,
+            vertex_id: 0,
         }
     }
 }
@@ -201,4 +205,3 @@ impl Entity for LwPolyline {
         super::mirror::mirror_lwpolyline(self, transform);
     }
 }
-

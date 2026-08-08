@@ -228,6 +228,15 @@ pub enum SatToken {
     Terminator,
     /// An enum-like keyword (forward, reversed, single, double, etc.).
     Enum(String),
+    /// A losslessly preserved SAB token. `data` contains every byte after
+    /// `tag`, including any length prefix, exactly as it appeared in the
+    /// binary stream.
+    Sab {
+        /// SAB type tag.
+        tag: u8,
+        /// Raw tag payload.
+        data: Vec<u8>,
+    },
 }
 
 impl SatToken {
@@ -235,6 +244,10 @@ impl SatToken {
     pub fn as_ident(&self) -> Option<&str> {
         match self {
             SatToken::Ident(s) | SatToken::Enum(s) => Some(s),
+            SatToken::Sab { tag: 0x0F, .. } => Some("{"),
+            SatToken::Sab { tag: 0x10, .. } => Some("}"),
+            SatToken::Sab { tag, data } => sab_string_bytes(*tag, data)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok()),
             _ => None,
         }
     }
@@ -251,6 +264,21 @@ impl SatToken {
     pub fn as_integer(&self) -> Option<i64> {
         match self {
             SatToken::Integer(v) => Some(*v),
+            SatToken::Sab { tag: 0x02, data } if data.len() == 1 => {
+                Some(i8::from_le_bytes([data[0]]) as i64)
+            }
+            SatToken::Sab { tag: 0x03, data } if data.len() == 2 => {
+                Some(i16::from_le_bytes([data[0], data[1]]) as i64)
+            }
+            SatToken::Sab { tag: 0x04 | 0x15, data } if data.len() == 4 => {
+                Some(i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as i64)
+            }
+            SatToken::Sab { tag: 0x17, data } if data.len() == 8 => {
+                Some(i64::from_le_bytes([
+                    data[0], data[1], data[2], data[3],
+                    data[4], data[5], data[6], data[7],
+                ]))
+            }
             _ => None,
         }
     }
@@ -260,6 +288,15 @@ impl SatToken {
         match self {
             SatToken::Float(v) => Some(*v),
             SatToken::Integer(v) => Some(*v as f64),
+            SatToken::Sab { tag: 0x05, data } if data.len() == 4 => {
+                Some(f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
+            }
+            SatToken::Sab { tag: 0x06, data } if data.len() == 8 => {
+                Some(f64::from_le_bytes([
+                    data[0], data[1], data[2], data[3],
+                    data[4], data[5], data[6], data[7],
+                ]))
+            }
             _ => None,
         }
     }
@@ -268,9 +305,46 @@ impl SatToken {
     pub fn as_string(&self) -> Option<&str> {
         match self {
             SatToken::String(s) => Some(s),
+            SatToken::Sab { tag, data } => sab_string_bytes(*tag, data)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok()),
             _ => None,
         }
     }
+
+    /// Returns the coordinate components carried by a SAT/SAB vector token.
+    ///
+    /// The returned length is two for SAB U-V vectors and three for positions
+    /// and directions.
+    pub fn coordinate_components(&self) -> Option<([f64; 3], usize)> {
+        match self {
+            SatToken::Position(x, y, z) => Some(([*x, *y, *z], 3)),
+            SatToken::Sab { tag: 0x13 | 0x14, data } if data.len() == 24 => {
+                Some(([
+                    f64::from_le_bytes(data[0..8].try_into().ok()?),
+                    f64::from_le_bytes(data[8..16].try_into().ok()?),
+                    f64::from_le_bytes(data[16..24].try_into().ok()?),
+                ], 3))
+            }
+            SatToken::Sab { tag: 0x16, data } if data.len() == 16 => {
+                Some(([
+                    f64::from_le_bytes(data[0..8].try_into().ok()?),
+                    f64::from_le_bytes(data[8..16].try_into().ok()?),
+                    0.0,
+                ], 2))
+            }
+            _ => None,
+        }
+    }
+}
+
+fn sab_string_bytes(tag: u8, data: &[u8]) -> Option<&[u8]> {
+    let prefix = match tag {
+        0x07 | 0x0D | 0x0E => 1,
+        0x08 => 2,
+        0x09 | 0x12 => 4,
+        _ => return None,
+    };
+    (data.len() >= prefix).then_some(&data[prefix..])
 }
 
 impl fmt::Display for SatToken {
@@ -292,6 +366,35 @@ impl fmt::Display for SatToken {
             SatToken::False => write!(f, "FALSE"),
             SatToken::Terminator => write!(f, "#"),
             SatToken::Enum(s) => write!(f, "{}", s),
+            SatToken::Sab { tag, data } => {
+                if let Some((values, len)) = self.coordinate_components() {
+                    for (index, value) in values[..len].iter().enumerate() {
+                        if index != 0 {
+                            write!(f, " ")?;
+                        }
+                        write!(f, "{}", value)?;
+                    }
+                    Ok(())
+                } else if let Some(value) = self.as_integer() {
+                    write!(f, "{}", value)
+                } else if let Some(value) = self.as_float() {
+                    write!(f, "{}", value)
+                } else if let Some(value) = sab_string_bytes(*tag, data)
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                {
+                    if matches!(*tag, 0x0D | 0x0E) {
+                        write!(f, "{}", value)
+                    } else {
+                        write!(f, "@{} {}", value.len(), value)
+                    }
+                } else {
+                    match *tag {
+                        0x0F => write!(f, "{{"),
+                        0x10 => write!(f, "}}"),
+                        _ => write!(f, "<sab:{:02X}:{}>", tag, data.len()),
+                    }
+                }
+            }
         }
     }
 }
@@ -337,6 +440,12 @@ impl SatRecord {
         }
     }
 
+    /// Returns whether this record is the requested ACIS class or derives
+    /// from it through a hyphen-separated SAB class name.
+    pub fn is_a(&self, entity_type: &str) -> bool {
+        self.entity_type == entity_type || base_entity_type(&self.entity_type) == entity_type
+    }
+
     /// Returns all pointer references in this record.
     pub fn pointers(&self) -> Vec<SatPointer> {
         let mut ptrs = vec![self.attribute];
@@ -368,8 +477,8 @@ impl SatRecord {
         // no Position tokens (all SAT, most SAB scalars) index 1:1 as before.
         let mut slot = 0usize;
         for t in &self.tokens {
-            if let SatToken::Position(x, y, z) = t {
-                for &c in &[*x, *y, *z] {
+            if let Some((components, len)) = t.coordinate_components() {
+                for &c in &components[..len] {
                     if slot == index {
                         return Some(c);
                     }
@@ -405,10 +514,27 @@ impl SatRecord {
 
     /// Returns the string value at the given token position.
     pub fn token_string(&self, index: usize) -> Option<&str> {
-        self.tokens.get(index).and_then(|t| match t {
-            SatToken::String(s) | SatToken::Ident(s) | SatToken::Enum(s) => Some(s.as_str()),
-            _ => None,
-        })
+        self.tokens
+            .get(index)
+            .and_then(|token| token.as_ident().or_else(|| token.as_string()))
+    }
+
+    /// Read an edge/coedge sense from token `index`, accepting both the
+    /// keyword form (`forward` / `reversed`, ACIS 4.0+) and the numeric form
+    /// pre-4.0 SAT uses (`0` = forward, `1` = reversed) — the latter tokenizes
+    /// as an Integer, so `token_string` misses it and every coedge defaults to
+    /// forward, collapsing reversed-coedge loops to a duplicate vertex.
+    pub fn token_sense(&self, index: usize) -> Sense {
+        match self.tokens.get(index) {
+            Some(token) if token.as_integer().is_some() => {
+                if token.as_integer().unwrap_or(0) != 0 {
+                    Sense::Reversed
+                } else {
+                    Sense::Forward
+                }
+            }
+            _ => self.token_string(index).map(Sense::from_str).unwrap_or_default(),
+        }
     }
 }
 
@@ -440,7 +566,9 @@ impl Sense {
     /// Parse from SAT token.
     pub fn from_str(s: &str) -> Self {
         match s {
-            "reversed" | "REVERSED" => Self::Reversed,
+            // Keyword form (ACIS 4.0+) and the numeric form pre-4.0 SAT uses
+            // (0 = forward, 1 = reversed).
+            "reversed" | "REVERSED" | "1" => Self::Reversed,
             _ => Self::Forward,
         }
     }
@@ -509,7 +637,7 @@ pub struct SatBody<'a> {
 impl<'a> SatBody<'a> {
     /// Wraps a record as a body entity. Returns None if not a body.
     pub fn from_record(record: &'a SatRecord) -> Option<Self> {
-        if record.entity_type == "body" {
+        if record.is_a("body") {
             Some(Self { record })
         } else {
             None
@@ -548,7 +676,7 @@ pub struct SatLump<'a> {
 impl<'a> SatLump<'a> {
     /// Wraps a record as a lump entity. Returns None if not a lump.
     pub fn from_record(record: &'a SatRecord) -> Option<Self> {
-        if record.entity_type == "lump" {
+        if record.is_a("lump") {
             Some(Self { record })
         } else {
             None
@@ -582,7 +710,7 @@ pub struct SatShell<'a> {
 impl<'a> SatShell<'a> {
     /// Wraps a record as a shell entity. Returns None if not a shell.
     pub fn from_record(record: &'a SatRecord) -> Option<Self> {
-        if record.entity_type == "shell" {
+        if record.is_a("shell") {
             Some(Self { record })
         } else {
             None
@@ -615,6 +743,126 @@ impl<'a> SatShell<'a> {
     }
 }
 
+/// Accessor for a `subshell` topology record.
+///
+/// ACIS/ASM releases extend this record differently, so links after the
+/// common pattern pointer are exposed by ordinal instead of assigning an
+/// unsafe version-specific meaning to them.
+#[derive(Debug, Clone)]
+pub struct SatSubshell<'a> {
+    record: &'a SatRecord,
+}
+
+impl<'a> SatSubshell<'a> {
+    /// Wraps a record as a subshell entity.
+    pub fn from_record(record: &'a SatRecord) -> Option<Self> {
+        if record.is_a("subshell") {
+            Some(Self { record })
+        } else {
+            None
+        }
+    }
+
+    /// Pattern-feature pointer introduced in newer ACIS save versions.
+    pub fn pattern(&self) -> SatPointer {
+        self.record.token_pointer(0).unwrap_or(SatPointer::NULL)
+    }
+
+    /// Returns a topology link after the common pattern pointer.
+    pub fn link(&self, ordinal: usize) -> SatPointer {
+        self.record
+            .nth_pointer(ordinal + 1)
+            .unwrap_or(SatPointer::NULL)
+    }
+
+    /// Underlying lossless record.
+    pub fn record(&self) -> &'a SatRecord {
+        self.record
+    }
+}
+
+/// Accessor for a `wire` topology record.
+///
+/// Wire payloads changed across ACIS/ASM versions. The stable pattern pointer
+/// is named; subsequent topology links remain ordinal and lossless.
+#[derive(Debug, Clone)]
+pub struct SatWire<'a> {
+    record: &'a SatRecord,
+}
+
+impl<'a> SatWire<'a> {
+    /// Wraps a record as a wire entity.
+    pub fn from_record(record: &'a SatRecord) -> Option<Self> {
+        if record.is_a("wire") {
+            Some(Self { record })
+        } else {
+            None
+        }
+    }
+
+    /// Pattern-feature pointer introduced in newer ACIS save versions.
+    pub fn pattern(&self) -> SatPointer {
+        self.record.token_pointer(0).unwrap_or(SatPointer::NULL)
+    }
+
+    /// Returns a topology link after the common pattern pointer.
+    pub fn link(&self, ordinal: usize) -> SatPointer {
+        self.record
+            .nth_pointer(ordinal + 1)
+            .unwrap_or(SatPointer::NULL)
+    }
+
+    /// Underlying lossless record.
+    pub fn record(&self) -> &'a SatRecord {
+        self.record
+    }
+}
+
+/// Accessor for any class derived from ACIS `attrib`.
+///
+/// Attribute common data is stable: next attribute, previous attribute and
+/// owner pointers, followed by class-specific payload.
+#[derive(Debug, Clone)]
+pub struct SatAttribute<'a> {
+    record: &'a SatRecord,
+}
+
+impl<'a> SatAttribute<'a> {
+    /// Wraps a derived attribute record.
+    pub fn from_record(record: &'a SatRecord) -> Option<Self> {
+        if classify_entity_type(&record.entity_type) == SatEntityCategory::Attribute {
+            Some(Self { record })
+        } else {
+            None
+        }
+    }
+
+    /// Next attribute in the owner's attribute chain.
+    pub fn next(&self) -> SatPointer {
+        self.record.token_pointer(0).unwrap_or(SatPointer::NULL)
+    }
+
+    /// Previous attribute in the owner's attribute chain.
+    pub fn previous(&self) -> SatPointer {
+        self.record.token_pointer(1).unwrap_or(SatPointer::NULL)
+    }
+
+    /// Entity which owns this attribute.
+    pub fn owner(&self) -> SatPointer {
+        self.record.token_pointer(2).unwrap_or(SatPointer::NULL)
+    }
+
+    /// Class-specific payload after the three common attribute links.
+    pub fn payload(&self) -> &'a [SatToken] {
+        self.record.tokens.get(3..).unwrap_or(&[])
+    }
+
+    /// Underlying lossless record.
+    pub fn record(&self) -> &'a SatRecord {
+        self.record
+    }
+}
+
 /// Accessor for a `face` entity record.
 ///
 /// Face record layout: `face $<attrib> <id> $<unknown> $<next_face> $<loop> $<shell> $<subshell> $<surface> <sense> <sidedness>`
@@ -626,11 +874,21 @@ pub struct SatFace<'a> {
 impl<'a> SatFace<'a> {
     /// Wraps a record as a face entity.
     pub fn from_record(record: &'a SatRecord) -> Option<Self> {
-        if record.entity_type == "face" {
+        if record.is_a("face") {
             Some(Self { record })
         } else {
             None
         }
+    }
+
+    /// First attribute attached to this face.
+    pub fn attribute(&self) -> SatPointer {
+        self.record.attribute
+    }
+
+    /// Underlying lossless face record.
+    pub fn record(&self) -> &'a SatRecord {
+        self.record
     }
 
     /// Pointer to the next face.
@@ -693,7 +951,7 @@ pub struct SatLoop<'a> {
 impl<'a> SatLoop<'a> {
     /// Wraps a record as a loop entity.
     pub fn from_record(record: &'a SatRecord) -> Option<Self> {
-        if record.entity_type == "loop" {
+        if record.is_a("loop") {
             Some(Self { record })
         } else {
             None
@@ -730,7 +988,7 @@ pub struct SatCoedge<'a> {
 impl<'a> SatCoedge<'a> {
     /// Wraps a record as a coedge entity.
     pub fn from_record(record: &'a SatRecord) -> Option<Self> {
-        if record.entity_type == "coedge" {
+        if record.is_a("coedge") {
             Some(Self { record })
         } else {
             None
@@ -759,15 +1017,17 @@ impl<'a> SatCoedge<'a> {
 
     /// Sense of this coedge relative to the edge.
     pub fn sense(&self) -> Sense {
-        self.record
-            .token_string(5)
-            .map(Sense::from_str)
-            .unwrap_or_default()
+        self.record.token_sense(5)
     }
 
     /// Pointer to the owner loop.
     pub fn owner_loop(&self) -> SatPointer {
         self.record.token_pointer(6).unwrap_or(SatPointer::NULL)
+    }
+
+    /// Optional parametric curve on the owner face's surface.
+    pub fn pcurve(&self) -> SatPointer {
+        self.record.nth_pointer(6).unwrap_or(SatPointer::NULL)
     }
 }
 
@@ -782,7 +1042,7 @@ pub struct SatEdge<'a> {
 impl<'a> SatEdge<'a> {
     /// Wraps a record as an edge entity.
     pub fn from_record(record: &'a SatRecord) -> Option<Self> {
-        if record.entity_type == "edge" {
+        if record.is_a("edge") {
             Some(Self { record })
         } else {
             None
@@ -821,10 +1081,7 @@ impl<'a> SatEdge<'a> {
 
     /// Edge sense.
     pub fn sense(&self) -> Sense {
-        self.record
-            .token_string(7)
-            .map(Sense::from_str)
-            .unwrap_or_default()
+        self.record.token_sense(7)
     }
 }
 
@@ -839,7 +1096,7 @@ pub struct SatVertex<'a> {
 impl<'a> SatVertex<'a> {
     /// Wraps a record as a vertex entity.
     pub fn from_record(record: &'a SatRecord) -> Option<Self> {
-        if record.entity_type == "vertex" {
+        if record.is_a("vertex") {
             Some(Self { record })
         } else {
             None
@@ -975,9 +1232,9 @@ impl<'a> SatEllipseCurve<'a> {
     }
 }
 
-/// Accessor for an `intcurve-curve` entity record — an interpolated spline
-/// curve. Its geometry is an embedded `nubs` (non-uniform B-spline) block:
-/// `... nubs <degree> <rational?> <n_knots> [<knot> <mult>]* [<x> <y> <z>]* ...`.
+/// Accessor for `intcurve-curve`, `bs3-curve` and `exactcur-curve` records.
+/// Their geometry is an embedded `nubs` or rational `nurbs` block:
+/// `... <degree> <form> <n_knots> [<knot> <mult>]* [<x> <y> <z> [w]]* ...`.
 /// Straight and elliptic edges have their own dedicated accessors; this covers
 /// the general spline edges (fillet/blend boundaries), which otherwise decode
 /// to nothing and leave a face un-trimmable.
@@ -986,22 +1243,32 @@ pub struct SatIntCurve<'a> {
     record: &'a SatRecord,
 }
 
+/// Direct bs3-curve records use the interpolated-curve B-spline accessor.
+pub type SatBs3Curve<'a> = SatIntCurve<'a>;
+
 impl<'a> SatIntCurve<'a> {
     pub fn from_record(record: &'a SatRecord) -> Option<Self> {
-        if record.entity_type == "intcurve-curve" {
+        let entity_type = record.entity_type.as_str();
+        if matches!(entity_type, "intcurve-curve" | "bs3-curve" | "exactcur-curve")
+            || entity_type.ends_with("-intcurve-curve")
+            || entity_type.ends_with("-bs3-curve")
+            || entity_type.ends_with("-exactcur-curve")
+        {
             Some(Self { record })
         } else {
             None
         }
     }
 
-    /// Parse the embedded `nubs` block into (degree, expanded knots, control
-    /// points). `None` when the record carries no recognizable nubs data.
-    fn nubs(&self) -> Option<(usize, Vec<f64>, Vec<[f64; 3]>)> {
+    /// Parse the embedded spline block into homogeneous control points.
+    pub fn bspline(&self) -> Option<(usize, Vec<f64>, Vec<[f64; 4]>)> {
         let t = &self.record.tokens;
-        let ni = t.iter().position(|x| x.as_ident() == Some("nubs"))?;
+        let ni = t
+            .iter()
+            .position(|x| matches!(x.as_ident(), Some("nubs" | "nurbs")))?;
+        let rational = t.get(ni)?.as_ident() == Some("nurbs");
         let degree = t.get(ni + 1)?.as_integer()? as usize;
-        // t[ni + 2] is the rational flag (0 = non-rational — the only form here).
+        // t[ni + 2] is the curve form/closure flag.
         let n_knots = t.get(ni + 3)?.as_integer()? as usize;
         let mut knots: Vec<f64> = Vec::new();
         let mut i = ni + 4;
@@ -1013,17 +1280,41 @@ impl<'a> SatIntCurve<'a> {
             }
             i += 2;
         }
-        if knots.len() < degree + 2 {
+        if knots.len() < 2 {
             return None;
         }
-        let n_ctrl = knots.len() - degree - 1;
-        let mut ctrl: Vec<[f64; 3]> = Vec::with_capacity(n_ctrl);
+        let stride = if rational { 4 } else { 3 };
+        let available = t[i..]
+            .iter()
+            .take_while(|token| token.as_float().is_some())
+            .count()
+            / stride;
+        let base_ctrl = knots.len().checked_sub(degree + 1)?;
+        let n_ctrl = if available >= base_ctrl + 2 {
+            let first = *knots.first()?;
+            let last = *knots.last()?;
+            knots.insert(0, first);
+            knots.push(last);
+            base_ctrl + 2
+        } else {
+            base_ctrl
+        };
+        if n_ctrl <= degree {
+            return None;
+        }
+        let mut ctrl: Vec<[f64; 4]> = Vec::with_capacity(n_ctrl);
         for _ in 0..n_ctrl {
             let x = t.get(i)?.as_float()?;
             let y = t.get(i + 1)?.as_float()?;
             let z = t.get(i + 2)?.as_float()?;
-            ctrl.push([x, y, z]);
-            i += 3;
+            if rational {
+                let w = t.get(i + 3)?.as_float()?;
+                ctrl.push([x * w, y * w, z * w, w]);
+                i += 4;
+            } else {
+                ctrl.push([x, y, z, 1.0]);
+                i += 3;
+            }
         }
         Some((degree, knots, ctrl))
     }
@@ -1031,7 +1322,7 @@ impl<'a> SatIntCurve<'a> {
     /// Sample `segs + 1` points evenly along the curve's full valid parameter
     /// range. Empty when the record has no decodable nubs geometry.
     pub fn sample(&self, segs: usize) -> Vec<(f64, f64, f64)> {
-        let Some((degree, knots, _)) = self.nubs() else {
+        let Some((degree, knots, _)) = self.bspline() else {
             return Vec::new();
         };
         self.sample_range(knots[degree], knots[knots.len() - degree - 1], segs)
@@ -1042,7 +1333,7 @@ impl<'a> SatIntCurve<'a> {
     /// is clamped to the curve's valid parameter interval. Empty when the record
     /// has no decodable nubs geometry or the span is degenerate.
     pub fn sample_range(&self, t0: f64, t1: f64, segs: usize) -> Vec<(f64, f64, f64)> {
-        let Some((degree, knots, ctrl)) = self.nubs() else {
+        let Some((degree, knots, ctrl)) = self.bspline() else {
             return Vec::new();
         };
         let segs = segs.max(1);
@@ -1054,15 +1345,456 @@ impl<'a> SatIntCurve<'a> {
         (0..=segs)
             .map(|s| {
                 let t = a + (b - a) * (s as f64 / segs as f64);
-                let p = de_boor(degree, &knots, &ctrl, t);
-                (p[0], p[1], p[2])
+                let p = de_boor_homogeneous(degree, &knots, &ctrl, t);
+                let w = if p[3].abs() > 1e-12 { p[3] } else { 1.0 };
+                (p[0] / w, p[1] / w, p[2] / w)
             })
             .collect()
     }
 }
 
-/// Evaluate a B-spline curve at parameter `t` via De Boor's algorithm.
-fn de_boor(degree: usize, knots: &[f64], ctrl: &[[f64; 3]], t: f64) -> [f64; 3] {
+/// Accessor for a `pcurve` entity: a 2-D B-spline in surface UV space.
+#[derive(Debug, Clone)]
+pub struct SatPCurve<'a> {
+    record: &'a SatRecord,
+}
+
+impl<'a> SatPCurve<'a> {
+    pub fn from_record(record: &'a SatRecord) -> Option<Self> {
+        if record.entity_type == "pcurve" {
+            Some(Self { record })
+        } else {
+            None
+        }
+    }
+
+    fn bspline_at(
+        tokens: &[SatToken],
+        start: usize,
+    ) -> Option<(usize, Vec<f64>, Vec<[f64; 4]>)> {
+        let rational = tokens.get(start)?.as_ident() == Some("nurbs");
+        let degree = tokens.get(start + 1)?.as_integer()?.max(0) as usize;
+        let knot_count = tokens.get(start + 3)?.as_integer()?.max(0) as usize;
+        let mut position = start + 4;
+        let mut knots = Vec::new();
+        for _ in 0..knot_count {
+            let value = tokens.get(position)?.as_float()?;
+            let multiplicity = tokens.get(position + 1)?.as_integer()?.max(0) as usize;
+            for _ in 0..multiplicity {
+                knots.push(value);
+            }
+            position += 2;
+        }
+        if knots.len() < 2 {
+            return None;
+        }
+        let stride = if rational { 3 } else { 2 };
+        let available = tokens[position..]
+            .iter()
+            .take_while(|token| token.as_float().is_some())
+            .count()
+            / stride;
+        let base_count = knots.len().checked_sub(degree + 1)?;
+        let control_count = if available >= base_count + 2 {
+            let first = *knots.first()?;
+            let last = *knots.last()?;
+            knots.insert(0, first);
+            knots.push(last);
+            base_count + 2
+        } else {
+            base_count
+        };
+        if control_count <= degree {
+            return None;
+        }
+        let mut control = Vec::with_capacity(control_count);
+        for _ in 0..control_count {
+            let u = tokens.get(position)?.as_float()?;
+            let v = tokens.get(position + 1)?.as_float()?;
+            if rational {
+                let weight = tokens.get(position + 2)?.as_float()?;
+                control.push([u * weight, v * weight, 0.0, weight]);
+                position += 3;
+            } else {
+                control.push([u, v, 0.0, 1.0]);
+                position += 2;
+            }
+        }
+        Some((degree, knots, control))
+    }
+
+    fn sample_bspline(
+        spline: (usize, Vec<f64>, Vec<[f64; 4]>),
+        segments: usize,
+    ) -> Vec<(f64, f64)> {
+        let (degree, knots, control) = spline;
+        let start = knots[degree];
+        let end = knots[knots.len() - degree - 1];
+        if end <= start {
+            return Vec::new();
+        }
+        let segments = segments.max(1);
+        (0..=segments)
+            .map(|index| {
+                let parameter = start + (end - start) * (index as f64 / segments as f64);
+                let point = de_boor_homogeneous(degree, &knots, &control, parameter);
+                let weight = if point[3].abs() > 1e-12 {
+                    point[3]
+                } else {
+                    1.0
+                };
+                (point[0] / weight, point[1] / weight)
+            })
+            .collect()
+    }
+
+    fn apply_offsets(&self, points: &mut [(f64, f64)]) {
+        let offsets: Vec<f64> = self
+            .record
+            .tokens
+            .iter()
+            .rev()
+            .filter_map(SatToken::as_float)
+            .take(2)
+            .collect();
+        if offsets.len() != 2 {
+            return;
+        }
+        let (u_offset, v_offset) = (offsets[1], offsets[0]);
+        for point in points {
+            point.0 += u_offset;
+            point.1 += v_offset;
+        }
+    }
+
+    /// Sample the complete UV curve.
+    pub fn sample(&self, segments: usize) -> Vec<(f64, f64)> {
+        let Some(start) = self
+            .record
+            .tokens
+            .iter()
+            .position(|token| matches!(token.as_ident(), Some("nubs" | "nurbs")))
+        else {
+            return Vec::new();
+        };
+        let Some(spline) = Self::bspline_at(&self.record.tokens, start) else {
+            return Vec::new();
+        };
+        let mut points = Self::sample_bspline(spline, segments);
+        self.apply_offsets(&mut points);
+        points
+    }
+
+    /// Sample a UV curve which may reference an `intcurve-curve` subtype.
+    ///
+    /// ACIS shares large interpolated-curve subtypes through `{ ref n }`.
+    /// A pcurve then stores a signed 1-based support-surface index, a pointer
+    /// to the owning intcurve, and periodic U/V offsets. Direct inline pcurves
+    /// remain supported by [`Self::sample`].
+    pub fn sample_in(&self, document: &SatDocument, segments: usize) -> Vec<(f64, f64)> {
+        let direct = self.sample(segments);
+        if !direct.is_empty() {
+            return direct;
+        }
+
+        let selector = self
+            .record
+            .tokens
+            .iter()
+            .find_map(SatToken::as_integer)
+            .unwrap_or(1);
+        let target = self
+            .record
+            .nth_pointer(1)
+            .and_then(|pointer| document.resolve(pointer));
+        let Some(target) = target else {
+            return Vec::new();
+        };
+        let mut target_tokens = target.tokens.as_slice();
+        if let Some(reference) = subtype_reference(target_tokens) {
+            let Some(tokens) = document.subtype_tokens(reference) else {
+                return Vec::new();
+            };
+            target_tokens = tokens;
+        }
+
+        // The first spline block is the 3-D intersection curve. Following
+        // blocks are its UV curves on the supporting surfaces.
+        let blocks: Vec<usize> = target_tokens
+            .iter()
+            .enumerate()
+            .filter_map(|(index, token)| {
+                matches!(token.as_ident(), Some("nubs" | "nurbs")).then_some(index)
+            })
+            .collect();
+        let support_index = selector.unsigned_abs().max(1) as usize;
+        let Some(&start) = blocks.get(support_index) else {
+            return Vec::new();
+        };
+        let Some(spline) = Self::bspline_at(target_tokens, start) else {
+            return Vec::new();
+        };
+        let mut points = Self::sample_bspline(spline, segments);
+        self.apply_offsets(&mut points);
+        points
+    }
+}
+
+fn subtype_reference(tokens: &[SatToken]) -> Option<usize> {
+    let start = tokens
+        .iter()
+        .position(|token| token.as_ident() == Some("{"))?;
+    if tokens.get(start + 1).and_then(SatToken::as_ident) != Some("ref")
+        || tokens.get(start + 3).and_then(SatToken::as_ident) != Some("}")
+    {
+        return None;
+    }
+    tokens
+        .get(start + 2)?
+        .as_integer()
+        .and_then(|index| usize::try_from(index).ok())
+}
+
+/// Decoded `nubs`/`nurbs` control net shared by spline, meshsurf and bs3
+/// surface records. Control points are homogeneous `[xw, yw, zw, w]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SatBSplineSurface {
+    pub rational: bool,
+    pub degree_u: usize,
+    pub degree_v: usize,
+    pub u_closure: Option<String>,
+    pub v_closure: Option<String>,
+    pub u_singularity: Option<String>,
+    pub v_singularity: Option<String>,
+    pub u_knots: Vec<f64>,
+    pub v_knots: Vec<f64>,
+    pub control_count_u: usize,
+    pub control_count_v: usize,
+    pub control_points: Vec<[f64; 4]>,
+    pub fit_tolerance: Option<f64>,
+}
+
+/// Surface family represented by [`SatSplineSurface`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SatSplineSurfaceKind {
+    Spline,
+    Mesh,
+    Bs3,
+}
+
+/// Typed accessor for `spline-surface`, `meshsurf-surface` and `bs3-surface`.
+///
+/// It resolves shared `{ ref n }` subtype definitions and decodes both SAT
+/// scalar control nets and SAB grouped position tokens.
+#[derive(Debug, Clone)]
+pub struct SatSplineSurface<'a> {
+    record: &'a SatRecord,
+    kind: SatSplineSurfaceKind,
+}
+
+/// Meshsurf records use the same B-spline payload accessor.
+pub type SatMeshSurface<'a> = SatSplineSurface<'a>;
+/// Direct bs3-surface records use the same B-spline payload accessor.
+pub type SatBs3Surface<'a> = SatSplineSurface<'a>;
+
+impl<'a> SatSplineSurface<'a> {
+    /// Wraps any supported B-spline surface family.
+    pub fn from_record(record: &'a SatRecord) -> Option<Self> {
+        let entity_type = record.entity_type.as_str();
+        let kind = if entity_type == "meshsurf-surface"
+            || entity_type.ends_with("-meshsurf-surface")
+        {
+            SatSplineSurfaceKind::Mesh
+        } else if entity_type == "bs3-surface"
+            || entity_type.ends_with("-bs3-surface")
+        {
+            SatSplineSurfaceKind::Bs3
+        } else if entity_type == "spline-surface"
+            || entity_type.ends_with("-spline-surface")
+        {
+            SatSplineSurfaceKind::Spline
+        } else {
+            return None;
+        };
+        Some(Self { record, kind })
+    }
+
+    /// Concrete surface family.
+    pub fn kind(&self) -> SatSplineSurfaceKind {
+        self.kind
+    }
+
+    /// Surface parameterization sense.
+    pub fn sense(&self) -> Sense {
+        self.record.token_sense(1)
+    }
+
+    /// Underlying lossless record.
+    pub fn record(&self) -> &'a SatRecord {
+        self.record
+    }
+
+    /// Inline subtype tokens, or the shared definition addressed by `{ ref n }`.
+    pub fn definition_tokens<'b>(&'b self, document: &'b SatDocument) -> Option<&'b [SatToken]> {
+        if let Some(reference) = subtype_reference(&self.record.tokens) {
+            document.subtype_tokens(reference)
+        } else {
+            Some(&self.record.tokens)
+        }
+    }
+
+    /// Decode the final `nubs`/`nurbs` block into a complete control net.
+    pub fn bspline(&self, document: &SatDocument) -> Option<SatBSplineSurface> {
+        decode_bspline_surface(self.definition_tokens(document)?)
+    }
+}
+
+fn decode_bspline_surface(tokens: &[SatToken]) -> Option<SatBSplineSurface> {
+    let start = tokens
+        .iter()
+        .rposition(|token| matches!(token.as_ident(), Some("nubs" | "nurbs")))?;
+    let rational = tokens.get(start)?.as_ident() == Some("nurbs");
+    let degree_u = usize::try_from(tokens.get(start + 1)?.as_integer()?).ok()?;
+    let degree_v = usize::try_from(tokens.get(start + 2)?.as_integer()?).ok()?;
+
+    let string_at = |index: usize| {
+        tokens
+            .get(index)
+            .and_then(SatToken::as_ident)
+            .map(str::to_owned)
+    };
+    let mut form_start = start + 3;
+    if rational
+        && matches!(
+            tokens.get(form_start).and_then(SatToken::as_ident),
+            Some("u" | "v" | "both" | "none")
+        )
+    {
+        form_start += 1;
+    }
+    let u_closure = string_at(form_start);
+    let v_closure = string_at(form_start + 1);
+    let u_singularity = string_at(form_start + 2);
+    let v_singularity = string_at(form_start + 3);
+    let u_knot_count = usize::try_from(tokens.get(form_start + 4)?.as_integer()?).ok()?;
+    let v_knot_count = usize::try_from(tokens.get(form_start + 5)?.as_integer()?).ok()?;
+    let mut position = form_start + 6;
+
+    let mut u_knots = Vec::new();
+    for _ in 0..u_knot_count {
+        let value = tokens.get(position)?.as_float()?;
+        let multiplicity =
+            usize::try_from(tokens.get(position + 1)?.as_integer()?).ok()?;
+        u_knots.extend(std::iter::repeat(value).take(multiplicity));
+        position += 2;
+    }
+    let mut v_knots = Vec::new();
+    for _ in 0..v_knot_count {
+        let value = tokens.get(position)?.as_float()?;
+        let multiplicity =
+            usize::try_from(tokens.get(position + 1)?.as_integer()?).ok()?;
+        v_knots.extend(std::iter::repeat(value).take(multiplicity));
+        position += 2;
+    }
+    if u_knots.len() < 2 || v_knots.len() < 2 {
+        return None;
+    }
+
+    let mut values = Vec::new();
+    for token in &tokens[position..] {
+        if token.as_ident() == Some("}") {
+            break;
+        }
+        if let Some((components, len)) = token.coordinate_components() {
+            values.extend_from_slice(&components[..len]);
+        } else if let Some(value) = token.as_float() {
+            values.push(value);
+        } else if let Some(value) = token.as_integer() {
+            values.push(value as f64);
+        }
+    }
+
+    let stride = if rational { 4 } else { 3 };
+    let base_u = u_knots.len().checked_sub(degree_u + 1)?;
+    let base_v = v_knots.len().checked_sub(degree_v + 1)?;
+    let mut best: Option<(usize, usize, bool, bool, usize)> = None;
+    for clamp_u in [false, true] {
+        for clamp_v in [false, true] {
+            let count_u = base_u + usize::from(clamp_u) * 2;
+            let count_v = base_v + usize::from(clamp_v) * 2;
+            if count_u <= degree_u || count_v <= degree_v {
+                continue;
+            }
+            let needed = count_u.checked_mul(count_v)?.checked_mul(stride)?;
+            if needed > values.len() {
+                continue;
+            }
+            let remaining = values.len() - needed;
+            if best
+                .as_ref()
+                .map(|candidate| remaining < candidate.4)
+                .unwrap_or(true)
+            {
+                best = Some((count_u, count_v, clamp_u, clamp_v, remaining));
+            }
+        }
+    }
+    let (control_count_u, control_count_v, clamp_u, clamp_v, _) = best?;
+    if clamp_u {
+        let first = *u_knots.first()?;
+        let last = *u_knots.last()?;
+        u_knots.insert(0, first);
+        u_knots.push(last);
+    }
+    if clamp_v {
+        let first = *v_knots.first()?;
+        let last = *v_knots.last()?;
+        v_knots.insert(0, first);
+        v_knots.push(last);
+    }
+
+    let control_scalar_count = control_count_u
+        .checked_mul(control_count_v)?
+        .checked_mul(stride)?;
+    let mut control_points = Vec::with_capacity(control_count_u * control_count_v);
+    for point in values[..control_scalar_count].chunks_exact(stride) {
+        if rational {
+            let weight = point[3];
+            control_points.push([
+                point[0] * weight,
+                point[1] * weight,
+                point[2] * weight,
+                weight,
+            ]);
+        } else {
+            control_points.push([point[0], point[1], point[2], 1.0]);
+        }
+    }
+
+    Some(SatBSplineSurface {
+        rational,
+        degree_u,
+        degree_v,
+        u_closure,
+        v_closure,
+        u_singularity,
+        v_singularity,
+        u_knots,
+        v_knots,
+        control_count_u,
+        control_count_v,
+        control_points,
+        fit_tolerance: values.get(control_scalar_count).copied(),
+    })
+}
+
+/// Evaluate a homogeneous B-spline curve at parameter `t` via De Boor.
+fn de_boor_homogeneous(
+    degree: usize,
+    knots: &[f64],
+    ctrl: &[[f64; 4]],
+    t: f64,
+) -> [f64; 4] {
     // Knot span k: knots[k] <= t < knots[k+1], clamped into the valid interval.
     let n = ctrl.len();
     let mut k = degree;
@@ -1071,7 +1803,7 @@ fn de_boor(degree: usize, knots: &[f64], ctrl: &[[f64; 3]], t: f64) -> [f64; 3] 
     }
     k = k.min(n - 1).max(degree);
     // Working control points for the recursion.
-    let mut d: Vec<[f64; 3]> = (0..=degree)
+    let mut d: Vec<[f64; 4]> = (0..=degree)
         .map(|j| ctrl[(k - degree + j).min(n - 1)])
         .collect();
     for r in 1..=degree {
@@ -1083,7 +1815,7 @@ fn de_boor(degree: usize, knots: &[f64], ctrl: &[[f64; 3]], t: f64) -> [f64; 3] 
             } else {
                 0.0
             };
-            for c in 0..3 {
+            for c in 0..4 {
                 d[j][c] = (1.0 - a) * d[j - 1][c] + a * d[j][c];
             }
         }
@@ -1438,7 +2170,34 @@ impl SatDocument {
         let Some(rec) = self.records.iter().find(|r| r.entity_type == "transform") else {
             return IDENTITY;
         };
-        let v: Vec<f64> = rec.tokens.iter().filter_map(|t| t.as_float()).take(13).collect();
+        // SAT text tokenizes the 13-number payload (3×3 matrix, translation,
+        // scale) as individual floats, but the SAB reader groups the matrix
+        // rows and the translation into `Position` triplets — flatten both.
+        let mut v: Vec<f64> = Vec::with_capacity(13);
+        for tok in &rec.tokens {
+            if v.len() >= 13 {
+                break;
+            }
+            if let Some((components, len)) = tok.coordinate_components() {
+                v.extend_from_slice(&components[..len]);
+            } else if let Some(f) = tok.as_float() {
+                v.push(f);
+            } else if let Some(text) = tok.as_string() {
+                // ShapeManager stores the complete numeric transform payload
+                // in one ASM long-string token (0x12) in some SAB files.
+                // It is still the regular SAT transform sequence, followed
+                // by no_rotate/no_reflect/no_shear.
+                for word in text.split_ascii_whitespace() {
+                    let Ok(value) = word.parse::<f64>() else {
+                        break;
+                    };
+                    v.push(value);
+                    if v.len() >= 13 {
+                        break;
+                    }
+                }
+            }
+        }
         if v.len() < 13 {
             return IDENTITY;
         }
@@ -1549,6 +2308,30 @@ impl SatDocument {
             .collect()
     }
 
+    /// Returns all subshell records.
+    pub fn subshells(&self) -> Vec<SatSubshell<'_>> {
+        self.records
+            .iter()
+            .filter_map(SatSubshell::from_record)
+            .collect()
+    }
+
+    /// Returns all wire topology records.
+    pub fn wires(&self) -> Vec<SatWire<'_>> {
+        self.records
+            .iter()
+            .filter_map(SatWire::from_record)
+            .collect()
+    }
+
+    /// Returns all derived attribute records.
+    pub fn attributes(&self) -> Vec<SatAttribute<'_>> {
+        self.records
+            .iter()
+            .filter_map(SatAttribute::from_record)
+            .collect()
+    }
+
     /// Returns all face records.
     pub fn faces(&self) -> Vec<SatFace<'_>> {
         self.records
@@ -1573,6 +2356,14 @@ impl SatDocument {
             .collect()
     }
 
+    /// Returns all B-spline surface-family records.
+    pub fn spline_surfaces(&self) -> Vec<SatSplineSurface<'_>> {
+        self.records
+            .iter()
+            .filter_map(SatSplineSurface::from_record)
+            .collect()
+    }
+
     /// Adds a record and returns its index.
     pub fn add_record(&mut self, mut record: SatRecord) -> i32 {
         let index = self.records.len() as i32;
@@ -1589,6 +2380,44 @@ impl SatDocument {
         } else {
             self.record(ptr.0 as usize)
         }
+    }
+
+    /// Resolve a shared ACIS subtype definition by its file-global index.
+    ///
+    /// Subtypes are numbered in encounter order across all entity records.
+    /// `{ ref n }` blocks reference an earlier definition and do not consume
+    /// an index of their own. The returned slice excludes the surrounding
+    /// braces but includes the subtype identifier and its complete payload.
+    pub fn subtype_tokens(&self, requested: usize) -> Option<&[SatToken]> {
+        let mut current = 0usize;
+        for record in &self.records {
+            let tokens = &record.tokens;
+            for start in 0..tokens.len() {
+                if tokens[start].as_ident() != Some("{")
+                    || tokens.get(start + 1).and_then(SatToken::as_ident) == Some("ref")
+                {
+                    continue;
+                }
+                if current == requested {
+                    let mut depth = 1usize;
+                    for end in start + 1..tokens.len() {
+                        match tokens[end].as_ident() {
+                            Some("{") => depth += 1,
+                            Some("}") => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    return Some(&tokens[start + 1..end]);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    return None;
+                }
+                current += 1;
+            }
+        }
+        None
     }
 
     /// Validates the document structure.
@@ -1848,13 +2677,37 @@ pub fn classify_entity_type(entity_type: &str) -> SatEntityCategory {
         "asmheader" => SatEntityCategory::Header,
         "body" | "lump" | "shell" | "subshell" | "face" | "loop" | "coedge" | "edge"
         | "vertex" | "wire" => SatEntityCategory::Topology,
-        "point" | "straight-curve" | "ellipse-curve" | "intcurve-curve" | "bs3-curve"
+        "point" | "straight-curve" | "ellipse-curve" | "intcurve-curve" | "bs3-curve" | "pcurve"
         | "plane-surface" | "cone-surface" | "sphere-surface" | "torus-surface"
         | "spline-surface" | "meshsurf-surface" | "bs3-surface" => SatEntityCategory::Geometry,
         "transform" => SatEntityCategory::Transform,
+        _ if matches!(
+            base_entity_type(entity_type),
+            "body"
+                | "lump"
+                | "shell"
+                | "subshell"
+                | "face"
+                | "loop"
+                | "coedge"
+                | "edge"
+                | "vertex"
+                | "wire"
+        ) => SatEntityCategory::Topology,
+        _ if matches!(
+            base_entity_type(entity_type),
+            "point" | "curve" | "surface" | "pcurve"
+        ) => SatEntityCategory::Geometry,
         _ if entity_type.ends_with("-attrib") || entity_type.starts_with("attrib") => {
             SatEntityCategory::Attribute
         }
         _ => SatEntityCategory::Unknown,
     }
+}
+
+/// Returns the base class from a hyphen-separated SAB entity type.
+///
+/// For example, `tcoedge-coedge` derives from `coedge`.
+pub fn base_entity_type(entity_type: &str) -> &str {
+    entity_type.rsplit('-').next().unwrap_or(entity_type)
 }

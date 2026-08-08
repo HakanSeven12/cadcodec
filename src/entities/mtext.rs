@@ -33,10 +33,10 @@ pub enum AttachmentPoint {
 pub enum DrawingDirection {
     /// Left to right
     LeftToRight = 1,
-    /// Top to bottom
-    TopToBottom = 2,
-    /// By style
-    ByStyle = 3,
+    /// Top to bottom (DXF 72 = 3 — the TEXT-era code set skips 2 and 4)
+    TopToBottom = 3,
+    /// By style (DXF 72 = 5)
+    ByStyle = 5,
 }
 
 /// Column layout for an [`MText`] entity (stored in R2018+ DWG, non-annotative).
@@ -101,6 +101,11 @@ pub struct MText {
     pub rectangle_height: Option<f64>,
     /// Rotation angle in radians
     pub rotation: f64,
+    /// Exact DWG X-axis direction used to derive `rotation`. Kept only while
+    /// it still describes the public rotation, avoiding needless last-bit
+    /// drift from an `atan2` followed by `sin`/`cos`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dwg_x_direction: Option<Vector3>,
     /// Text style name
     pub style: String,
     /// Attachment point
@@ -127,6 +132,14 @@ pub struct MText {
     pub is_annotative: bool,
     /// Column layout data (R2018+).
     pub column_data: MTextColumnData,
+    /// Horizontal extent of the laid-out text (DXF 42, output-only; DWG
+    /// "extents width"). 0 when never laid out.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extents_width: f64,
+    /// Vertical extent of the laid-out text (DXF 43, output-only; DWG
+    /// "extents height"). 0 when never laid out.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extents_height: f64,
 }
 
 impl MText {
@@ -140,7 +153,8 @@ impl MText {
             rectangle_width: 10.0,
             rectangle_height: None,
             rotation: 0.0,
-            style: "STANDARD".to_string(),
+            dwg_x_direction: None,
+            style: "Standard".to_string(),
             attachment_point: AttachmentPoint::TopLeft,
             drawing_direction: DrawingDirection::LeftToRight,
             line_spacing_factor: 1.0,
@@ -157,6 +171,8 @@ impl MText {
             // default it would mark every imported MTEXT annotative.
             is_annotative: false,
             column_data: MTextColumnData::new(),
+            extents_width: 0.0,
+            extents_height: 0.0,
         }
     }
 
@@ -265,5 +281,4 @@ impl Entity for MText {
         super::mirror::mirror_mtext(self, transform);
     }
 }
-
 

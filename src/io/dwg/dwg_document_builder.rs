@@ -21,6 +21,10 @@ use crate::io::dwg::dwg_stream_readers::object_reader::entities;
 use crate::io::dwg::dwg_stream_readers::object_reader::objects;
 use crate::io::dwg::dwg_stream_readers::object_reader::tables;
 use crate::io::dwg::dwg_stream_readers::object_reader::{DwgObjectReader, EntityCommonData};
+use crate::io::dwg::parallel::{
+    filter_map_slice, for_each_mut, map_chunks, map_mut, worker_count,
+};
+use crate::io::read::{push_read_diagnostic, ReadDiagnostic, ReadStage};
 use crate::notification::{NotificationCollection, NotificationType};
 use crate::types::Handle;
 use crate::types::LineWeight;
@@ -34,6 +38,7 @@ enum PendingVertex {
 }
 
 /// Pending polyline entities awaiting vertex assembly.
+#[derive(Default)]
 struct PendingPolylines {
     /// Vertex data keyed by owner (parent polyline) handle.
     vertices: HashMap<u64, Vec<PendingVertex>>,
@@ -41,6 +46,132 @@ struct PendingPolylines {
     seqends: HashMap<u64, crate::types::Handle>,
     /// Polyline entities awaiting vertex assembly, keyed by their handle.
     polylines: Vec<(u64, EntityType)>,
+}
+
+struct Pass2Header {
+    model_space_block_handle: Handle,
+    paper_space_block_handle: Handle,
+}
+
+struct Pass2Output {
+    version: crate::types::DxfVersion,
+    header: Pass2Header,
+    entities: Vec<std::sync::Arc<EntityType>>,
+    objects: HashMap<Handle, crate::objects::ObjectType>,
+    eed_by_handle: HashMap<Handle, Vec<(u64, Vec<u8>)>>,
+    xdic_by_handle: HashMap<Handle, Handle>,
+    reactors_by_handle: HashMap<Handle, Vec<Handle>>,
+    context_scales: HashMap<Handle, Handle>,
+    block_visibility_params: HashMap<Handle, crate::objects::BlockVisibilityParameter>,
+    block_representations: HashMap<Handle, Handle>,
+    fields: HashMap<Handle, crate::document::FieldDef>,
+    dgn_ls_definitions: HashMap<Handle, crate::objects::DgnLsDefinition>,
+    dgn_ls_components: HashMap<Handle, crate::objects::DgnLsComponent>,
+    view_rep_refs: HashMap<Handle, Vec<Handle>>,
+    section_view_reps: Vec<Handle>,
+    section_view_style: Option<crate::entities::SectionViewStyle>,
+}
+
+impl Pass2Output {
+    fn new(
+        version: crate::types::DxfVersion,
+        model_space_block_handle: Handle,
+        paper_space_block_handle: Handle,
+        capacity: usize,
+    ) -> Self {
+        Self {
+            version,
+            header: Pass2Header {
+                model_space_block_handle,
+                paper_space_block_handle,
+            },
+            entities: Vec::with_capacity(capacity),
+            objects: HashMap::with_capacity(capacity / 8),
+            eed_by_handle: HashMap::new(),
+            xdic_by_handle: HashMap::new(),
+            reactors_by_handle: HashMap::new(),
+            context_scales: HashMap::new(),
+            block_visibility_params: HashMap::new(),
+            block_representations: HashMap::new(),
+            fields: HashMap::new(),
+            dgn_ls_definitions: HashMap::new(),
+            dgn_ls_components: HashMap::new(),
+            view_rep_refs: HashMap::new(),
+            section_view_reps: Vec::new(),
+            section_view_style: None,
+        }
+    }
+
+    fn add_entity(&mut self, entity: EntityType) -> std::result::Result<Handle, ()> {
+        let handle = entity.common().handle;
+        self.entities.push(std::sync::Arc::new(entity));
+        Ok(handle)
+    }
+}
+
+struct ClassNames {
+    cpp: HashMap<i16, String>,
+    dxf: HashMap<i16, String>,
+}
+
+impl ClassNames {
+    fn from_document(document: &CadDocument) -> Self {
+        Self {
+            cpp: document
+                .classes
+                .iter()
+                .map(|class| (class.class_number, class.cpp_class_name.clone()))
+                .collect(),
+            dxf: document
+                .classes
+                .iter()
+                .map(|class| (class.class_number, class.dxf_name.clone()))
+                .collect(),
+        }
+    }
+}
+
+struct Pass2Chunk {
+    output: Pass2Output,
+    pending: PendingPolylines,
+    pending_attributes: HashMap<u64, Vec<AttributeEntity>>,
+    failures: Vec<RecordFailure>,
+}
+
+struct RecordFailure {
+    code: &'static str,
+    handle: u64,
+    offset: usize,
+    type_code: i16,
+    message: String,
+}
+
+impl Pass2Chunk {
+    fn new(
+        version: crate::types::DxfVersion,
+        model_space_block_handle: Handle,
+        paper_space_block_handle: Handle,
+        capacity: usize,
+    ) -> Self {
+        Self {
+            output: Pass2Output::new(
+                version,
+                model_space_block_handle,
+                paper_space_block_handle,
+                capacity,
+            ),
+            pending: PendingPolylines::default(),
+            pending_attributes: HashMap::new(),
+            failures: Vec::new(),
+        }
+    }
+}
+
+pub struct DwgBuildOutcome {
+    pub notifications: NotificationCollection,
+    pub decoded_records: usize,
+    pub skipped_records: usize,
+    pub diagnostics: Vec<ReadDiagnostic>,
 }
 
 /// Handle-to-name resolution maps built from table entries.
@@ -53,8 +184,14 @@ struct HandleMaps {
     text_styles: HashMap<u64, String>,
     /// handle → linetype name
     linetypes: HashMap<u64, String>,
+    /// Linetype names in table order, EXCLUDING ByBlock/ByLayer. A pre-R2018
+    /// MLINESTYLE element stores its linetype as a 0-based index into this list
+    /// (0x7FFF = ByLayer); R2018+ stores a handle instead.
+    linetype_order: Vec<String>,
     /// handle → dimension style name
     dim_styles: HashMap<u64, String>,
+    /// handle → named view name
+    views: HashMap<u64, String>,
 }
 
 impl HandleMaps {
@@ -64,7 +201,9 @@ impl HandleMaps {
             blocks: HashMap::new(),
             text_styles: HashMap::new(),
             linetypes: HashMap::new(),
+            linetype_order: Vec::new(),
             dim_styles: HashMap::new(),
+            views: HashMap::new(),
         }
     }
 
@@ -86,7 +225,7 @@ impl HandleMaps {
         self.text_styles
             .get(&handle)
             .cloned()
-            .unwrap_or_else(|| "STANDARD".to_string())
+            .unwrap_or_else(|| "Standard".to_string())
     }
 
     #[allow(dead_code)]
@@ -98,6 +237,61 @@ impl HandleMaps {
     }
 }
 
+fn mtext_from_data(
+    data: entities::MTextData,
+    common: EntityCommon,
+    maps: &HandleMaps,
+) -> MText {
+    let mut e = MText::new();
+    e.common = common;
+    e.value = data.value;
+    e.insertion_point = data.insertion_point;
+    e.height = data.height;
+    e.rectangle_width = data.rectangle_width;
+    if data.rectangle_height != 0.0 {
+        e.rectangle_height = Some(data.rectangle_height);
+    }
+    e.extents_width = data.extents_width;
+    e.extents_height = data.extents_height;
+    e.normal = data.normal;
+    e.attachment_point = match data.attachment_point {
+        2 => AttachmentPoint::TopCenter,
+        3 => AttachmentPoint::TopRight,
+        4 => AttachmentPoint::MiddleLeft,
+        5 => AttachmentPoint::MiddleCenter,
+        6 => AttachmentPoint::MiddleRight,
+        7 => AttachmentPoint::BottomLeft,
+        8 => AttachmentPoint::BottomCenter,
+        9 => AttachmentPoint::BottomRight,
+        _ => AttachmentPoint::TopLeft,
+    };
+    e.drawing_direction = match data.drawing_direction {
+        3 => DrawingDirection::TopToBottom,
+        5 => DrawingDirection::ByStyle,
+        _ => DrawingDirection::LeftToRight,
+    };
+    e.rotation = data.x_direction.y.atan2(data.x_direction.x);
+    e.dwg_x_direction = Some(data.x_direction);
+    e.line_spacing_factor = data.linespacing_factor;
+    e.line_spacing_style = crate::entities::LineSpacingStyle::from(data.linespacing_style);
+    e.background_fill_flags = data.background_flags;
+    e.background_scale = data.background_scale;
+    e.background_color = data.background_color;
+    e.background_transparency = data.background_transparency;
+    e.is_annotative = data.is_annotative;
+    e.column_data = MTextColumnData {
+        column_type: data.column_type,
+        column_count: data.column_count,
+        flow_reversed: data.column_flow_reversed,
+        auto_height: data.column_auto_height,
+        width: data.column_width,
+        gutter: data.column_gutter,
+        heights: data.column_heights,
+    };
+    e.style = maps.style_name(data.style_handle);
+    e
+}
+
 /// Builds a `CadDocument` from parsed DWG object data.
 pub struct DwgDocumentBuilder {
     obj_reader: DwgObjectReader,
@@ -105,6 +299,9 @@ pub struct DwgDocumentBuilder {
     failsafe: bool,
     /// Notifications collected during building.
     notifications: NotificationCollection,
+    /// Shared with `DwgReader`; reports the object-build portion of the
+    /// reader's 0..=1000 progress range.
+    progress: Option<std::sync::Arc<dyn Fn(u16) + Send + Sync>>,
 }
 
 impl DwgDocumentBuilder {
@@ -114,6 +311,7 @@ impl DwgDocumentBuilder {
             obj_reader,
             failsafe: false,
             notifications: NotificationCollection::new(),
+            progress: None,
         }
     }
 
@@ -125,6 +323,17 @@ impl DwgDocumentBuilder {
         self.failsafe = failsafe;
     }
 
+    pub fn set_progress_callback(&mut self, progress: std::sync::Arc<dyn Fn(u16) + Send + Sync>) {
+        self.progress = Some(progress);
+    }
+
+    #[inline]
+    fn report_progress(&self, value: u16) {
+        if let Some(progress) = &self.progress {
+            progress(value.min(1000));
+        }
+    }
+
     /// Build the document by iterating all handles and dispatching objects.
     ///
     /// Uses a two-pass approach:
@@ -132,7 +341,18 @@ impl DwgDocumentBuilder {
     /// 2. Read entities and objects → resolve handle references
     ///
     /// Returns collected notifications (skipped records, warnings).
-    pub fn build(mut self, document: &mut CadDocument) -> NotificationCollection {
+    pub fn build(self, document: &mut CadDocument) -> NotificationCollection {
+        self.build_with_stats(document).notifications
+    }
+
+    pub fn build_with_stats(mut self, document: &mut CadDocument) -> DwgBuildOutcome {
+        let perf = std::env::var_os("PERF").is_some();
+        let build_started = web_time::Instant::now();
+        document
+            .vx_table
+            .set_handle(document.header.vpent_hdr_control_handle);
+        document.vx_table.clear();
+        document.vx_control_entries.clear();
         let mut handles = self.obj_reader.handles();
         // Sort handles numerically so that entity records are processed in
         // allocation order.  This ensures polyline vertex records are
@@ -141,7 +361,10 @@ impl DwgDocumentBuilder {
         handles.sort_unstable();
         let mut skipped_pass1 = 0u32;
         let mut skipped_pass2 = 0u32;
+        let mut decoded_pass2 = 0usize;
+        let mut diagnostics = Vec::new();
         let total_handles = handles.len();
+        self.report_progress(55);
 
         // Build class_number → internal type code mapping for non-fixed types.
         // The DWG binary uses class numbers (500+) for object types defined in
@@ -159,6 +382,7 @@ impl DwgDocumentBuilder {
             .filter(|c| c.is_an_entity && c.class_number >= 500)
             .map(|c| c.class_number)
             .collect();
+        let class_names = ClassNames::from_document(document);
 
         // ── Pass 1: Build handle→name maps from table entries ──────────
         //
@@ -183,26 +407,126 @@ impl DwgDocumentBuilder {
             Ucs(u64, tables::UcsData),
             VPort(u64, tables::VPortData),
             AppId(u64, tables::AppIdData),
+            Vx(u64, tables::VxTableRecordData),
             /// BLOCK_CONTROL hard-owner refs: (model_space_handle, paper_space_handle).
             /// These are the authoritative active model/paper space designation —
             /// the file header's block handles are unreliable on some versions.
             BlockControl(u64, u64),
+            VxControl(Vec<u64>),
         }
         let mut parsed_entries: Vec<ParsedEntry> = Vec::new();
+        let catalog_started = web_time::Instant::now();
+        enum CatalogFailure {
+            MissingOffset,
+            NegativeOffset(i64),
+            RecordType,
+        }
+        type CatalogResult =
+            std::result::Result<(u64, usize, i16, i16), (u64, Option<u64>, CatalogFailure)>;
+        let catalog_results: Vec<CatalogResult> =
+            filter_map_slice(&handles, |&handle| {
+                let Some(offset) = self.obj_reader.offset_for(handle) else {
+                    return Some(Err((
+                        handle,
+                        None,
+                        CatalogFailure::MissingOffset,
+                    )));
+                };
+                if offset < 0 {
+                    return Some(Err((
+                        handle,
+                        None,
+                        CatalogFailure::NegativeOffset(offset),
+                    )));
+                }
+                let source_offset = offset as usize;
+                let raw = match self.obj_reader.type_code_at(source_offset) {
+                    Ok(raw) => raw,
+                    Err(_error) => {
+                        return Some(Err((
+                            handle,
+                            Some(source_offset as u64),
+                            CatalogFailure::RecordType,
+                        )));
+                    }
+                };
+                Some(Ok((
+                    handle,
+                    source_offset,
+                    raw,
+                    Self::resolve_type_code(raw, &class_map),
+                )))
+            });
+        let mut record_catalog = Vec::with_capacity(catalog_results.len());
+        let mut skipped_catalog = 0usize;
+        for result in catalog_results {
+            match result {
+                Ok(record) => record_catalog.push(record),
+                Err((handle, source_offset, failure)) => {
+                    skipped_catalog = skipped_catalog.saturating_add(1);
+                    let message = match failure {
+                        CatalogFailure::MissingOffset => {
+                            format!("No source offset for handle {handle:#X}")
+                        }
+                        CatalogFailure::NegativeOffset(offset) => {
+                            format!("Negative source offset {offset} for handle {handle:#X}")
+                        }
+                        CatalogFailure::RecordType => {
+                            format!("Could not read record type at handle {handle:#X}")
+                        }
+                    };
+                    self.notifications
+                        .notify(NotificationType::Error, message.clone());
+                    let mut diagnostic = ReadDiagnostic::new(
+                        "record-catalog-failed",
+                        ReadStage::RecordStream,
+                        message,
+                    );
+                    diagnostic.source_offset = source_offset;
+                    diagnostic.source_offset_basis = Some("object-section-byte".to_string());
+                    diagnostic.section = Some("AcDb:AcDbObjects".to_string());
+                    diagnostic.record_handle = Some(handle);
+                    push_read_diagnostic(&mut diagnostics, diagnostic);
+                }
+            }
+        }
+        self.report_progress(75);
+        if perf {
+            eprintln!(
+                "[perf] dwg-build catalog={:.1}ms records={}",
+                catalog_started.elapsed().as_secs_f64() * 1000.0,
+                record_catalog.len(),
+            );
+        }
+        self.report_progress(110);
+        let pass1_started = web_time::Instant::now();
 
-        for &handle in &handles {
-            let offset = match self.obj_reader.offset_for(handle) {
-                Some(o) if o >= 0 => o,
-                _ => continue,
-            };
-            let (raw_type_code, mut reader) = match self.obj_reader.read_record_at(offset as usize)
-            {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let type_code = Self::resolve_type_code(raw_type_code, &class_map);
-
+        for &(handle, offset, _, type_code) in &record_catalog {
             if is_table_type(type_code) {
+                let (_, mut reader) = match self.obj_reader.read_record_at(offset) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        skipped_pass1 += 1;
+                        let message = format!(
+                            "Could not read table record at handle {:#X}: {}",
+                            handle, error
+                        );
+                        self.notifications
+                            .notify(NotificationType::Error, message.clone());
+                        let mut diagnostic = ReadDiagnostic::new(
+                            "record-read-failed",
+                            ReadStage::RecordStream,
+                            message,
+                        );
+                        diagnostic.source_offset = Some(offset as u64);
+                        diagnostic.source_offset_basis = Some("object-section-byte".to_string());
+                        diagnostic.section = Some("AcDb:AcDbObjects".to_string());
+                        diagnostic.record_handle = Some(handle);
+                        diagnostic.record_type = Some(type_code.to_string());
+                        push_read_diagnostic(&mut diagnostics, diagnostic);
+                        continue;
+                    }
+                };
                 // Wrap in catch_unwind to survive corrupt/misaligned records
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let non_entity = self
@@ -219,16 +543,77 @@ impl DwgDocumentBuilder {
                         Ok(v) => v,
                         Err(_) => {
                             skipped_pass1 += 1;
-                            self.notifications.notify(
-                            NotificationType::Error,
-                            format!(
+                            let message = format!(
                                 "Skipped corrupt table record at handle {:#X} (panic in common data)",
                                 handle
-                            ),
-                        );
+                            );
+                            self.notifications
+                                .notify(NotificationType::Error, message.clone());
+                            let mut diagnostic = ReadDiagnostic::new(
+                                "record-decode-panicked",
+                                ReadStage::RecordStream,
+                                message,
+                            );
+                            diagnostic.source_offset = Some(offset as u64);
+                            diagnostic.source_offset_basis = Some("object-section-byte".to_string());
+                            diagnostic.section = Some("AcDb:AcDbObjects".to_string());
+                            diagnostic.record_handle = Some(handle);
+                            diagnostic.record_type = Some(type_code.to_string());
+                            push_read_diagnostic(&mut diagnostics, diagnostic);
                             continue;
                         }
                     };
+                // Table<T> starts with synthetic low control handles. Replace
+                // them with the actual control-object handles from this DWG
+                // before writing the document back. Otherwise a real record
+                // such as *Model_Space can share a synthetic handle (observed:
+                // model block 0x2 vs default LAYER_CONTROL 0x2); the writer's
+                // handle map then keeps only one record and the saved drawing
+                // reopens with an empty model space.
+                let control_handle = Handle::from(obj_handle);
+                match type_code {
+                    OBJ_BLOCK_CONTROL => {
+                        document.block_records.set_handle(control_handle);
+                        document.header.block_control_handle = control_handle;
+                    }
+                    OBJ_LAYER_CONTROL => {
+                        document.layers.set_handle(control_handle);
+                        document.header.layer_control_handle = control_handle;
+                    }
+                    OBJ_STYLE_CONTROL => {
+                        document.text_styles.set_handle(control_handle);
+                        document.header.style_control_handle = control_handle;
+                    }
+                    OBJ_LTYPE_CONTROL => {
+                        document.line_types.set_handle(control_handle);
+                        document.header.linetype_control_handle = control_handle;
+                    }
+                    OBJ_VIEW_CONTROL => {
+                        document.views.set_handle(control_handle);
+                        document.header.view_control_handle = control_handle;
+                    }
+                    OBJ_UCS_CONTROL => {
+                        document.ucss.set_handle(control_handle);
+                        document.header.ucs_control_handle = control_handle;
+                    }
+                    OBJ_VPORT_CONTROL => {
+                        document.vports.set_handle(control_handle);
+                        document.header.vport_control_handle = control_handle;
+                    }
+                    OBJ_APPID_CONTROL => {
+                        document.app_ids.set_handle(control_handle);
+                        document.header.appid_control_handle = control_handle;
+                    }
+                    OBJ_DIMSTYLE_CONTROL => {
+                        document.dim_styles.set_handle(control_handle);
+                        document.header.dimstyle_control_handle = control_handle;
+                    }
+                    OBJ_VPENT_HDR_CONTROL => {
+                        document.vx_table.set_handle(control_handle);
+                        document.header.vpent_hdr_control_handle = control_handle;
+                    }
+                    _ => {}
+                }
                 // Save EED for DWG round-trip write-back
                 if !eed_raw_pass1.is_empty() {
                     document
@@ -308,6 +693,14 @@ impl DwgDocumentBuilder {
                             let data = tables::read_appid(&mut reader, self.obj_reader.version());
                             Some(ParsedEntry::AppId(obj_handle, data))
                         }
+                        OBJ_VPENT_HDR_CONTROL => {
+                            let data = tables::read_vx_control(&mut reader);
+                            Some(ParsedEntry::VxControl(data.entry_handles))
+                        }
+                        OBJ_VPENT_HDR => {
+                            let data = tables::read_vx_table_record(&mut reader);
+                            Some(ParsedEntry::Vx(obj_handle, data))
+                        }
                         _ => None,
                     }
                 }));
@@ -326,14 +719,25 @@ impl DwgDocumentBuilder {
                             }
                             ParsedEntry::Ltype(h, data) => {
                                 maps.linetypes.insert(*h, data.name.clone());
+                                // Ordered list for pre-R2018 MLINESTYLE index
+                                // resolution — the special ByBlock/ByLayer are
+                                // not part of the linetype index space.
+                                if !data.name.eq_ignore_ascii_case("ByBlock")
+                                    && !data.name.eq_ignore_ascii_case("ByLayer")
+                                {
+                                    maps.linetype_order.push(data.name.clone());
+                                }
                             }
                             ParsedEntry::DimStyle(h, data) => {
                                 maps.dim_styles.insert(*h, data.name.clone());
                             }
-                            ParsedEntry::View(_, _) => {}
+                            ParsedEntry::View(h, data) => {
+                                maps.views.insert(*h, data.name.clone());
+                            }
                             ParsedEntry::Ucs(_, _) => {}
                             ParsedEntry::VPort(_, _) => {}
                             ParsedEntry::AppId(_, _) => {}
+                            ParsedEntry::Vx(_, _) => {}
                             ParsedEntry::BlockControl(m, p) => {
                                 // Seed the authoritative active model/paper space
                                 // handles (used by the block-name dedup below).
@@ -344,22 +748,42 @@ impl DwgDocumentBuilder {
                                     document.header.paper_space_block_handle = Handle::from(*p);
                                 }
                             }
+                            ParsedEntry::VxControl(handles) => {
+                                document.vx_control_entries = handles
+                                    .iter()
+                                    .copied()
+                                    .map(Handle::from)
+                                    .collect();
+                            }
                         }
                         // The block control is not a table record — don't store it.
-                        if !matches!(entry, ParsedEntry::BlockControl(..)) {
+                        if !matches!(
+                            entry,
+                            ParsedEntry::BlockControl(..) | ParsedEntry::VxControl(..)
+                        ) {
                             parsed_entries.push(entry);
                         }
                     }
                     Ok(None) => {}
                     Err(_) => {
                         skipped_pass1 += 1;
-                        self.notifications.notify(
-                            NotificationType::Error,
-                            format!(
+                        let message = format!(
                                 "Skipped corrupt table record at handle {:#X}, type_code={}",
                                 handle, type_code
-                            ),
+                            );
+                        self.notifications
+                            .notify(NotificationType::Error, message.clone());
+                        let mut diagnostic = ReadDiagnostic::new(
+                            "record-decode-failed",
+                            ReadStage::RecordStream,
+                            message,
                         );
+                        diagnostic.source_offset = Some(offset as u64);
+                        diagnostic.source_offset_basis = Some("object-section-byte".to_string());
+                        diagnostic.section = Some("AcDb:AcDbObjects".to_string());
+                        diagnostic.record_handle = Some(handle);
+                        diagnostic.record_type = Some(type_code.to_string());
+                        push_read_diagnostic(&mut diagnostics, diagnostic);
                     }
                 }
             }
@@ -412,9 +836,9 @@ impl DwgDocumentBuilder {
                 // Determine which entry keeps the canonical (un-suffixed)
                 // name.  Prefer the one matching the header's active
                 // model/paper space handle; fall back to the first entry.
-                let active_h = if base_name == "*Model_Space" {
+                let active_h = if base_name.eq_ignore_ascii_case("*Model_Space") {
                     active_model
-                } else if base_name == "*Paper_Space" {
+                } else if base_name.eq_ignore_ascii_case("*Paper_Space") {
                     active_paper
                 } else {
                     Handle::NULL
@@ -452,6 +876,14 @@ impl DwgDocumentBuilder {
         let _ = document.block_records.remove("*Model_Space");
         let _ = document.block_records.remove("*Paper_Space");
 
+        let layer_transparency_app_handle = parsed_entries.iter().find_map(|entry| match entry {
+            ParsedEntry::AppId(handle, data)
+                if data.name.eq_ignore_ascii_case("AcCmTransparency") =>
+            {
+                Some(*handle)
+            }
+            _ => None,
+        });
         let mut cleared_default_vports = false;
         for entry in &parsed_entries {
             match entry {
@@ -460,11 +892,32 @@ impl DwgDocumentBuilder {
                     layer.handle = Handle::from(*h);
                     layer.flags.frozen = data.frozen;
                     layer.flags.off = data.off;
+                    layer.flags.frozen_in_new_viewport = data.frozen_in_new_vp;
                     layer.flags.locked = data.locked;
                     layer.flags.xref_dependent = data.xref_dependent;
                     layer.is_plottable = data.plottable;
                     layer.line_weight = LineWeight::from_value(data.line_weight);
                     layer.color = data.color;
+                    if let Some(app_handle) = layer_transparency_app_handle {
+                        if let Some(bytes) = document
+                            .eed_by_handle
+                            .get(&Handle::from(*h))
+                            .and_then(|blocks| {
+                                blocks
+                                    .iter()
+                                    .find(|(handle, _)| *handle == app_handle)
+                                    .map(|(_, bytes)| bytes.as_slice())
+                            })
+                        {
+                            if bytes.first() == Some(&71) && bytes.len() >= 5 {
+                                let raw = i32::from_le_bytes([
+                                    bytes[1], bytes[2], bytes[3], bytes[4],
+                                ]);
+                                layer.transparency =
+                                    crate::types::Transparency::from_alpha_value(raw as u32);
+                            }
+                        }
+                    }
                     // Resolve linetype handle → name
                     layer.line_type = maps
                         .linetypes
@@ -518,7 +971,7 @@ impl DwgDocumentBuilder {
                     // sets the header handle)
                     if data.name.eq_ignore_ascii_case("*Model_Space") {
                         document.header.model_space_block_handle = br.handle;
-                    } else if data.name == "*Paper_Space" {
+                    } else if data.name.eq_ignore_ascii_case("*Paper_Space") {
                         document.header.paper_space_block_handle = br.handle;
                     }
                     // Remove default entry if it exists, then add
@@ -534,6 +987,8 @@ impl DwgDocumentBuilder {
                     style.last_height = data.last_height;
                     style.font_file = data.font_file.clone();
                     style.big_font_file = data.big_font_file.clone();
+                    style.is_shape_file = data.is_shape_file;
+                    style.is_vertical = data.is_vertical;
                     style.flags.backward = (data.generation & 2) != 0;
                     style.flags.upside_down = (data.generation & 4) != 0;
                     // Only mark xref-dependent if the xref block record handle is valid
@@ -601,6 +1056,10 @@ impl DwgDocumentBuilder {
                 ParsedEntry::DimStyle(h, data) => {
                     let mut ds = crate::tables::DimStyle::new(&data.name);
                     ds.handle = Handle::from(*h);
+                    ds.xref_reference = data.xref_reference;
+                    ds.xref_resolved = data.xref_resolved;
+                    ds.xref_dependent = data.xref_dependent;
+                    ds.xref_handle = Handle::from(data.xref_handle);
                     ds.dimscale = data.dimscale;
                     ds.dimasz = data.dimasz;
                     ds.dimexo = data.dimexo;
@@ -633,15 +1092,23 @@ impl DwgDocumentBuilder {
                     ds.dimsah = data.dimsah;
                     ds.dimtix = data.dimtix;
                     ds.dimsoxd = data.dimsoxd;
-                    ds.dimclrd = data.dimclrd.index().unwrap_or(0) as i16;
-                    ds.dimclre = data.dimclre.index().unwrap_or(0) as i16;
-                    ds.dimclrt = data.dimclrt.index().unwrap_or(0) as i16;
+                    ds.dimclrd = data.dimclrd.approximate_index();
+                    ds.dimclre = data.dimclre.approximate_index();
+                    ds.dimclrt = data.dimclrt.approximate_index();
+                    ds.dimclrd_true_color =
+                        data.dimclrd.is_true_color().then_some(data.dimclrd);
+                    ds.dimclre_true_color =
+                        data.dimclre.is_true_color().then_some(data.dimclre);
+                    ds.dimclrt_true_color =
+                        data.dimclrt.is_true_color().then_some(data.dimclrt);
                     ds.dimsd1 = data.dimsd1;
                     ds.dimsd2 = data.dimsd2;
                     ds.dimtolj = data.dimtolj;
                     ds.dimtzin = data.dimtzin;
                     ds.dimupt = data.dimupt;
                     ds.dimfit = data.dimfit;
+                    ds.dimatfit = data.dimatfit;
+                    ds.dimunit = data.dimunit;
                     ds.dimlwd = data.dimlwd;
                     ds.dimlwe = data.dimlwe;
                     ds.dimpost = data.dimpost.clone();
@@ -664,10 +1131,19 @@ impl DwgDocumentBuilder {
                     ds.dimfxl = data.dimfxl;
                     ds.dimjogang = data.dimjogang;
                     ds.dimtfill = data.dimtfill;
-                    ds.dimtfillclr = data.dimtfillclr.index().unwrap_or(0) as i16;
+                    ds.dimtfillclr = data.dimtfillclr.approximate_index();
+                    ds.dimtfillclr_true_color =
+                        data.dimtfillclr.is_true_color().then_some(data.dimtfillclr);
                     ds.dimarcsym = data.dimarcsym;
                     ds.dimfxlon = data.dimfxlon;
                     ds.dimtxtdirection = data.dimtxtdirection;
+                    ds.dimaltmzf = data.dimaltmzf;
+                    ds.dimaltmzs = data.dimaltmzs.clone();
+                    ds.dimmzf = data.dimmzf;
+                    ds.dimmzs = data.dimmzs.clone();
+                    ds.dimblk_name = data.dimblk_name.clone();
+                    ds.dimblk1_name = data.dimblk1_name.clone();
+                    ds.dimblk2_name = data.dimblk2_name.clone();
                     // Resolve text style handle
                     if data.dimtxsty_handle != 0 {
                         ds.dimtxsty_handle = Handle::from(data.dimtxsty_handle);
@@ -716,6 +1192,34 @@ impl DwgDocumentBuilder {
                     view.front_clip = data.front_clip;
                     view.back_clip = data.back_clip;
                     view.perspective = data.perspective;
+                    view.front_clipping = data.front_clipping;
+                    view.back_clipping = data.back_clipping;
+                    view.front_clip_at_eye = data.front_clip_z;
+                    view.render_mode =
+                        ViewportRenderMode::from_value(data.render_mode.unwrap_or(0) as i16);
+                    view.use_default_lights = data.use_default_lights;
+                    view.default_lighting_type = data.default_lighting_type as i16;
+                    view.brightness = data.brightness;
+                    view.contrast = data.contrast;
+                    view.ambient_color = data.ambient_color.clone();
+                    view.paper_space = data.paper_space;
+                    view.ucs_associated = data.ucs_associated;
+                    view.ucs_origin = data.ucs_origin;
+                    view.ucs_x_axis = data.ucs_x_axis;
+                    view.ucs_y_axis = data.ucs_y_axis;
+                    view.ucs_elevation = data.ucs_elevation;
+                    view.ucs_ortho_type = data.ucs_ortho_type;
+                    view.camera_plottable = data.camera_plottable;
+                    view.xref_reference = data.xref_reference;
+                    view.xref_resolved = data.xref_resolved;
+                    view.xref_dependent = data.xref_dependent;
+                    view.xref_handle = Handle::from(data.xref_handle);
+                    view.background_handle = Handle::from(data.background_handle);
+                    view.live_section_handle = Handle::from(data.live_section_handle);
+                    view.visual_style_handle = Handle::from(data.visual_style_handle);
+                    view.sun_handle = Handle::from(data.sun_handle);
+                    view.named_ucs_handle = Handle::from(data.named_ucs_handle);
+                    view.base_ucs_handle = Handle::from(data.base_ucs_handle);
                     let _ = document.views.remove(&data.name);
                     let _ = document.views.add(view);
                 }
@@ -725,6 +1229,15 @@ impl DwgDocumentBuilder {
                     ucs.origin = data.origin;
                     ucs.x_axis = data.x_axis;
                     ucs.y_axis = data.y_axis;
+                    ucs.elevation = data.elevation.unwrap_or(0.0);
+                    ucs.ortho_view_type = data.ortho_view_type.unwrap_or(0);
+                    ucs.ortho_type = data.ortho_type.unwrap_or(0);
+                    ucs.named_ucs_handle = Handle::from(data.named_ucs_handle);
+                    ucs.base_ucs_handle = Handle::from(data.base_ucs_handle);
+                    ucs.xref_reference = data.xref_reference;
+                    ucs.xref_resolved = data.xref_resolved;
+                    ucs.xref_dependent = data.xref_dependent;
+                    ucs.xref_handle = Handle::from(data.xref_handle);
                     let _ = document.ucss.remove(&data.name);
                     let _ = document.ucss.add(ucs);
                 }
@@ -753,9 +1266,15 @@ impl DwgDocumentBuilder {
                     vp.view_twist = data.view_twist;
                     vp.front_clip = data.front_clip;
                     vp.back_clip = data.back_clip;
+                    vp.perspective = data.perspective;
+                    vp.front_clipping = data.front_clipping;
+                    vp.back_clipping = data.back_clipping;
+                    vp.front_clip_at_eye = data.front_clip_at_eye;
                     vp.ucsfollow = data.ucsfollow;
                     vp.circle_zoom = data.circle_zoom;
                     vp.fast_zoom = data.fast_zoom;
+                    vp.ucsicon_lower = data.ucsicon_lower;
+                    vp.ucsicon_origin = data.ucsicon_origin;
                     vp.grid_on = data.grid_on;
                     vp.snap_on = data.snap_on;
                     vp.snap_style = data.snap_style;
@@ -763,6 +1282,29 @@ impl DwgDocumentBuilder {
                     vp.snap_rotation = data.snap_rotation;
                     vp.render_mode =
                         ViewportRenderMode::from_value(data.render_mode.unwrap_or(0) as i16);
+                    vp.use_default_lights = data.use_default_lights;
+                    vp.default_lighting_type = data.default_lighting_type as i16;
+                    vp.brightness = data.brightness;
+                    vp.contrast = data.contrast;
+                    vp.ambient_color = data.ambient_color.clone();
+                    vp.ucs_at_origin = data.ucs_at_origin;
+                    vp.ucs_per_viewport = data.ucs_per_viewport;
+                    vp.ucs_origin = data.ucs_origin;
+                    vp.ucs_x_axis = data.ucs_x_axis;
+                    vp.ucs_y_axis = data.ucs_y_axis;
+                    vp.ucs_elevation = data.ucs_elevation;
+                    vp.ucs_ortho_type = data.ucs_ortho_type;
+                    vp.grid_flags = crate::entities::GridFlags::from_bits(data.grid_flags);
+                    vp.grid_major = data.grid_major;
+                    vp.xref_reference = data.xref_reference;
+                    vp.xref_resolved = data.xref_resolved;
+                    vp.xref_dependent = data.xref_dependent;
+                    vp.xref_handle = Handle::from(data.xref_handle);
+                    vp.background_handle = Handle::from(data.background_handle);
+                    vp.visual_style_handle = Handle::from(data.visual_style_handle);
+                    vp.sun_handle = Handle::from(data.sun_handle);
+                    vp.named_ucs_handle = Handle::from(data.named_ucs_handle);
+                    vp.base_ucs_handle = Handle::from(data.base_ucs_handle);
                     document.vports.add_allow_duplicate(vp);
                 }
                 ParsedEntry::AppId(h, data) => {
@@ -771,9 +1313,26 @@ impl DwgDocumentBuilder {
                     let _ = document.app_ids.remove(&data.name);
                     let _ = document.app_ids.add(app);
                 }
+                ParsedEntry::Vx(h, data) => {
+                    let mut record = crate::tables::VxTableRecord::new(&data.name);
+                    record.handle = Handle::from(*h);
+                    record.is_xref_reference = data.is_xref_reference;
+                    record.is_xref_resolved = data.is_xref_resolved;
+                    record.is_xref_dependent = data.is_xref_dependent;
+                    record.xref_handle = Handle::from(data.xref_handle);
+                    record.is_on = data.is_on;
+                    record.viewport = Handle::from(data.viewport);
+                    record.previous_entry = Handle::from(data.previous_entry);
+                    record.legacy_viewport_entity_address =
+                        data.legacy_viewport_entity_address;
+                    record.legacy_viewport_index = data.legacy_viewport_index;
+                    record.legacy_previous_entry_index =
+                        data.legacy_previous_entry_index;
+                    document.vx_table.add_allow_duplicate(record);
+                }
                 // Block control is consumed during Pass 1 (header seeding); it is
                 // never stored as a parsed table entry.
-                ParsedEntry::BlockControl(..) => {}
+                ParsedEntry::BlockControl(..) | ParsedEntry::VxControl(..) => {}
             }
         }
 
@@ -781,7 +1340,8 @@ impl DwgDocumentBuilder {
         // from the canonical entity_handles read from the DWG binary
         // (R2004+).  This is needed because entity_mode=1 only says
         // "paper space" without specifying WHICH paper space.
-        let mut binary_entity_owner: HashMap<Handle, Handle> = HashMap::new();
+        let mut binary_entity_owner: ahash::AHashMap<Handle, Handle> =
+            ahash::AHashMap::new();
         for entry in &parsed_entries {
             if let ParsedEntry::Block(h, data) = entry {
                 let br_handle = Handle::from(*h);
@@ -808,6 +1368,15 @@ impl DwgDocumentBuilder {
         // (with stale block_record handles) and orphaned dictionary entries
         // that corrupt the file when written back as DXF.
         document.objects.clear();
+        if perf {
+            eprintln!(
+                "[perf] dwg-build pass1={:.1}ms tables={} blocks={} owner-links={}",
+                pass1_started.elapsed().as_secs_f64() * 1000.0,
+                parsed_entries.len(),
+                document.block_records.len(),
+                binary_entity_owner.len(),
+            );
+        }
 
         // ── Pass 2: Read entities and non-table objects ────────────────
         let mut pending = PendingPolylines {
@@ -817,48 +1386,211 @@ impl DwgDocumentBuilder {
         };
         // Pending attribute entities keyed by owner (INSERT) handle.
         let mut pending_attributes: HashMap<u64, Vec<AttributeEntity>> = HashMap::new();
-        for &handle in &handles {
-            let offset = match self.obj_reader.offset_for(handle) {
-                Some(o) if o >= 0 => o,
-                _ => {
-                    continue;
-                }
-            };
-            let (raw_type_code, reader) = match self.obj_reader.read_record_at(offset as usize) {
-                Ok(r) => r,
-                Err(_e) => {
-                    continue;
-                }
-            };
-            let type_code = Self::resolve_type_code(raw_type_code, &class_map);
-
-            // Wrap per-object processing in catch_unwind to survive
-            // corrupt or misaligned records without crashing the entire read.
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.process_pass2_record(
-                    handle,
-                    raw_type_code,
-                    type_code,
-                    reader,
-                    document,
-                    &maps,
-                    &mut pending,
-                    &mut pending_attributes,
-                    &entity_class_numbers,
-                );
-            }));
-            if let Err(ref _e) = result {
-                skipped_pass2 += 1;
-                self.notifications.notify(
-                    NotificationType::Error,
-                    format!(
-                        "Skipped corrupt record at handle {:#X}, type_code={} (panic recovered)",
-                        handle, type_code
-                    ),
-                );
+        let pass2_records: Vec<(u64, usize, i16, i16)> = record_catalog
+            .iter()
+            .copied()
+            .filter(|(_, _, _, type_code)| !is_table_type(*type_code))
+            .collect();
+        // LIGHT's optional IES/photometric tail is controlled by the
+        // LIGHTINGUNITS entry in AcDbVariableDictionary, not by record length.
+        // Resolve the dictionary variable before the parallel entity pass so a
+        // LIGHT with has_photometric_data=false still consumes its presence bit.
+        let mut variable_entries: Vec<(String, u64)> = Vec::new();
+        let mut variable_values: HashMap<u64, String> = HashMap::new();
+        for &(_, offset, _, type_code) in &pass2_records {
+            if type_code != OBJ_DICTIONARY && type_code != OBJ_DICTIONARYVAR {
                 continue;
             }
+            let (_, mut reader) = match self.obj_reader.read_record_at(offset) {
+                Ok(record) => record,
+                Err(_) => continue,
+            };
+            let common = self
+                .obj_reader
+                .read_common_non_entity_data(&mut reader, type_code);
+            if type_code == OBJ_DICTIONARY {
+                let data = objects::read_dictionary(&mut reader, self.obj_reader.version());
+                variable_entries.extend(
+                    data.entries
+                        .into_iter()
+                        .map(|entry| (entry.name, entry.handle)),
+                );
+            } else {
+                let data = objects::read_dictionary_variable(&mut reader);
+                variable_values.insert(common.common.handle, data.value);
+            }
         }
+        let photometric_lighting = variable_entries.iter().any(|(name, handle)| {
+            name.eq_ignore_ascii_case("LIGHTINGUNITS")
+                && variable_values
+                    .get(handle)
+                    .is_some_and(|value| value.trim() == "2")
+        });
+        document.reserve_loaded_entities(pass2_records.len());
+        document.objects.reserve(pass2_records.len().min(16_384));
+
+        let source_version = document.version;
+        let model_space_block_handle = document.header.model_space_block_handle;
+        let paper_space_block_handle = document.header.paper_space_block_handle;
+        let worker_count = worker_count();
+        let chunk_size = 512usize;
+        let batch_size = chunk_size * worker_count * 4;
+        let pass2_started = web_time::Instant::now();
+        let mut decode_seconds = 0.0f64;
+        let mut commit_seconds = 0.0f64;
+
+        let pass2_total = pass2_records.len().max(1);
+        let mut pass2_done = 0usize;
+        for batch in pass2_records.chunks(batch_size) {
+            let decode_started = web_time::Instant::now();
+            let chunks: Vec<Pass2Chunk> =
+                map_chunks(batch, chunk_size, |records| {
+                    let mut chunk = Pass2Chunk::new(
+                        source_version,
+                        model_space_block_handle,
+                        paper_space_block_handle,
+                        records.len(),
+                    );
+                    for &(handle, offset, raw_type_code, type_code) in records {
+                        let (_, reader) = match self.obj_reader.read_record_at(offset) {
+                            Ok(record) => record,
+                            Err(error) => {
+                                chunk.failures.push(RecordFailure {
+                                    code: "record-read-failed",
+                                    handle,
+                                    offset,
+                                    type_code,
+                                    message: format!(
+                                        "Could not read record at handle {handle:#X}, type_code={type_code}: {error}"
+                                    ),
+                                });
+                                continue;
+                            }
+                        };
+                        let result =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                self.process_pass2_record(
+                                    handle,
+                                    raw_type_code,
+                                    type_code,
+                                    reader,
+                                    &mut chunk.output,
+                                    &maps,
+                                    &mut chunk.pending,
+                                    &mut chunk.pending_attributes,
+                                    &entity_class_numbers,
+                                    &class_names,
+                                    photometric_lighting,
+                                );
+                            }));
+                        if result.is_err() {
+                            chunk.failures.push(RecordFailure {
+                                code: "record-decode-panicked",
+                                handle,
+                                offset,
+                                type_code,
+                                message: format!(
+                                    "Skipped corrupt record at handle {handle:#X}, type_code={type_code} (panic recovered)"
+                                ),
+                            });
+                        }
+                    }
+                    chunk
+                });
+            decode_seconds += decode_started.elapsed().as_secs_f64();
+
+            let commit_started = web_time::Instant::now();
+            for mut chunk in chunks {
+                decoded_pass2 = decoded_pass2
+                    .saturating_add(chunk.output.entities.len())
+                    .saturating_add(chunk.output.objects.len());
+                document
+                    .eed_by_handle
+                    .extend(chunk.output.eed_by_handle.drain());
+                document
+                    .xdic_by_handle
+                    .extend(chunk.output.xdic_by_handle.drain());
+                document
+                    .reactors_by_handle
+                    .extend(chunk.output.reactors_by_handle.drain());
+                document
+                    .context_scales
+                    .extend(chunk.output.context_scales.drain());
+                document
+                    .block_visibility_params
+                    .extend(chunk.output.block_visibility_params.drain());
+                document
+                    .block_representations
+                    .extend(chunk.output.block_representations.drain());
+                document.fields.extend(chunk.output.fields.drain());
+                document
+                    .dgn_ls_definitions
+                    .extend(chunk.output.dgn_ls_definitions.drain());
+                document
+                    .dgn_ls_components
+                    .extend(chunk.output.dgn_ls_components.drain());
+                document
+                    .view_rep_refs
+                    .extend(chunk.output.view_rep_refs.drain());
+                for view_rep in chunk.output.section_view_reps.drain(..) {
+                    if !document.section_view_reps.contains(&view_rep) {
+                        document.section_view_reps.push(view_rep);
+                    }
+                }
+                if document.section_view_style.is_none() {
+                    document.section_view_style = chunk.output.section_view_style.take();
+                }
+                document.objects.extend(chunk.output.objects.drain());
+                document.add_loaded_entity_batch(&mut chunk.output.entities);
+                for (owner, mut vertices) in chunk.pending.vertices.drain() {
+                    pending
+                        .vertices
+                        .entry(owner)
+                        .or_default()
+                        .append(&mut vertices);
+                }
+                pending.seqends.extend(chunk.pending.seqends.drain());
+                pending.polylines.append(&mut chunk.pending.polylines);
+                for (owner, mut attributes) in chunk.pending_attributes.drain() {
+                    pending_attributes
+                        .entry(owner)
+                        .or_default()
+                        .append(&mut attributes);
+                }
+                for failure in chunk.failures {
+                    skipped_pass2 += 1;
+                    self.notifications
+                        .notify(NotificationType::Error, failure.message.clone());
+                    let mut diagnostic = ReadDiagnostic::new(
+                        failure.code,
+                        ReadStage::RecordStream,
+                        failure.message,
+                    );
+                    diagnostic.source_offset = Some(failure.offset as u64);
+                    diagnostic.source_offset_basis = Some("object-section-byte".to_string());
+                    diagnostic.section = Some("AcDb:AcDbObjects".to_string());
+                    diagnostic.record_handle = Some(failure.handle);
+                    diagnostic.record_type = Some(failure.type_code.to_string());
+                    push_read_diagnostic(&mut diagnostics, diagnostic);
+                }
+            }
+            commit_seconds += commit_started.elapsed().as_secs_f64();
+            pass2_done = pass2_done.saturating_add(batch.len());
+            let value = 110u32 + ((pass2_done as u64 * 760) / pass2_total as u64) as u32;
+            self.report_progress(value.min(870) as u16);
+        }
+        if perf {
+            eprintln!(
+                "[perf] dwg-build pass2={:.1}ms decode={:.1}ms commit={:.1}ms records={} threads={}",
+                pass2_started.elapsed().as_secs_f64() * 1000.0,
+                decode_seconds * 1000.0,
+                commit_seconds * 1000.0,
+                pass2_records.len(),
+                worker_count,
+            );
+        }
+        let post_started = web_time::Instant::now();
+        self.report_progress(875);
 
         // ── Post-pass: Assemble polyline vertices and add to document ──
         for (poly_handle, mut entity) in pending.polylines {
@@ -958,7 +1690,8 @@ impl DwgDocumentBuilder {
                     _ => {}
                 }
             }
-            let _ = document.add_entity(entity);
+            decoded_pass2 = decoded_pass2.saturating_add(1);
+            document.add_loaded_entity(entity);
         }
 
         // ── Post-pass: Attach pending attribute entities to parent INSERTs ──
@@ -969,6 +1702,116 @@ impl DwgDocumentBuilder {
                     let insert_handle = ins.common.handle.value();
                     if let Some(attribs) = pending_attributes.remove(&insert_handle) {
                         ins.attributes = attribs;
+                    }
+                    if let Some(seqend) = pending.seqends.get(&insert_handle).copied() {
+                        ins.seqend_handle = Some(seqend);
+                    }
+                }
+            }
+        }
+
+        // MLINE entities and MLINESTYLE objects are decoded independently in
+        // parallel. Resolve the display name after every object is committed.
+        {
+            let style_names: HashMap<Handle, String> = document
+                .objects
+                .iter()
+                .filter_map(|(handle, object)| match object {
+                    crate::objects::ObjectType::MLineStyle(style) => {
+                        Some((*handle, style.name.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !style_names.is_empty() {
+                for entity in &mut document.entities {
+                    let style_name = match entity.as_ref() {
+                        EntityType::MLine(mline) => mline
+                            .style_handle
+                            .and_then(|handle| style_names.get(&handle))
+                            .cloned(),
+                        _ => None,
+                    };
+                    if let Some(style_name) = style_name {
+                        if let EntityType::MLine(mline) = std::sync::Arc::make_mut(entity) {
+                            mline.style_name = style_name;
+                        }
+                    }
+                }
+            }
+        }
+
+        // GROUP names live in the owning dictionary; the GROUP body only
+        // carries a separate unnamed flag. Restore the public name without
+        // using it to synthesize or overwrite that flag.
+        {
+            let group_names: HashMap<Handle, String> = document
+                .objects
+                .values()
+                .filter_map(|object| match object {
+                    crate::objects::ObjectType::Dictionary(dictionary) => {
+                        Some(dictionary.entries.iter())
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|(name, handle)| {
+                    matches!(
+                        document.objects.get(handle),
+                        Some(crate::objects::ObjectType::Group(_))
+                    )
+                    .then(|| (*handle, name.clone()))
+                })
+                .collect();
+            for (handle, name) in group_names {
+                if let Some(crate::objects::ObjectType::Group(group)) =
+                    document.objects.get_mut(&handle)
+                {
+                    group.name = name;
+                }
+            }
+        }
+
+        document.resolve_xrecord_names();
+
+        // Advanced material properties are not stored in the AcDbMaterial
+        // object body. AutoCAD keeps them in the ADVMATERIAL XRECORD owned by
+        // the material's extension dictionary. Expose those values on the
+        // Material model while retaining the XRECORD as the authoritative
+        // on-disk representation.
+        document.resolve_xrecord_backed_properties();
+
+        // ── Post-pass: cache each RasterImage's path from its IMAGEDEF ──
+        //
+        // An IMAGE entity carries no path of its own — the referenced
+        // ImageDefinition object holds it (the entity's `file_path` is only a
+        // convenience cache). Copy it across so rendering and loading can see
+        // the path directly: a resolvable local image loads its pixels, and an
+        // unresolved reference (a URL, a missing file) can show its path as
+        // text instead of a blank frame.
+        {
+            let def_paths: HashMap<Handle, String> = document
+                .objects
+                .iter()
+                .filter_map(|(h, o)| match o {
+                    crate::objects::ObjectType::ImageDefinition(d) if !d.file_name.is_empty() => {
+                        Some((*h, d.file_name.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !def_paths.is_empty() {
+                for entity in &mut document.entities {
+                    let needs = matches!(&**entity, EntityType::RasterImage(im)
+                        if im.file_path.is_empty()
+                            && im.definition_handle.is_some_and(|h| def_paths.contains_key(&h)));
+                    if !needs {
+                        continue;
+                    }
+                    if let EntityType::RasterImage(im) = std::sync::Arc::make_mut(entity) {
+                        if let Some(p) = im.definition_handle.and_then(|h| def_paths.get(&h)) {
+                            im.file_path = p.clone();
+                        }
                     }
                 }
             }
@@ -1018,67 +1861,117 @@ impl DwgDocumentBuilder {
         // Use the canonical entity_handle lists from the binary block
         // records (R2004+) to correct ownership for entities that belong
         // to non-active paper spaces (*Paper_Space0, *Paper_Space1, etc.).
-        if !binary_entity_owner.is_empty() {
-            // 1. Fix entity owner handles from the binary source of truth
-            for entity in &mut document.entities {
-                let eh = entity.common().handle;
-                if let Some(&correct_owner) = binary_entity_owner.get(&eh) {
-                    if entity.common().owner_handle != correct_owner {
-                        std::sync::Arc::make_mut(entity).common_mut().owner_handle = correct_owner;
-                    }
-                }
-            }
-            // 2. Rebuild block_record.entity_handles from corrected owners,
-            //    excluding AttributeEntity (sub-entities of INSERT, not
-            //    direct block record children).
-            for br in document.block_records.iter_mut() {
-                br.entity_handles.clear();
-            }
-            let ms_handle = document.header.model_space_block_handle;
-            let entity_owners: Vec<(Handle, Handle, bool)> = document
-                .entities
+        if perf {
+            eprintln!(
+                "[perf] dwg-build post={:.1}ms",
+                post_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        self.report_progress(925);
+        let ownership_started = web_time::Instant::now();
+        // Rebuild block membership in O(entities + blocks). The ordinary
+        // add-entity path scans every block record for every entity, which
+        // dominates load time in block-heavy drawings. Owner correction and
+        // validation share the same parallel pass over the entity arena.
+        let source_record_order = (!self.obj_reader.version().r2004_plus()).then(|| {
+            record_catalog
                 .iter()
-                .map(|e| {
-                    (
-                        e.common().handle,
-                        e.common().owner_handle,
-                        matches!(
-                            e.as_ref(),
-                            EntityType::AttributeEntity(_)
-                                | EntityType::Block(_)
-                                | EntityType::BlockEnd(_)
-                        ),
-                    )
-                })
-                .collect();
-            for (eh, owner, is_excluded) in entity_owners {
-                // AttributeEntity is a sub-entity of INSERT.
-                // Block/BlockEnd are structural markers with separate handle fields.
-                // None of these should appear in block_record.entity_handles.
-                if is_excluded {
-                    continue;
-                }
-                let mut added = false;
-                if !owner.is_null() {
-                    for br in document.block_records.iter_mut() {
-                        if br.handle == owner {
-                            br.entity_handles.push(eh);
-                            added = true;
-                            break;
-                        }
-                    }
-                }
-                // Fallback: route to *Model_Space if owner match not found
-                if !added && !ms_handle.is_null() {
-                    for br in document.block_records.iter_mut() {
-                        if br.handle == ms_handle {
-                            br.entity_handles.push(eh);
-                            break;
-                        }
-                    }
-                }
+                .map(|(handle, offset, _, _)| (Handle::from(*handle), *offset))
+                .collect::<ahash::AHashMap<_, _>>()
+        });
+        Self::rebuild_block_membership(
+            document,
+            Some(&binary_entity_owner),
+            source_record_order.as_ref(),
+        );
+        if perf {
+            eprintln!(
+                "[perf] dwg-build ownership={:.1}ms entities={} blocks={}",
+                ownership_started.elapsed().as_secs_f64() * 1000.0,
+                document.entities.len(),
+                document.block_records.len(),
+            );
+        }
+        let tail_started = web_time::Instant::now();
+
+        // Ensure allocations made by the repair steps start above every source
+        // record, even when the file's HANDSEED was stale.
+        let max_from_reader = handles.iter().max().copied().unwrap_or(0);
+        if max_from_reader + 1 > document.header.handle_seed {
+            document.header.handle_seed = max_from_reader + 1;
+        }
+
+        // BLOCK/ENDBLK markers are structural records and are not retained in
+        // the flat entity arena. Damaged files can point a block record at a
+        // handle now occupied by a table entry or ordinary object (0718 uses
+        // its Standard DIMSTYLE as *Paper_Space's BLOCK marker). Rehome only
+        // those colliding markers; the writer will synthesize their records.
+        let mut occupied: std::collections::HashSet<Handle> =
+            document.objects.keys().copied().collect();
+        occupied.extend(document.entities().filter_map(|entity| {
+            (!matches!(
+                entity,
+                crate::entities::EntityType::Block(_)
+                    | crate::entities::EntityType::BlockEnd(_)
+            ))
+            .then_some(entity.common().handle)
+        }));
+        for handle in [
+            document.block_records.handle(),
+            document.layers.handle(),
+            document.text_styles.handle(),
+            document.line_types.handle(),
+            document.views.handle(),
+            document.ucss.handle(),
+            document.vports.handle(),
+            document.app_ids.handle(),
+            document.dim_styles.handle(),
+            document.vx_table.handle(),
+        ] {
+            occupied.insert(handle);
+        }
+        occupied.extend(document.block_records.iter().map(|record| record.handle));
+        occupied.extend(document.layers.iter().map(|entry| entry.handle));
+        occupied.extend(document.text_styles.iter().map(|entry| entry.handle));
+        occupied.extend(document.line_types.iter().map(|entry| entry.handle));
+        occupied.extend(document.views.iter().map(|entry| entry.handle));
+        occupied.extend(document.ucss.iter().map(|entry| entry.handle));
+        occupied.extend(document.vports.iter().map(|entry| entry.handle));
+        occupied.extend(document.app_ids.iter().map(|entry| entry.handle));
+        occupied.extend(document.dim_styles.iter().map(|entry| entry.handle));
+        occupied.extend(document.vx_table.iter().map(|entry| entry.handle));
+        fn allocate_marker(
+            occupied: &mut std::collections::HashSet<Handle>,
+            next_handle: &mut u64,
+        ) -> Handle {
+            while occupied.contains(&Handle::new(*next_handle)) {
+                *next_handle += 1;
+            }
+            let handle = Handle::new(*next_handle);
+            *next_handle += 1;
+            occupied.insert(handle);
+            handle
+        }
+        let mut next_handle = document.header.handle_seed.max(1);
+        for record in document.block_records.iter_mut() {
+            if record.block_entity_handle.is_null()
+                || occupied.contains(&record.block_entity_handle)
+            {
+                record.block_entity_handle =
+                    allocate_marker(&mut occupied, &mut next_handle);
+            } else {
+                occupied.insert(record.block_entity_handle);
+            }
+            if record.block_end_handle.is_null()
+                || occupied.contains(&record.block_end_handle)
+            {
+                record.block_end_handle =
+                    allocate_marker(&mut occupied, &mut next_handle);
+            } else {
+                occupied.insert(record.block_end_handle);
             }
         }
+        document.header.handle_seed = document.header.handle_seed.max(next_handle);
 
         // ── Post-pass: Resolve root dictionary handle ──────────────────
         //
@@ -1086,11 +1979,13 @@ impl DwgDocumentBuilder {
         // references that resolve to 0 during header reading.  Now that
         // all objects have been read, scan for the actual root dictionary
         // (owner == NULL) and update the header.
-        if document.header.named_objects_dict_handle.is_null()
-            || !document
+        let root_is_dictionary = matches!(
+            document
                 .objects
-                .contains_key(&document.header.named_objects_dict_handle)
-        {
+                .get(&document.header.named_objects_dict_handle),
+            Some(crate::objects::ObjectType::Dictionary(_))
+        );
+        if !root_is_dictionary {
             let mut best = Handle::NULL;
             let mut best_count = 0usize;
             for (h, obj) in &document.objects {
@@ -1107,17 +2002,213 @@ impl DwgDocumentBuilder {
             }
             if !best.is_null() {
                 document.header.named_objects_dict_handle = best;
+            } else {
+                // Some damaged files point NOD at a table control and give
+                // every top-level dictionary that same invalid owner. Preserve
+                // those valid child dictionaries behind a fresh root instead
+                // of writing a null NOD, which makes ODA demand recovery.
+                let header_root = document.header.named_objects_dict_handle;
+                let mut invalid_root_votes: HashMap<Handle, usize> = HashMap::new();
+                for (handle, reactors) in &document.reactors_by_handle {
+                    if !matches!(
+                        document.objects.get(handle),
+                        Some(
+                            crate::objects::ObjectType::Dictionary(_)
+                                | crate::objects::ObjectType::DictionaryWithDefault(_)
+                        )
+                    ) {
+                        continue;
+                    }
+                    for reactor in reactors {
+                        if !matches!(
+                            document.objects.get(reactor),
+                            Some(crate::objects::ObjectType::Dictionary(_))
+                        ) {
+                            *invalid_root_votes.entry(*reactor).or_default() += 1;
+                        }
+                    }
+                }
+                let previous_root = invalid_root_votes
+                    .into_iter()
+                    .max_by_key(|(_, count)| *count)
+                    .map(|(handle, _)| handle)
+                    .filter(|handle| !handle.is_null())
+                    .unwrap_or(header_root);
+                let root_handle = document.allocate_handle();
+                let children = [
+                    ("ACAD_GROUP", document.header.acad_group_dict_handle),
+                    (
+                        "ACAD_MLINESTYLE",
+                        document.header.acad_mlinestyle_dict_handle,
+                    ),
+                    ("ACAD_LAYOUT", document.header.acad_layout_dict_handle),
+                    (
+                        "ACAD_PLOTSETTINGS",
+                        document.header.acad_plotsettings_dict_handle,
+                    ),
+                    (
+                        "ACAD_PLOTSTYLENAME",
+                        document.header.acad_plotstylename_dict_handle,
+                    ),
+                    ("ACAD_MATERIAL", document.header.acad_material_dict_handle),
+                    ("ACAD_COLOR", document.header.acad_color_dict_handle),
+                    (
+                        "ACAD_VISUALSTYLE",
+                        document.header.acad_visualstyle_dict_handle,
+                    ),
+                ];
+                let mut root = crate::objects::Dictionary::new();
+                root.handle = root_handle;
+                for (name, child_handle) in children {
+                    let child_is_dictionary = matches!(
+                        document.objects.get(&child_handle),
+                        Some(
+                            crate::objects::ObjectType::Dictionary(_)
+                                | crate::objects::ObjectType::DictionaryWithDefault(_)
+                        )
+                    );
+                    if !child_is_dictionary {
+                        continue;
+                    }
+                    root.add_entry(name, child_handle);
+                    if let Some(child) = document.objects.get_mut(&child_handle) {
+                        match child {
+                            crate::objects::ObjectType::Dictionary(dictionary) => {
+                                dictionary.owner = root_handle;
+                            }
+                            crate::objects::ObjectType::DictionaryWithDefault(dictionary) => {
+                                dictionary.owner = root_handle;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(reactors) =
+                        document.reactors_by_handle.get_mut(&child_handle)
+                    {
+                        for reactor in reactors {
+                            if *reactor == previous_root {
+                                *reactor = root_handle;
+                            }
+                        }
+                    }
+                }
+
+                // A damaged NOD often leaves every former root child with a
+                // reactor pointing at the non-dictionary header handle. Repair
+                // all of those references, not only the few child handles that
+                // survived header decoding. Keep every recovered dictionary
+                // reachable from the fresh root; known roles retain their
+                // standard names, unknown roles get stable recovery names.
+                let top_level: Vec<Handle> = document
+                    .reactors_by_handle
+                    .iter()
+                    .filter_map(|(handle, reactors)| {
+                        reactors.contains(&previous_root).then_some(*handle)
+                    })
+                    .collect();
+                for child_handle in top_level {
+                    let inferred_name = match document.objects.get(&child_handle) {
+                        Some(crate::objects::ObjectType::Dictionary(dictionary)) => {
+                            let values: Vec<&crate::objects::ObjectType> = dictionary
+                                .entries
+                                .iter()
+                                .filter_map(|(_, handle)| document.objects.get(handle))
+                                .collect();
+                            if values
+                                .iter()
+                                .any(|object| matches!(object, crate::objects::ObjectType::Layout(_)))
+                            {
+                                "ACAD_LAYOUT".to_string()
+                            } else if values.iter().any(|object| {
+                                matches!(object, crate::objects::ObjectType::MLineStyle(_))
+                            }) {
+                                "ACAD_MLINESTYLE".to_string()
+                            } else if values.iter().any(|object| {
+                                matches!(object, crate::objects::ObjectType::PlotSettings(_))
+                            }) {
+                                "ACAD_PLOTSETTINGS".to_string()
+                            } else if values.iter().any(|object| {
+                                matches!(object, crate::objects::ObjectType::MultiLeaderStyle(_))
+                            }) {
+                                "ACAD_MLEADERSTYLE".to_string()
+                            } else if values.iter().any(|object| {
+                                matches!(object, crate::objects::ObjectType::TableStyle(_))
+                            }) {
+                                "ACAD_TABLESTYLE".to_string()
+                            } else if values
+                                .iter()
+                                .any(|object| matches!(object, crate::objects::ObjectType::Scale(_)))
+                            {
+                                "ACAD_SCALELIST".to_string()
+                            } else if values.iter().any(|object| {
+                                matches!(object, crate::objects::ObjectType::VisualStyle(_))
+                            }) {
+                                "ACAD_VISUALSTYLE".to_string()
+                            } else if values.iter().any(|object| {
+                                matches!(object, crate::objects::ObjectType::Material(_))
+                            }) {
+                                "ACAD_MATERIAL".to_string()
+                            } else if values.iter().any(|object| {
+                                matches!(object, crate::objects::ObjectType::BookColor(_))
+                            }) {
+                                "ACAD_COLOR".to_string()
+                            } else if values
+                                .iter()
+                                .any(|object| matches!(object, crate::objects::ObjectType::Group(_)))
+                            {
+                                "ACAD_GROUP".to_string()
+                            } else if dictionary.get("AcDsRecords").is_some()
+                                || dictionary.get("AcDsSchemas").is_some()
+                            {
+                                "ACAD_ACDSRECORDS".to_string()
+                            } else if dictionary.get("CANNOSCALE").is_some() {
+                                "AcDbVariableDictionary".to_string()
+                            } else {
+                                format!("RECOVERED_{:X}", child_handle.value())
+                            }
+                        }
+                        _ => continue,
+                    };
+                    let name = if root.get(&inferred_name).is_some() {
+                        format!("RECOVERED_{:X}", child_handle.value())
+                    } else {
+                        inferred_name
+                    };
+                    root.add_entry(name, child_handle);
+                    if let Some(crate::objects::ObjectType::Dictionary(dictionary)) =
+                        document.objects.get_mut(&child_handle)
+                    {
+                        if dictionary.owner.is_null() || dictionary.owner == previous_root {
+                            dictionary.owner = root_handle;
+                        }
+                    }
+                    if let Some(reactors) =
+                        document.reactors_by_handle.get_mut(&child_handle)
+                    {
+                        for reactor in reactors {
+                            if *reactor == previous_root {
+                                *reactor = root_handle;
+                            }
+                        }
+                    }
+                }
+                document
+                    .objects
+                    .insert(root_handle, crate::objects::ObjectType::Dictionary(root));
+                document.header.named_objects_dict_handle = root_handle;
             }
         }
 
         // Summary notification
-        let total_skipped = skipped_pass1 + skipped_pass2;
+        let total_skipped = skipped_catalog
+            .saturating_add(skipped_pass1 as usize)
+            .saturating_add(skipped_pass2 as usize);
         if total_skipped > 0 {
             self.notifications.notify(
                 NotificationType::Warning,
                 format!(
                     "DWG build summary: {} of {} handles processed, {} records skipped ({} table, {} entity/object)",
-                    total_handles as u32 - total_skipped,
+                    total_handles.saturating_sub(total_skipped),
                     total_handles,
                     total_skipped,
                     skipped_pass1,
@@ -1126,13 +2217,7 @@ impl DwgDocumentBuilder {
             );
         }
 
-        // Ensure handle_seed reflects the true maximum handle present in the
-        // source file's Handles section.
-        let max_from_reader = handles.iter().max().copied().unwrap_or(0);
-        if max_from_reader + 1 > document.header.handle_seed {
-            document.header.handle_seed = max_from_reader + 1;
-        }
-
+        let annotative_started = web_time::Instant::now();
         // ── Annotative flag from `AcadAnnotative` EED (STYLE / DIMSTYLE) ──
         // These records have no native annotative field; the flag is stored as
         // extended data under the `AcadAnnotative` application.
@@ -1166,7 +2251,14 @@ impl DwgDocumentBuilder {
                 }
             }
         }
+        if perf {
+            eprintln!(
+                "[perf] dwg-build annotative={:.1}ms",
+                annotative_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
+        let eed_started = web_time::Instant::now();
         // ── Decode entity EED blobs into structured records ──────────────────
         // The object reader keeps every EED block as verbatim `raw_dwg_eed`
         // bytes (preserved for a byte-exact re-save). Additionally decode each
@@ -1176,44 +2268,59 @@ impl DwgDocumentBuilder {
         // still emits it verbatim; the writer prefers raw over records per app.
         {
             let wide = self.obj_reader.version().r2007_plus();
-            let app_name_by_handle: std::collections::HashMap<u64, String> = document
+            let app_name_by_handle: ahash::AHashMap<u64, String> = document
                 .app_ids
                 .iter()
                 .map(|a| (a.handle.value(), a.name.clone()))
                 .collect();
-            let layer_name_by_handle: std::collections::HashMap<u64, String> = document
+            let layer_name_by_handle: ahash::AHashMap<u64, String> = document
                 .layers
                 .iter()
                 .map(|l| (l.handle.value(), l.name.clone()))
                 .collect();
             if !app_name_by_handle.is_empty() {
-                for entity in document.entities.iter_mut() {
-                    if entity.common().extended_data.raw_dwg_eed.is_empty() {
-                        continue;
-                    }
-                    let xd = &mut std::sync::Arc::make_mut(entity).common_mut().extended_data;
-                    let blocks = xd.raw_dwg_eed.clone();
-                    for (app_handle, bytes) in &blocks {
-                        let Some(name) = app_name_by_handle.get(app_handle) else {
-                            continue;
-                        };
-                        if xd.get_record(name).is_some() {
-                            continue;
-                        }
-                        if let Some(values) =
-                            crate::io::dwg::eed_codec::decode_values(bytes, wide, |h| {
-                                layer_name_by_handle.get(&h).cloned()
+                for_each_mut(&mut document.entities, |entity| {
+                    let records: Vec<crate::xdata::ExtendedDataRecord> = {
+                        let xd = &entity.common().extended_data;
+                        xd.raw_dwg_eed
+                            .iter()
+                            .filter_map(|(app_handle, bytes)| {
+                                let Some(name) = app_name_by_handle.get(app_handle) else {
+                                    return None;
+                                };
+                                if xd.get_record(name).is_some() {
+                                    return None;
+                                }
+                                crate::io::dwg::eed_codec::decode_values(bytes, wide, |h| {
+                                    layer_name_by_handle.get(&h).cloned()
+                                })
+                                .map(|values| {
+                                    let mut rec =
+                                        crate::xdata::ExtendedDataRecord::new(name.clone());
+                                    rec.values = values;
+                                    rec
+                                })
                             })
-                        {
-                            let mut rec = crate::xdata::ExtendedDataRecord::new(name.clone());
-                            rec.values = values;
-                            xd.add_record(rec);
+                            .collect()
+                    };
+                    if !records.is_empty() {
+                        let xd =
+                            &mut std::sync::Arc::make_mut(entity).common_mut().extended_data;
+                        for record in records {
+                            xd.add_record(record);
                         }
                     }
-                }
+                });
             }
         }
+        if perf {
+            eprintln!(
+                "[perf] dwg-build eed={:.1}ms",
+                eed_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
+        let acis_started = web_time::Instant::now();
         // ── AcDs SAB ordering ──────────────────────────────────────────────
         // R2013+ modeler geometry (3DSOLID/REGION/BODY/SURFACE) is stored as
         // SAB blobs in the AcDs section, one per entity whose `has_ds_data` bit
@@ -1241,7 +2348,14 @@ impl DwgDocumentBuilder {
             ordered.sort_by_key(|h| h.value());
             document.acis_sab_handles = ordered;
         }
+        if perf {
+            eprintln!(
+                "[perf] dwg-build acis-order={:.1}ms",
+                acis_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
+        let repair_started = web_time::Instant::now();
         // ── Handle-collision repair ────────────────────────────────────────
         // The document is seeded with standard table entries (Standard dim
         // style, default block records, …) at low handles before the file's
@@ -1252,6 +2366,195 @@ impl DwgDocumentBuilder {
         // ("improperly read"). Re-home any dim-style entry whose handle also
         // belongs to a block record, following the header references so the
         // Standard style stays reachable.
+        {
+            use std::collections::HashSet;
+
+            // Retained defaults that were not present in the source must not
+            // keep one of their preallocated low handles when the source uses
+            // that handle for a different record. Prefer the source record and
+            // move only the synthetic table entry.
+            let source_records: HashSet<u64> =
+                record_catalog
+                    .iter()
+                    .map(|(handle, _, _, _)| *handle)
+                    .collect();
+            let mut source_views = HashSet::new();
+            let mut source_ucss = HashSet::new();
+            let mut source_vports = HashSet::new();
+            let mut source_app_ids = HashSet::new();
+            for entry in &parsed_entries {
+                match entry {
+                    ParsedEntry::View(handle, _) => {
+                        source_views.insert(*handle);
+                    }
+                    ParsedEntry::Ucs(handle, _) => {
+                        source_ucss.insert(*handle);
+                    }
+                    ParsedEntry::VPort(handle, _) => {
+                        source_vports.insert(*handle);
+                    }
+                    ParsedEntry::AppId(handle, _) => {
+                        source_app_ids.insert(*handle);
+                    }
+                    _ => {}
+                }
+            }
+            let collides = |handle: Handle, source_entries: &HashSet<u64>| {
+                !handle.is_null()
+                    && source_records.contains(&handle.value())
+                    && !source_entries.contains(&handle.value())
+            };
+
+            let source_layers: HashSet<u64> = maps.layers.keys().copied().collect();
+            let layer_collisions: Vec<Handle> = document
+                .layers
+                .iter()
+                .filter(|entry| collides(entry.handle, &source_layers))
+                .map(|entry| entry.handle)
+                .collect();
+            for old in layer_collisions {
+                let new = document.allocate_handle();
+                for entry in document.layers.iter_mut() {
+                    if entry.handle == old {
+                        entry.handle = new;
+                    }
+                }
+                if document.header.current_layer_handle == old {
+                    document.header.current_layer_handle = new;
+                }
+            }
+
+            let source_linetypes: HashSet<u64> = maps.linetypes.keys().copied().collect();
+            let linetype_collisions: Vec<Handle> = document
+                .line_types
+                .iter()
+                .filter(|entry| collides(entry.handle, &source_linetypes))
+                .map(|entry| entry.handle)
+                .collect();
+            for old in linetype_collisions {
+                let new = document.allocate_handle();
+                for entry in document.line_types.iter_mut() {
+                    if entry.handle == old {
+                        entry.handle = new;
+                    }
+                }
+                for handle in [
+                    &mut document.header.current_linetype_handle,
+                    &mut document.header.continuous_linetype_handle,
+                    &mut document.header.bylayer_linetype_handle,
+                    &mut document.header.byblock_linetype_handle,
+                    &mut document.header.dim_linetype_handle,
+                    &mut document.header.dim_linetype1_handle,
+                    &mut document.header.dim_linetype2_handle,
+                ] {
+                    if *handle == old {
+                        *handle = new;
+                    }
+                }
+            }
+
+            let source_styles: HashSet<u64> = maps.text_styles.keys().copied().collect();
+            let style_collisions: Vec<Handle> = document
+                .text_styles
+                .iter()
+                .filter(|entry| collides(entry.handle, &source_styles))
+                .map(|entry| entry.handle)
+                .collect();
+            for old in style_collisions {
+                let new = document.allocate_handle();
+                for entry in document.text_styles.iter_mut() {
+                    if entry.handle == old {
+                        entry.handle = new;
+                    }
+                }
+                if document.header.current_text_style_handle == old {
+                    document.header.current_text_style_handle = new;
+                }
+                if document.header.dim_text_style_handle == old {
+                    document.header.dim_text_style_handle = new;
+                }
+            }
+
+            let source_dimstyles: HashSet<u64> = maps.dim_styles.keys().copied().collect();
+            let dimstyle_collisions: Vec<Handle> = document
+                .dim_styles
+                .iter()
+                .filter(|entry| collides(entry.handle, &source_dimstyles))
+                .map(|entry| entry.handle)
+                .collect();
+            for old in dimstyle_collisions {
+                let new = document.allocate_handle();
+                for entry in document.dim_styles.iter_mut() {
+                    if entry.handle == old {
+                        entry.handle = new;
+                    }
+                }
+                if document.header.current_dimstyle_handle == old {
+                    document.header.current_dimstyle_handle = new;
+                }
+            }
+
+            let view_collisions: Vec<Handle> = document
+                .views
+                .iter()
+                .filter(|entry| collides(entry.handle, &source_views))
+                .map(|entry| entry.handle)
+                .collect();
+            for old in view_collisions {
+                let new = document.allocate_handle();
+                for entry in document.views.iter_mut() {
+                    if entry.handle == old {
+                        entry.handle = new;
+                    }
+                }
+            }
+
+            let ucs_collisions: Vec<Handle> = document
+                .ucss
+                .iter()
+                .filter(|entry| collides(entry.handle, &source_ucss))
+                .map(|entry| entry.handle)
+                .collect();
+            for old in ucs_collisions {
+                let new = document.allocate_handle();
+                for entry in document.ucss.iter_mut() {
+                    if entry.handle == old {
+                        entry.handle = new;
+                    }
+                }
+            }
+
+            let vport_collisions: Vec<Handle> = document
+                .vports
+                .iter()
+                .filter(|entry| collides(entry.handle, &source_vports))
+                .map(|entry| entry.handle)
+                .collect();
+            for old in vport_collisions {
+                let new = document.allocate_handle();
+                for entry in document.vports.iter_mut() {
+                    if entry.handle == old {
+                        entry.handle = new;
+                    }
+                }
+            }
+
+            let app_id_collisions: Vec<Handle> = document
+                .app_ids
+                .iter()
+                .filter(|entry| collides(entry.handle, &source_app_ids))
+                .map(|entry| entry.handle)
+                .collect();
+            for old in app_id_collisions {
+                let new = document.allocate_handle();
+                for entry in document.app_ids.iter_mut() {
+                    if entry.handle == old {
+                        entry.handle = new;
+                    }
+                }
+            }
+        }
+
         {
             use std::collections::HashSet;
             let block_handles: HashSet<u64> = document
@@ -1295,7 +2598,7 @@ impl DwgDocumentBuilder {
         // rebuild any empty owned-list from ownership so the round-trip is
         // lossless.
         {
-            use std::collections::HashMap;
+            let mut added_record = false;
             for (h, is_model) in [
                 (document.header.model_space_block_handle, true),
                 (document.header.paper_space_block_handle, false),
@@ -1324,6 +2627,7 @@ impl DwgDocumentBuilder {
                     || document.dim_styles.handle() == h
                     || document.layers.iter().any(|l| l.handle == h)
                     || document.get_entity(h).is_some();
+                let original_handle = h;
                 let h = if collides {
                     let fresh = document.allocate_handle();
                     if is_model {
@@ -1336,6 +2640,11 @@ impl DwgDocumentBuilder {
                             if l.block_record == h {
                                 l.block_record = fresh;
                             }
+                        }
+                    }
+                    for entity in &mut document.entities {
+                        if entity.common().owner_handle == original_handle {
+                            std::sync::Arc::make_mut(entity).common_mut().owner_handle = fresh;
                         }
                     }
                     fresh
@@ -1356,30 +2665,10 @@ impl DwgDocumentBuilder {
                     }
                 }
                 let _ = document.block_records.add(br);
+                added_record = true;
             }
-            // Fill any empty owned-entity list from `owner_handle`, in document
-            // (draw) order, excluding structural markers and INSERT sub-entities
-            // — the same set the writer excludes.
-            let mut by_owner: HashMap<Handle, Vec<Handle>> = HashMap::new();
-            for e in &document.entities {
-                if matches!(
-                    e.as_ref(),
-                    EntityType::Block(_) | EntityType::BlockEnd(_) | EntityType::AttributeEntity(_)
-                ) {
-                    continue;
-                }
-                let owner = e.common().owner_handle;
-                if owner.is_null() {
-                    continue;
-                }
-                by_owner.entry(owner).or_default().push(e.common().handle);
-            }
-            for br in document.block_records.iter_mut() {
-                if br.entity_handles.is_empty() {
-                    if let Some(list) = by_owner.get(&br.handle) {
-                        br.entity_handles = list.clone();
-                    }
-                }
+            if added_record {
+                Self::rebuild_block_membership(document, None, None);
             }
         }
 
@@ -1389,7 +2678,26 @@ impl DwgDocumentBuilder {
         // rather than the "1:1" default.
         Self::reflect_annotation_scale(document);
 
-        self.notifications
+        if perf {
+            eprintln!(
+                "[perf] dwg-build repair={:.1}ms",
+                repair_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            eprintln!(
+                "[perf] dwg-build tail={:.1}ms total={:.1}ms",
+                tail_started.elapsed().as_secs_f64() * 1000.0,
+                build_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+
+        DwgBuildOutcome {
+            notifications: self.notifications,
+            decoded_records: parsed_entries.len().saturating_add(decoded_pass2),
+            skipped_records: skipped_catalog
+                .saturating_add(skipped_pass1 as usize)
+                .saturating_add(skipped_pass2 as usize),
+            diagnostics,
+        }
     }
 
     /// Populate the header's current annotation scale (CANNOSCALE) from the
@@ -1429,6 +2737,80 @@ impl DwgDocumentBuilder {
         }
     }
 
+    fn rebuild_block_membership(
+        document: &mut CadDocument,
+        binary_entity_owner: Option<&ahash::AHashMap<Handle, Handle>>,
+        source_record_order: Option<&ahash::AHashMap<Handle, usize>>,
+    ) {
+        let valid_owners: ahash::AHashSet<Handle> =
+            document.block_records.iter().map(|record| record.handle).collect();
+        let model_space = document.header.model_space_block_handle;
+        let paper_space = document.header.paper_space_block_handle;
+        let model_is_valid = valid_owners.contains(&model_space);
+        let paper_is_valid = valid_owners.contains(&paper_space);
+        let memberships: Vec<Option<(Handle, Handle)>> =
+            map_mut(&mut document.entities, |entity| {
+                if matches!(
+                    entity.as_ref(),
+                    EntityType::AttributeEntity(_)
+                        | EntityType::Block(_)
+                        | EntityType::BlockEnd(_)
+                ) {
+                    return None;
+                }
+
+                let common = entity.common();
+                let handle = common.handle;
+                let mut owner = binary_entity_owner
+                    .and_then(|owners| owners.get(&handle).copied())
+                    .unwrap_or(common.owner_handle);
+                if owner.is_null() {
+                    owner = if common.entity_mode == Some(1) && paper_is_valid {
+                        paper_space
+                    } else {
+                        model_space
+                    };
+                }
+                if !valid_owners.contains(&owner) && model_is_valid {
+                    owner = model_space;
+                }
+                if common.owner_handle != owner {
+                    std::sync::Arc::make_mut(entity).common_mut().owner_handle = owner;
+                }
+                valid_owners.contains(&owner).then_some((owner, handle))
+            });
+        let mut by_owner: ahash::AHashMap<Handle, Vec<Handle>> =
+            ahash::AHashMap::with_capacity(document.block_records.len());
+        for (owner, handle) in memberships.into_iter().flatten() {
+            by_owner.entry(owner).or_default().push(handle);
+        }
+
+        let (block_records, canonical_block_order) =
+            (&mut document.block_records, &document.block_entity_handles);
+        for record in block_records.iter_mut() {
+            let mut handles = by_owner.remove(&record.handle).unwrap_or_default();
+            if let Some(canonical) = canonical_block_order
+                .get(&record.handle)
+                .filter(|canonical| !canonical.is_empty())
+            {
+                let order: ahash::AHashMap<Handle, usize> = canonical
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(index, handle)| (handle, index))
+                    .collect();
+                handles.sort_by_key(|handle| {
+                    order.get(handle).copied().unwrap_or(usize::MAX)
+                });
+            } else if let Some(order) = source_record_order {
+                handles.sort_by_key(|handle| {
+                    order.get(handle).copied().unwrap_or(usize::MAX)
+                });
+            }
+            record.entity_handles = handles;
+        }
+    }
+
     /// Process a single object record in Pass 2.
     fn process_pass2_record(
         &self,
@@ -1436,11 +2818,13 @@ impl DwgDocumentBuilder {
         raw_type_code: i16,
         type_code: i16,
         mut reader: crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader,
-        document: &mut CadDocument,
+        document: &mut Pass2Output,
         maps: &HandleMaps,
         pending: &mut PendingPolylines,
         pending_attributes: &mut HashMap<u64, Vec<AttributeEntity>>,
         entity_class_numbers: &std::collections::HashSet<i16>,
+        class_names: &ClassNames,
+        photometric_lighting: bool,
     ) {
         // For class-based types (≥500) that weren't resolved via the class
         // map, check the class's is_an_entity flag.  This prevents misreading
@@ -1494,21 +2878,102 @@ impl DwgDocumentBuilder {
                     let _ = document.add_entity(EntityType::Circle(e));
                 }
                 OBJ_LIGHT => {
-                    let data = entities::read_light(&mut reader);
+                    let data = entities::read_light(&mut reader, photometric_lighting);
                     let mut e = Light::new();
                     e.common = entity_common;
+                    e.class_version = data.class_version;
                     e.name = data.name;
                     e.light_type = data.light_type;
+                    e.status = data.status;
+                    e.light_color = data.light_color;
+                    e.plot_glyph = data.plot_glyph;
+                    e.intensity = data.intensity;
                     e.position = data.position;
                     e.target = data.target;
-                    // Preserve the raw record verbatim so write-back keeps the
-                    // full photometric body (no native light encoder yet), just
-                    // like the Surface / Unknown arms below.
-                    e.dwg_type_code = type_code;
-                    e.dwg_handle_bits = reader.get_handle_bits();
-                    e.raw_dwg_data = Some(reader.raw_merged_data());
-                    e.dwg_source_version = Some(document.version);
+                    e.attenuation_type = data.attenuation_type;
+                    e.use_attenuation_limits =
+                        data.use_attenuation_limits;
+                    e.attenuation_start_limit =
+                        data.attenuation_start_limit;
+                    e.attenuation_end_limit = data.attenuation_end_limit;
+                    e.hotspot_angle = data.hotspot_angle;
+                    e.falloff_angle = data.falloff_angle;
+                    e.cast_shadows = data.cast_shadows;
+                    e.shadow_type = data.shadow_type;
+                    e.shadow_map_size = data.shadow_map_size;
+                    e.shadow_map_softness = data.shadow_map_softness;
+                    e.photometric_mode = data.photometric_mode;
+                    e.photometric_data = data.photometric_data;
                     let _ = document.add_entity(EntityType::Light(e));
+                }
+                OBJ_CAMERA
+                | OBJ_SECTIONOBJECT
+                | OBJ_ARCALIGNEDTEXT
+                | OBJ_RTEXT
+                | OBJ_GEOPOSITIONMARKER
+                | OBJ_NAVISWORKSMODEL
+                | OBJ_POINTCLOUD
+                | OBJ_POINTCLOUDEX
+                | OBJ_OLEFRAME
+                | OBJ_PROXY_ENTITY => {
+                    let data = match type_code {
+                        OBJ_CAMERA => entities::read_camera(&mut reader),
+                        OBJ_SECTIONOBJECT => entities::read_section_object(&mut reader),
+                        OBJ_ARCALIGNEDTEXT => entities::read_arc_aligned_text(&mut reader),
+                        OBJ_RTEXT => {
+                            let mut data = entities::read_remote_text(&mut reader);
+                            if let ExtendedEntityData::RemoteText(remote) = &mut data {
+                                remote.style_name =
+                                    maps.style_name(remote.style_handle.value());
+                            }
+                            data
+                        }
+                        OBJ_GEOPOSITIONMARKER => {
+                            let mut marker = entities::read_geo_position_marker(
+                                &mut reader,
+                                self.obj_reader.version(),
+                                self.obj_reader.dxf_version(),
+                            );
+                            marker.data.embedded_mtext = marker
+                                .embedded_mtext
+                                .map(|mtext| {
+                                    mtext_from_data(
+                                        mtext,
+                                        EntityCommon::new(),
+                                        &maps,
+                                    )
+                                });
+                            ExtendedEntityData::GeoPositionMarker(marker.data)
+                        }
+                        OBJ_NAVISWORKSMODEL => {
+                            entities::read_coordination_model(&mut reader)
+                        }
+                        OBJ_POINTCLOUD => entities::read_point_cloud(
+                            &mut reader,
+                            self.obj_reader.version(),
+                            self.obj_reader.dxf_version(),
+                        ),
+                        OBJ_POINTCLOUDEX => entities::read_point_cloud_ex(&mut reader),
+                        OBJ_OLEFRAME => entities::read_ole_frame(
+                            &mut reader,
+                            self.obj_reader.version(),
+                        ),
+                        OBJ_PROXY_ENTITY => entities::read_proxy_entity(
+                            &mut reader,
+                            self.obj_reader.version(),
+                            self.obj_reader.dxf_version(),
+                            entity_common
+                                .graphic_data
+                                .clone()
+                                .unwrap_or_default(),
+                            entity_common.handle.value(),
+                        ),
+                        _ => unreachable!(),
+                    };
+                    let _ = document.add_entity(EntityType::Extended(ExtendedEntity {
+                        common: entity_common,
+                        data,
+                    }));
                 }
                 OBJ_ARC => {
                     let data = entities::read_arc(&mut reader);
@@ -1558,6 +3023,7 @@ impl DwgDocumentBuilder {
                     e.common = entity_common;
                     e.thickness = data.thickness;
                     e.normal = data.normal;
+                    e.is_trace = type_code == OBJ_TRACE;
                     let _ = document.add_entity(EntityType::Solid(e));
                 }
                 OBJ_3DFACE => {
@@ -1596,6 +3062,13 @@ impl DwgDocumentBuilder {
                 // ── Moderate entities ──────────────────────────────
                 OBJ_INSERT => {
                     let data = entities::read_insert(&mut reader, self.obj_reader.version());
+                    let view_rep_handle = class_names
+                        .dxf
+                        .get(&raw_type_code)
+                        .filter(|name| {
+                            name.eq_ignore_ascii_case("ACDBVIEWREPBLOCKREFERENCE")
+                        })
+                        .map(|_| Handle::from(reader.read_handle()));
                     let block_name = maps.block_name(data.block_handle);
                     let mut e = Insert::new(block_name, data.insert_point);
                     e.common = entity_common;
@@ -1604,6 +3077,7 @@ impl DwgDocumentBuilder {
                     e.set_z_scale(data.z_scale);
                     e.rotation = data.rotation;
                     e.normal = data.normal;
+                    e.view_rep_handle = view_rep_handle;
                     let _ = document.add_entity(EntityType::Insert(e));
                 }
                 OBJ_MINSERT => {
@@ -1620,6 +3094,7 @@ impl DwgDocumentBuilder {
                     e.row_count = data.row_count as u16;
                     e.column_spacing = data.column_spacing;
                     e.row_spacing = data.row_spacing;
+                    e.mark_as_minsert();
                     let _ = document.add_entity(EntityType::Insert(e));
                 }
                 OBJ_TABLE => {
@@ -1642,8 +3117,39 @@ impl DwgDocumentBuilder {
                     if data.style_handle != 0 {
                         e.table_style_handle = Some(Handle::from(data.style_handle));
                     }
+                    e.value_flags = data.value_flags;
                     e.columns = data.columns;
                     e.rows = data.rows;
+                    e.name = data.name;
+                    e.description = data.description;
+                    e.field_handles = data.field_handles;
+                    e.base_style = data.base_style;
+                    e.merged_ranges = data.merged_ranges;
+                    e.break_options = BreakOptionFlags::from_bits_retain(
+                        data.break_options as u32,
+                    );
+                    e.break_flow_direction =
+                        BreakFlowDirection::from(data.break_flow_direction as u8);
+                    e.break_spacing = data.break_spacing;
+                    e.break_data = data.break_data;
+                    e.break_ranges = data.break_ranges;
+                    e.dwg_unknown_byte = data.unknown_byte;
+                    e.dwg_unknown_handle =
+                        (data.unknown_handle != 0).then(|| Handle::from(data.unknown_handle));
+                    e.dwg_unknown_long1 = data.unknown_long1;
+                    e.dwg_unknown_long2 = data.unknown_long2;
+                    e.dwg_unknown_short = data.unknown_short;
+                    e.override_flag = data.legacy_style_override.is_some();
+                    e.override_border_color = data.legacy_border_colors.is_some();
+                    e.override_border_line_weight =
+                        data.legacy_border_line_weights.is_some();
+                    e.override_border_visibility =
+                        data.legacy_border_visibility.is_some();
+                    e.legacy_style_override = data.legacy_style_override;
+                    e.legacy_border_colors = data.legacy_border_colors;
+                    e.legacy_border_line_weights =
+                        data.legacy_border_line_weights;
+                    e.legacy_border_visibility = data.legacy_border_visibility;
                     let _ = document.add_entity(EntityType::Table(e));
                 }
                 OBJ_LWPOLYLINE => {
@@ -1658,6 +3164,7 @@ impl DwgDocumentBuilder {
                             start_width: v.start_width,
                             end_width: v.end_width,
                             bulge: v.bulge,
+                            vertex_id: v.vertex_id,
                         })
                         .collect();
                     e.elevation = data.elevation;
@@ -1690,6 +3197,8 @@ impl DwgDocumentBuilder {
                     e.begin_tangent = data.begin_tangent;
                     e.end_tangent = data.end_tangent;
                     e.knot_parameterization = data.knot_param;
+                    e.cv_frame_visible = data.flags1 & 2 != 0;
+                    e.dwg_flags1 = data.flags1;
                     let _ = document.add_entity(EntityType::Spline(e));
                 }
                 OBJ_HELIX => {
@@ -1715,6 +3224,8 @@ impl DwgDocumentBuilder {
                     e.spline.begin_tangent = data.begin_tangent;
                     e.spline.end_tangent = data.end_tangent;
                     e.spline.knot_parameterization = data.knot_param;
+                    e.spline.cv_frame_visible = data.flags1 & 2 != 0;
+                    e.spline.dwg_flags1 = data.flags1;
                     // AcDbHelix parameters follow the spline record.
                     e.major_version = reader.read_bit_long();
                     e.maintenance_version = reader.read_bit_long();
@@ -1771,56 +3282,15 @@ impl DwgDocumentBuilder {
                         self.obj_reader.version(),
                         self.obj_reader.dxf_version(),
                     );
-                    let mut e = MText::new();
-                    e.common = entity_common;
-                    e.value = data.value;
-                    e.insertion_point = data.insertion_point;
-                    e.height = data.height;
-                    e.rectangle_width = data.rectangle_width;
-                    if data.rectangle_height != 0.0 {
-                        e.rectangle_height = Some(data.rectangle_height);
-                    }
-                    e.normal = data.normal;
-                    e.attachment_point = match data.attachment_point {
-                        2 => AttachmentPoint::TopCenter,
-                        3 => AttachmentPoint::TopRight,
-                        4 => AttachmentPoint::MiddleLeft,
-                        5 => AttachmentPoint::MiddleCenter,
-                        6 => AttachmentPoint::MiddleRight,
-                        7 => AttachmentPoint::BottomLeft,
-                        8 => AttachmentPoint::BottomCenter,
-                        9 => AttachmentPoint::BottomRight,
-                        _ => AttachmentPoint::TopLeft,
-                    };
-                    e.drawing_direction = match data.drawing_direction {
-                        2 => DrawingDirection::TopToBottom,
-                        3 => DrawingDirection::ByStyle,
-                        _ => DrawingDirection::LeftToRight,
-                    };
-                    // Compute rotation from x_direction vector
-                    e.rotation = data.x_direction.y.atan2(data.x_direction.x);
-                    e.line_spacing_factor = data.linespacing_factor;
-                    e.line_spacing_style =
-                        crate::entities::LineSpacingStyle::from(data.linespacing_style);
-                    e.background_fill_flags = data.background_flags;
-                    e.background_scale = data.background_scale;
-                    e.background_color = data.background_color;
-                    e.background_transparency = data.background_transparency;
-                    e.is_annotative = data.is_annotative;
-                    e.column_data = MTextColumnData {
-                        column_type: data.column_type,
-                        column_count: data.column_count,
-                        flow_reversed: data.column_flow_reversed,
-                        auto_height: data.column_auto_height,
-                        width: data.column_width,
-                        gutter: data.column_gutter,
-                        heights: data.column_heights,
-                    };
-                    e.style = maps.style_name(data.style_handle);
+                    let e = mtext_from_data(data, entity_common, &maps);
                     let _ = document.add_entity(EntityType::MText(e));
                 }
                 OBJ_LEADER => {
-                    let data = entities::read_leader(&mut reader, self.obj_reader.version());
+                    let data = entities::read_leader(
+                        &mut reader,
+                        self.obj_reader.version(),
+                        self.obj_reader.dxf_version(),
+                    );
                     let mut e = Leader::new();
                     e.common = entity_common;
                     e.vertices = data.vertices;
@@ -1833,13 +3303,29 @@ impl DwgDocumentBuilder {
                     e.creation_type = LeaderCreationType::from_value(data.annotation_type);
                     e.hookline_direction =
                         HooklineDirection::from_value(data.hookline_on_x_dir as i16);
-                    // text_height/text_width only present in DWG for versions < R2010
-                    if !self.obj_reader.version().r2010_plus() {
+                    // R2010+ LEADER records do not carry the annotation box
+                    // height/width. Keep Leader::new()'s semantic defaults
+                    // instead of replacing them with the reader's absence
+                    // sentinel (0.0).
+                    if self.obj_reader.dxf_version() <= crate::types::DxfVersion::AC1021 {
                         e.text_height = data.text_height;
                         e.text_width = data.text_width;
                     }
                     e.block_offset = data.block_offset;
                     e.annotation_offset = data.annotation_offset;
+                    e.origin = data.origin;
+                    e.dimension_gap = data.dimgap;
+                    e.arrowhead_type = data.arrowhead_type;
+                    e.arrow_size = data.dimasz;
+                    e.byblock_color = data.byblock_color;
+                    e.dwg_unknown_bit1 = data.unknown_bit;
+                    e.dwg_unknown_bit2 = data.unknown_bit2;
+                    e.dwg_unknown_bit3 = data.unknown_bit3;
+                    e.dwg_unknown_bit4 = data.unknown_bit4;
+                    e.dwg_unknown_bit5 = data.unknown_bit5;
+                    e.dwg_unknown_short1 = data.unknown_short1;
+                    e.hookline_enabled = self.obj_reader.version().r13_14_only()
+                        && (data.arrowhead_type & 8) != 0;
                     let _ = document.add_entity(EntityType::Leader(e));
                 }
                 OBJ_TOLERANCE => {
@@ -1849,15 +3335,24 @@ impl DwgDocumentBuilder {
                     e.insertion_point = data.insertion_point;
                     e.text = data.text;
                     e.direction = data.direction;
+                    e.normal = data.normal;
                     e.dimension_style_handle = Some(Handle::from(data.dimstyle_handle));
+                    e.dwg_unknown_short = data.unknown_short;
+                    e.text_height = data.text_height;
+                    e.dimension_gap = data.dimgap;
                     let _ = document.add_entity(EntityType::Tolerance(e));
                 }
 
                 // ── Complex entities ───────────────────────────────
-                OBJ_HATCH => {
-                    let data = entities::read_hatch(&mut reader, self.obj_reader.version());
+                OBJ_HATCH | OBJ_MPOLYGON => {
+                    let data = if type_code == OBJ_MPOLYGON {
+                        entities::read_mpolygon(&mut reader, self.obj_reader.version())
+                    } else {
+                        entities::read_hatch(&mut reader, self.obj_reader.version())
+                    };
                     let mut e = Hatch::new();
                     e.common = entity_common;
+                    e.is_mpolygon = data.is_mpolygon;
                     e.elevation = data.elevation;
                     e.normal = data.normal;
                     let mut pat = HatchPattern::new(&data.pattern_name);
@@ -1952,6 +3447,10 @@ impl DwgDocumentBuilder {
                         bp
                     }).collect();
                     e.seed_points = data.seed_points;
+                    e.mpolygon_hatch_color = data.mpolygon_hatch_color;
+                    e.mpolygon_x_direction = data.mpolygon_x_direction;
+                    e.mpolygon_boundary_handle_count =
+                        data.mpolygon_boundary_handle_count;
                     // Map gradient data
                     e.gradient_color.enabled = data.gradient_enabled;
                     e.gradient_color.reserved = data.gradient_reserved;
@@ -2013,7 +3512,9 @@ impl DwgDocumentBuilder {
                         e.grid_major = data.grid_major;
                     }
                     e.status = ViewportStatusFlags::from_bits(data.status_flags);
+                    e.style_sheet = data.style_sheet;
                     e.render_mode = ViewportRenderMode::from_value(data.render_mode as i16);
+                    e.ucs_at_origin = data.ucs_at_origin;
                     e.ucs_per_viewport = data.ucs_per_viewport;
                     e.ucs_origin = data.ucs_origin;
                     e.ucs_x_axis = data.ucs_x_axis;
@@ -2028,6 +3529,7 @@ impl DwgDocumentBuilder {
                         e.default_lighting_type = data.default_lighting_type as i16;
                         e.brightness = data.brightness;
                         e.contrast = data.contrast;
+                        e.ambient_color = data.ambient_color;
                     }
                     // Read frozen layer handles
                     for _ in 0..data.frozen_layer_count {
@@ -2042,6 +3544,38 @@ impl DwgDocumentBuilder {
                     let clip = reader.read_handle();
                     if clip != 0 {
                         e.clip_boundary_handle = Handle::new(clip);
+                    }
+                    // R2000 carries an obsolete viewport-entity-header handle.
+                    if self.obj_reader.version()
+                        == crate::io::dwg::dwg_version::DwgVersion::AC15
+                    {
+                        let _ = reader.read_handle();
+                    }
+                    let ucs = reader.read_handle();
+                    if ucs != 0 {
+                        e.ucs_handle = Handle::new(ucs);
+                    }
+                    let base_ucs = reader.read_handle();
+                    if base_ucs != 0 {
+                        e.base_ucs_handle = Handle::new(base_ucs);
+                    }
+                    if self.obj_reader.version().r2007_plus() {
+                        let background = reader.read_handle();
+                        let visual_style = reader.read_handle();
+                        let shade_plot = reader.read_handle();
+                        let sun = reader.read_handle();
+                        if background != 0 {
+                            e.background_handle = Handle::new(background);
+                        }
+                        if visual_style != 0 {
+                            e.visual_style_handle = Handle::new(visual_style);
+                        }
+                        if shade_plot != 0 {
+                            e.shade_plot_handle = Handle::new(shade_plot);
+                        }
+                        if sun != 0 {
+                            e.sun_handle = Handle::new(sun);
+                        }
                     }
                     let _ = document.add_entity(EntityType::Viewport(e));
                 }
@@ -2145,7 +3679,6 @@ impl DwgDocumentBuilder {
                     dim.second_point = data.second_point;
                     dim.angle_vertex = data.angle_vertex;
                     dim.definition_point = data.definition_point;
-                    dim.base.definition_point = data.definition_point;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Angular2Ln(dim)));
                 }
                 OBJ_DIMENSION_ANG_3PT => {
@@ -2161,7 +3694,6 @@ impl DwgDocumentBuilder {
                     dim.second_point = data.second_point;
                     dim.angle_vertex = data.angle_vertex;
                     dim.definition_point = data.definition_point;
-                    dim.base.definition_point = data.definition_point;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Angular3Pt(dim)));
                 }
                 OBJ_DIMENSION_ORDINATE => {
@@ -2178,8 +3710,45 @@ impl DwgDocumentBuilder {
                     dim.base.common = entity_common;
                     map_dimension_common(&mut dim.base, &data.common, &maps);
                     dim.definition_point = data.definition_point;
-                    dim.base.definition_point = data.definition_point;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Ordinate(dim)));
+                }
+                OBJ_ARC_DIMENSION => {
+                    let data = entities::read_dimension_arc(
+                        &mut reader,
+                        self.obj_reader.version(),
+                        self.obj_reader.dxf_version(),
+                    );
+                    let mut dim = DimensionArc::default();
+                    dim.base.common = entity_common;
+                    map_dimension_common(&mut dim.base, &data.common, &maps);
+                    dim.definition_point = data.definition_point;
+                    dim.first_extension_point = data.first_extension_point;
+                    dim.second_extension_point = data.second_extension_point;
+                    dim.center_point = data.center_point;
+                    dim.is_partial = data.is_partial;
+                    dim.arc_start_parameter = data.arc_start_parameter;
+                    dim.arc_end_parameter = data.arc_end_parameter;
+                    dim.has_leader = data.has_leader;
+                    dim.first_leader_point = data.first_leader_point;
+                    dim.second_leader_point = data.second_leader_point;
+                    let _ = document.add_entity(EntityType::Dimension(Dimension::Arc(dim)));
+                }
+                OBJ_LARGE_RADIAL_DIMENSION => {
+                    let data = entities::read_dimension_large_radial(
+                        &mut reader,
+                        self.obj_reader.version(),
+                        self.obj_reader.dxf_version(),
+                    );
+                    let mut dim = DimensionLargeRadial::default();
+                    dim.base.common = entity_common;
+                    map_dimension_common(&mut dim.base, &data.common, &maps);
+                    dim.definition_point = data.definition_point;
+                    dim.chord_point = data.chord_point;
+                    dim.jog_angle = data.jog_angle;
+                    dim.override_center = data.override_center;
+                    dim.jog_point = data.jog_point;
+                    let _ =
+                        document.add_entity(EntityType::Dimension(Dimension::LargeRadial(dim)));
                 }
 
                 OBJ_MLINE => {
@@ -2200,11 +3769,6 @@ impl DwgDocumentBuilder {
                     if data.style_handle != 0 {
                         let sh = Handle::new(data.style_handle);
                         e.style_handle = Some(sh);
-                        if let Some(crate::objects::ObjectType::MLineStyle(s)) =
-                            document.objects.get(&sh)
-                        {
-                            e.style_name = s.name.clone();
-                        }
                     }
                     // Populate vertices from parsed data
                     e.vertices = data
@@ -2256,12 +3820,14 @@ impl DwgDocumentBuilder {
                     e.edges = data
                         .edges
                         .into_iter()
-                        .map(|(a, b)| MeshEdge {
+                        .enumerate()
+                        .map(|(i, (a, b))| MeshEdge {
                             start: a as usize,
                             end: b as usize,
-                            crease: None,
+                            crease: data.crease_values.get(i).copied().filter(|v| *v != 0.0),
                         })
                         .collect();
+                    e.override_option = data.override_option;
                     let _ = document.add_entity(EntityType::Mesh(e));
                 }
 
@@ -2273,6 +3839,7 @@ impl DwgDocumentBuilder {
                     );
                     let mut e = MultiLeader::new();
                     e.common = entity_common;
+                    e.dwg_version = data.dwg_version;
                     e.context = data.context;
                     e.style_handle = if data.style_handle != 0 {
                         Some(Handle::from(data.style_handle))
@@ -2325,6 +3892,7 @@ impl DwgDocumentBuilder {
                         BlockContentConnectionType::from(data.block_connection_type);
                     e.enable_annotation_scale = data.enable_annotation_scale;
                     e.block_attributes = data.block_attributes;
+                    e.arrowhead_overrides = data.arrowhead_overrides;
                     e.text_direction_negative = data.text_direction_negative;
                     e.text_align_in_ipe = data.text_align_in_ipe;
                     e.text_attachment_point =
@@ -2336,11 +3904,6 @@ impl DwgDocumentBuilder {
                         TextAttachmentType::from(data.text_bottom_attachment);
                     e.text_top_attachment = TextAttachmentType::from(data.text_top_attachment);
                     e.extend_leader_to_text = data.extend_leader_to_text;
-                    // Preserve the raw record for verbatim write-back (native
-                    // MLEADER encoder is not yet byte-exact).
-                    e.dwg_handle_bits = reader.get_handle_bits();
-                    e.raw_dwg_data = Some(reader.raw_merged_data());
-                    e.dwg_source_version = Some(document.version);
                     let _ = document.add_entity(EntityType::MultiLeader(e));
                 }
 
@@ -2395,6 +3958,12 @@ impl DwgDocumentBuilder {
                     e.text_generation_flags = data.text_data.generation;
                     e.field_length = data.field_length;
                     e.lock_position = data.lock_position;
+                    e.mtext_flag = MTextFlag::from_value(data.att_type as i16);
+                    e.is_multiline = data.att_type > 1;
+                    e.line_count = e.default_value.matches("\\P").count() as i16 + 1;
+                    e.embedded_mtext = data.embedded_mtext.map(|mtext| {
+                        Box::new(mtext_from_data(mtext, EntityCommon::default(), &maps))
+                    });
                     let _ = document.add_entity(EntityType::AttributeDefinition(e));
                 }
                 OBJ_ATTRIB => {
@@ -2449,6 +4018,12 @@ impl DwgDocumentBuilder {
                     e.text_generation_flags = data.text_data.generation;
                     e.field_length = data.field_length;
                     e.lock_position = data.lock_position;
+                    e.mtext_flag = MTextFlag::from_value(data.att_type as i16);
+                    e.is_multiline = data.att_type > 1;
+                    e.line_count = e.value.matches("\\P").count() as i16 + 1;
+                    e.embedded_mtext = data.embedded_mtext.map(|mtext| {
+                        Box::new(mtext_from_data(mtext, EntityCommon::default(), &maps))
+                    });
                     // Collect pending — will be attached to parent INSERT
                     // after Pass 2 (owner_handle = INSERT handle).
                     pending_attributes
@@ -2632,12 +4207,14 @@ impl DwgDocumentBuilder {
                     let data = entities::read_ole2frame(&mut reader, self.obj_reader.version());
                     let mut e = Ole2Frame::new();
                     e.common = entity_common;
-                    e.version = data.version;
+                    e.ole_object_type = OleObjectType::from_i16(data.object_type);
                     e.upper_left_corner = data.upper_left;
                     e.lower_right_corner = data.lower_right;
-                    e.binary_data = data.data;
+                    e.storage = data.storage;
+                    e.envelope = data.envelope;
                     e.dwg_mode = data.mode;
-                    e.dwg_trailing_byte = data.trailing_byte;
+                    e.is_paper_space = data.mode == 1;
+                    e.lock_aspect = data.lock_aspect;
                     let _ = document.add_entity(EntityType::Ole2Frame(e));
                 }
 
@@ -2666,6 +4243,7 @@ impl DwgDocumentBuilder {
                         &mut reader,
                         self.obj_reader.version(),
                         self.obj_reader.dxf_version(),
+                        entity_common.has_ds_data,
                     );
                     let mut e = Solid3D::new();
                     e.common = entity_common;
@@ -2678,10 +4256,25 @@ impl DwgDocumentBuilder {
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
                     e.acis_data.revision = data.revision;
-                    // A 3D solid has no insertion point of its own; the file's
-                    // point field is usually zero. Prefer the ACIS placement
-                    // origin so the reference reflects where the body sits.
-                    e.point_of_reference = e.acis_data.placement_origin().unwrap_or(data.point);
+                    e.acis_data.materials = data.materials;
+                    e.acis_data.wireframe_data_present = data.wireframe_data_present;
+                    e.acis_data.wireframe_point_present = data.wireframe_point_present;
+                    e.acis_data.wireframe_isoline_present = data.wireframe_isoline_present;
+                    e.acis_data.acis_empty_bit = data.acis_empty_bit;
+                    e.acis_data.extra_acis_data = data.extra_acis_data.map(Box::new);
+                    e.acis_data.wireframe_isolines = data.isolines;
+                    // The wireframe anchor AutoCAD bakes in (point_present +
+                    // 3BD) is the body's bounding-box centre — the natural
+                    // reference point. Empty/degenerate bodies (no anchor) fall
+                    // back to the geometry centre, then the SAT placement.
+                    e.point_of_reference = if data.point != crate::types::Vector3::ZERO {
+                        data.point
+                    } else {
+                        e.acis_data
+                            .geometry_centre()
+                            .or_else(|| e.acis_data.placement_origin())
+                            .unwrap_or(data.point)
+                    };
                     e.wires = data.wires;
                     e.silhouettes = data.silhouettes;
 
@@ -2693,7 +4286,6 @@ impl DwgDocumentBuilder {
                             e.history_handle = Some(Handle::new(h));
                         }
                     }
-
                     let _ = document.add_entity(EntityType::Solid3D(e));
                 }
                 OBJ_REGION => {
@@ -2701,6 +4293,7 @@ impl DwgDocumentBuilder {
                         &mut reader,
                         self.obj_reader.version(),
                         self.obj_reader.dxf_version(),
+                        entity_common.has_ds_data,
                     );
                     let mut e = Region::new();
                     e.common = entity_common;
@@ -2713,16 +4306,27 @@ impl DwgDocumentBuilder {
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
                     e.acis_data.revision = data.revision;
-                    e.point_of_reference = e.acis_data.placement_origin().unwrap_or(data.point);
+                    e.acis_data.materials = data.materials;
+                    e.acis_data.wireframe_data_present = data.wireframe_data_present;
+                    e.acis_data.wireframe_point_present = data.wireframe_point_present;
+                    e.acis_data.wireframe_isoline_present = data.wireframe_isoline_present;
+                    e.acis_data.acis_empty_bit = data.acis_empty_bit;
+                    e.acis_data.extra_acis_data = data.extra_acis_data.map(Box::new);
+                    e.acis_data.wireframe_isolines = data.isolines;
+                    // The wireframe anchor AutoCAD bakes in (point_present +
+                    // 3BD) is the body's bounding-box centre — the natural
+                    // reference point. Empty/degenerate bodies (no anchor) fall
+                    // back to the geometry centre, then the SAT placement.
+                    e.point_of_reference = if data.point != crate::types::Vector3::ZERO {
+                        data.point
+                    } else {
+                        e.acis_data
+                            .geometry_centre()
+                            .or_else(|| e.acis_data.placement_origin())
+                            .unwrap_or(data.point)
+                    };
                     e.wires = data.wires;
                     e.silhouettes = data.silhouettes;
-                    // REGION R2007+: history_id handle (same slot as 3DSOLID).
-                    if self.obj_reader.version().r2007_plus() {
-                        let h = reader.read_handle();
-                        if h != 0 {
-                            e.history_handle = Some(Handle::new(h));
-                        }
-                    }
                     let _ = document.add_entity(EntityType::Region(e));
                 }
                 OBJ_BODY => {
@@ -2730,6 +4334,7 @@ impl DwgDocumentBuilder {
                         &mut reader,
                         self.obj_reader.version(),
                         self.obj_reader.dxf_version(),
+                        entity_common.has_ds_data,
                     );
                     let mut e = Body::new();
                     e.common = entity_common;
@@ -2742,11 +4347,30 @@ impl DwgDocumentBuilder {
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
                     e.acis_data.revision = data.revision;
-                    e.point_of_reference = e.acis_data.placement_origin().unwrap_or(data.point);
+                    e.acis_data.materials = data.materials;
+                    e.acis_data.wireframe_data_present = data.wireframe_data_present;
+                    e.acis_data.wireframe_point_present = data.wireframe_point_present;
+                    e.acis_data.wireframe_isoline_present = data.wireframe_isoline_present;
+                    e.acis_data.acis_empty_bit = data.acis_empty_bit;
+                    e.acis_data.extra_acis_data = data.extra_acis_data.map(Box::new);
+                    e.acis_data.wireframe_isolines = data.isolines;
+                    // The wireframe anchor AutoCAD bakes in (point_present +
+                    // 3BD) is the body's bounding-box centre — the natural
+                    // reference point. Empty/degenerate bodies (no anchor) fall
+                    // back to the geometry centre, then the SAT placement.
+                    e.point_of_reference = if data.point != crate::types::Vector3::ZERO {
+                        data.point
+                    } else {
+                        e.acis_data
+                            .geometry_centre()
+                            .or_else(|| e.acis_data.placement_origin())
+                            .unwrap_or(data.point)
+                    };
                     e.wires = data.wires;
                     e.silhouettes = data.silhouettes;
-                    // BODY R2007+: history_id handle (same slot as 3DSOLID).
-                    if self.obj_reader.version().r2007_plus() {
+                    if self.obj_reader.version().r2007_plus()
+                        && !e.common.has_ds_data
+                    {
                         let h = reader.read_handle();
                         if h != 0 {
                             e.history_handle = Some(Handle::new(h));
@@ -2767,29 +4391,42 @@ impl DwgDocumentBuilder {
                         OBJ_NURBSURFACE => crate::entities::SurfaceKind::Nurb,
                         _ => crate::entities::SurfaceKind::Generic,
                     };
-                    let data = entities::read_acis_entity(
+                    let data = entities::read_surface(
                         &mut reader,
                         self.obj_reader.version(),
                         self.obj_reader.dxf_version(),
+                        entity_common.has_ds_data,
+                        kind,
                     );
                     let mut e = Surface::new(kind);
                     e.common = entity_common;
-                    e.acis_data.version = if data.is_binary {
+                    e.acis_data.version = if data.acis.is_binary {
                         crate::entities::solid3d::AcisVersion::Version2
                     } else {
                         crate::entities::solid3d::AcisVersion::Version1
                     };
-                    e.acis_data.sat_data = data.sat_data;
-                    e.acis_data.sab_data = data.sab_data;
-                    e.acis_data.is_binary = data.is_binary;
-                    e.acis_data.revision = data.revision;
-                    e.wires = data.wires;
-                    e.silhouettes = data.silhouettes;
-                    // Preserve the raw object verbatim so DWG write-back keeps
-                    // the original surface type (no native surface encoder yet).
-                    e.dwg_handle_bits = reader.get_handle_bits();
-                    e.raw_dwg_data = Some(reader.raw_merged_data());
-                    e.dwg_source_version = Some(document.version);
+                    e.acis_data.sat_data = data.acis.sat_data;
+                    e.acis_data.sab_data = data.acis.sab_data;
+                    e.acis_data.is_binary = data.acis.is_binary;
+                    e.acis_data.revision = data.acis.revision;
+                    e.acis_data.materials = data.acis.materials;
+                    e.acis_data.wireframe_data_present = data.acis.wireframe_data_present;
+                    e.acis_data.wireframe_point_present = data.acis.wireframe_point_present;
+                    e.acis_data.wireframe_isoline_present =
+                        data.acis.wireframe_isoline_present;
+                    e.acis_data.acis_empty_bit = data.acis.acis_empty_bit;
+                    e.acis_data.extra_acis_data =
+                        data.acis.extra_acis_data.map(Box::new);
+                    e.acis_data.wireframe_isolines = data.acis.isolines;
+                    e.wires = data.acis.wires;
+                    e.silhouettes = data.acis.silhouettes;
+                    e.point_of_reference = data.acis.point;
+                    e.modeler_format_version = data.modeler_format_version;
+                    e.u_isolines = data.u_isolines;
+                    e.v_isolines = data.v_isolines;
+                    e.surface_data = data.surface_data;
+                    e.history_handle = (data.history_handle != 0)
+                        .then(|| Handle::from(data.history_handle));
                     let _ = document.add_entity(EntityType::Surface(e));
                 }
 
@@ -2797,26 +4434,133 @@ impl DwgDocumentBuilder {
                 _ => {
                     // Class numbers ≥500 are per-file; resolve the class name so
                     // the model-documentation decodes below are portable.
-                    let cpp_class = document
-                        .classes
-                        .iter()
-                        .find(|c| c.class_number == type_code)
-                        .map(|c| c.cpp_class_name.as_str())
+                    let cpp_class = class_names
+                        .cpp
+                        .get(&type_code)
+                        .map(String::as_str)
                         .unwrap_or("");
                     match cpp_class {
+                        "CAcLayoutPrintConfig" => {
+                            let data = entities::read_layout_print_config(
+                                &mut reader,
+                            );
+                            let _ = document.add_entity(EntityType::Extended(
+                                ExtendedEntity {
+                                    common: entity_common,
+                                    data,
+                                },
+                            ));
+                        }
+                        "mcsDbObjectFormat" => {
+                            let _ = document.add_entity(EntityType::Extended(
+                                ExtendedEntity {
+                                    common: entity_common,
+                                    data: ExtendedEntityData::Format(
+                                        crate::entities::FormatData {
+                                            raw_dwg_data: Some(
+                                                reader.raw_merged_data(),
+                                            ),
+                                            raw_dwg_handle_bits:
+                                                reader.get_handle_bits(),
+                                            raw_dwg_version: Some(
+                                                document.version,
+                                            ),
+                                            raw_dxf_codes: None,
+                                        },
+                                    ),
+                                },
+                            ));
+                        }
+                        "AcDbBlockAngularConstraintParameterEntity" => {
+                            if let Some(data) =
+                                crate::io::dwg::dwg_stream_readers::object_reader::dynamic_block::read_dynamic_block_data(
+                                    &mut reader,
+                                    "BLOCKANGULARCONSTRAINTPARAMETERENTITY",
+                                )
+                            {
+                                let _ = document.add_entity(EntityType::Extended(
+                                    ExtendedEntity {
+                                        common: entity_common,
+                                        data: ExtendedEntityData::DynamicBlock(data),
+                                    },
+                                ));
+                            }
+                        }
+                        name @ (
+                            "AcDbProxyEntityWrapper"
+                            | "PtDbWall"
+                            | "mcsDbObject"
+                            | "mcsDbObjectNotePosition"
+                            | "mcsDbObjectLevelMark"
+                            | "mcsDbObjectRelationMark"
+                        ) => {
+                            let dxf_name = class_names
+                                .dxf
+                                .get(&type_code)
+                                .cloned()
+                                .unwrap_or_else(|| name.to_string());
+                            let (payload, object_ids) =
+                                read_registered_payload(
+                                    &mut reader,
+                                    entity_common.handle.value(),
+                                );
+                            let _ = document.add_entity(EntityType::Extended(
+                                ExtendedEntity {
+                                    common: entity_common,
+                                    data: ExtendedEntityData::RegisteredClass(
+                                        crate::entities::RegisteredClassEntityData {
+                                            dxf_name,
+                                            cpp_class_name: name.to_string(),
+                                            properties: Vec::new(),
+                                            payload,
+                                            object_ids,
+                                        },
+                                    ),
+                                },
+                            ));
+                        }
+                        name @ (
+                            "AcDbBlockAlignmentParameterEntity"
+                            | "AcDbBlockBasepointParameterEntity"
+                            | "AcDbBlockFlipParameterEntity"
+                            | "AcDbBlockLinearParameterEntity"
+                            | "AcDbBlockPointParameterEntity"
+                            | "AcDbBlockRotationParameterEntity"
+                            | "AcDbBlockVisibilityParameterEntity"
+                            | "AcDbBlockFlipGripEntity"
+                            | "AcDbBlockLinearGripEntity"
+                            | "AcDbBlockPolarGripEntity"
+                            | "AcDbBlockRotationGripEntity"
+                            | "AcDbBlockVisibilityGripEntity"
+                            | "AcDbBlockXYGripEntity"
+                            | "AcDbBlockXYParameterEntity"
+                        ) => {
+                            let dxf_name = class_names
+                                .dxf
+                                .get(&type_code)
+                                .cloned()
+                                .unwrap_or_else(|| name.to_string());
+                            if let Some(data) =
+                                crate::objects::DynamicBlockData::empty_entity_from_dxf_name(
+                                    &dxf_name,
+                                )
+                            {
+                                let _ = document.add_entity(EntityType::Extended(
+                                    ExtendedEntity {
+                                        common: entity_common,
+                                        data: ExtendedEntityData::DynamicBlock(data),
+                                    },
+                                ));
+                            }
+                        }
                         // AcDbSectionSymbol ("SECTIONLINE"): decode the section
                         // "A-A" mark for display. The reader is positioned at
                         // the class-specific data (common entity data already
                         // consumed), so the geometry reads cleanly from here.
-                        // The raw bytes still drive verbatim write-back.
                         "AcDbSectionSymbol" => {
                             let mut e = decode_section_symbol(&mut reader)
                                 .unwrap_or_else(SectionSymbol::new);
                             e.common = entity_common;
-                            e.dwg_type_code = type_code;
-                            e.dwg_handle_bits = reader.get_handle_bits();
-                            e.raw_dwg_data = Some(reader.raw_merged_data());
-                            e.dwg_source_version = Some(document.version);
                             let _ = document.add_entity(EntityType::SectionSymbol(e));
                         }
                         // AcDbViewBorder ("DRAWINGVIEW"): the view's paper
@@ -2828,39 +4572,37 @@ impl DwgDocumentBuilder {
                             let mut e = ViewBorder::new();
                             e.common = entity_common;
                             e.active_viewport = Handle::from(reader.read_handle());
-                            // Paper placement: a version BL then a raw-double
-                            // run — rectangle min/max corners, the view scale
-                            // denominator, a reserved zero, and the view centre
-                            // (redundantly the rectangle midpoint, which
-                            // cross-validates the corner reads).
-                            let _ver = reader.read_bit_long();
-                            let min_x = reader.read_raw_double();
-                            let min_y = reader.read_raw_double();
-                            let max_x = reader.read_raw_double();
-                            let max_y = reader.read_raw_double();
-                            let scale = reader.read_raw_double();
-                            let _reserved = reader.read_raw_double();
-                            let cx = reader.read_raw_double();
-                            let cy = reader.read_raw_double();
-                            let all = [min_x, min_y, max_x, max_y, scale, cx, cy];
-                            if all.iter().all(|v| v.is_finite() && v.abs() < 1.0e9)
-                                && min_x < max_x
-                                && min_y < max_y
-                            {
-                                e.min = [min_x, min_y];
-                                e.max = [max_x, max_y];
-                                e.center = [cx, cy];
-                                e.scale = scale;
-                            }
-                            e.dwg_type_code = type_code;
-                            e.dwg_handle_bits = reader.get_handle_bits();
-                            e.raw_dwg_data = Some(reader.raw_merged_data());
-                            e.dwg_source_version = Some(document.version);
+                            e.scale_handle = Handle::from(reader.read_handle());
+                            e.version = reader.read_bit_short();
+                            e.min = [
+                                reader.read_raw_double(),
+                                reader.read_raw_double(),
+                            ];
+                            e.max = [
+                                reader.read_raw_double(),
+                                reader.read_raw_double(),
+                            ];
+                            e.scale = reader.read_raw_double();
+                            e.rotation_angle = reader.read_raw_double();
+                            e.center = [
+                                reader.read_raw_double(),
+                                reader.read_raw_double(),
+                            ];
                             let _ = document.add_entity(EntityType::ViewBorder(e));
                         }
                         _ => {
-                            let mut e =
-                                UnknownEntity::new(format!("DWG_TYPE_{}", type_code));
+                            // Keep the class's real DXF name (e.g. an AEC
+                            // object's "AEC_WALL") so the entity reports its
+                            // actual type instead of a numeric placeholder;
+                            // fall back to DWG_TYPE_<code> for an unresolved
+                            // class.
+                            let name = class_names
+                                .dxf
+                                .get(&type_code)
+                                .cloned()
+                                .filter(|n| !n.is_empty())
+                                .unwrap_or_else(|| format!("DWG_TYPE_{}", type_code));
+                            let mut e = UnknownEntity::new(name);
                             e.common = entity_common;
                             e.dwg_type_code = type_code;
                             e.dwg_handle_bits = reader.get_handle_bits();
@@ -2904,6 +4646,53 @@ impl DwgDocumentBuilder {
             }
 
             match type_code {
+                OBJ_DUMMY | OBJ_OBJECT_PTR => {
+                    let data = if type_code == OBJ_DUMMY {
+                        crate::objects::DataObjectData::Dummy
+                    } else {
+                        crate::objects::DataObjectData::ObjectPointer
+                    };
+                    document.objects.insert(
+                        Handle::from(handle),
+                        crate::objects::ObjectType::DataObject(
+                            crate::objects::DataObject {
+                                handle: Handle::from(handle),
+                                owner: owner_handle,
+                                reactors: non_entity_data
+                                    .reactors
+                                    .iter()
+                                    .copied()
+                                    .map(Handle::from)
+                                    .collect(),
+                                xdictionary_handle: non_entity_data
+                                    .xdictionary_handle
+                                    .map(Handle::from),
+                                data,
+                            },
+                        ),
+                    );
+                }
+                OBJ_LONG_TRANSACTION => {
+                    document.objects.insert(
+                        Handle::from(handle),
+                        crate::objects::ObjectType::DataObject(
+                            crate::objects::DataObject {
+                                handle: Handle::from(handle),
+                                owner: owner_handle,
+                                reactors: non_entity_data
+                                    .reactors
+                                    .iter()
+                                    .copied()
+                                    .map(Handle::from)
+                                    .collect(),
+                                xdictionary_handle: non_entity_data
+                                    .xdictionary_handle
+                                    .map(Handle::from),
+                                data: crate::objects::DataObjectData::LongTransaction,
+                            },
+                        ),
+                    );
+                }
                 OBJ_DICTIONARY => {
                     let data = objects::read_dictionary(&mut reader, self.obj_reader.version());
                     let mut obj = crate::objects::Dictionary::new();
@@ -2920,10 +4709,7 @@ impl DwgDocumentBuilder {
                     );
                 }
                 OBJ_DICTIONARYWDFLT => {
-                    let data = objects::read_dictionary_with_default(
-                        &mut reader,
-                        self.obj_reader.version(),
-                    );
+                    let data = objects::read_dictionary_with_default(&mut reader);
                     let mut obj = crate::objects::DictionaryWithDefault::new();
                     obj.handle = Handle::from(handle);
                     obj.owner = owner_handle;
@@ -2954,6 +4740,15 @@ impl DwgDocumentBuilder {
                     let mut obj = crate::objects::Layout::new(&data.name);
                     obj.handle = Handle::from(handle);
                     obj.owner = owner_handle;
+                    obj.reactors = non_entity_data
+                        .reactors
+                        .iter()
+                        .copied()
+                        .map(Handle::from)
+                        .collect();
+                    obj.xdictionary_handle = non_entity_data
+                        .xdictionary_handle
+                        .map(Handle::from);
                     obj.flags = data.flags;
                     obj.tab_order = data.tab_order as i16;
                     obj.min_limits = data.min_limits;
@@ -2972,10 +4767,22 @@ impl DwgDocumentBuilder {
                     obj.ucs_ortho_type = data.ucs_ortho_type;
                     obj.block_record = Handle::from(data.block_record_handle);
                     obj.viewport = Handle::from(data.viewport_handle);
+                    obj.base_ucs = Handle::from(data.base_ucs_handle);
+                    obj.named_ucs = Handle::from(data.named_ucs_handle);
+                    obj.viewports = data
+                        .viewport_handles
+                        .iter()
+                        .copied()
+                        .map(Handle::from)
+                        .collect();
                     obj.paper_width = data.plot_settings.paper_width;
                     obj.paper_height = data.plot_settings.paper_height;
                     obj.plot_rotation = data.plot_settings.rotation;
                     let ps = &data.plot_settings;
+                    obj.plot_flags =
+                        crate::objects::PlotFlags::from_bits(
+                            ps.plot_flags as i32,
+                        );
                     obj.plot_page_name = ps.page_name.clone();
                     obj.plot_printer_name = ps.printer_name.clone();
                     obj.paper_size = ps.paper_size.clone();
@@ -3002,6 +4809,19 @@ impl DwgDocumentBuilder {
                     obj.shade_plot_mode = ps.shade_plot_mode;
                     obj.shade_plot_resolution = ps.shade_plot_resolution;
                     obj.shade_plot_dpi = ps.shade_plot_dpi;
+                    obj.plot_view_handle =
+                        Handle::from(ps.plot_view_handle);
+                    if obj.plot_view_name.is_empty()
+                        && !obj.plot_view_handle.is_null()
+                    {
+                        if let Some(name) =
+                            maps.views.get(&obj.plot_view_handle.value())
+                        {
+                            obj.plot_view_name = name.clone();
+                        }
+                    }
+                    obj.visual_style_handle =
+                        Handle::from(ps.visual_style_handle);
                     document.objects.insert(
                         Handle::from(handle),
                         crate::objects::ObjectType::Layout(obj),
@@ -3013,6 +4833,7 @@ impl DwgDocumentBuilder {
                     obj.handle = Handle::from(handle);
                     obj.owner = owner_handle;
                     obj.description = data.description;
+                    obj.unnamed = data.unnamed != 0;
                     obj.selectable = data.selectable;
                     for eh in data.entity_handles {
                         obj.entities.push(Handle::from(eh));
@@ -3064,8 +4885,18 @@ impl DwgDocumentBuilder {
                                     .cloned()
                                     .unwrap_or_else(|| "BYLAYER".to_string())
                             } else {
-                                // Pre-R2018: linetype index (0 = BYLAYER)
-                                "BYLAYER".to_string()
+                                // Pre-R2018: a bit_short index into the linetypes
+                                // in table order (ByBlock/ByLayer excluded);
+                                // 0x7FFF means ByLayer.
+                                let idx = e.linetype_index_or_handle;
+                                if idx == 0x7FFF {
+                                    "ByLayer".to_string()
+                                } else {
+                                    maps.linetype_order
+                                        .get(idx as usize)
+                                        .cloned()
+                                        .unwrap_or_else(|| "BYLAYER".to_string())
+                                }
                             };
                             crate::objects::MLineStyleElement::full(e.offset, e.color, linetype)
                         })
@@ -3080,9 +4911,24 @@ impl DwgDocumentBuilder {
                     let mut obj = crate::objects::XRecord::new();
                     obj.handle = Handle::from(handle);
                     obj.owner = owner_handle;
+                    obj.reactors = non_entity_data
+                        .reactors
+                        .iter()
+                        .copied()
+                        .map(Handle::from)
+                        .collect();
+                    obj.xdictionary_handle =
+                        non_entity_data.xdictionary_handle.map(Handle::from);
                     obj.cloning_flags =
                         crate::objects::DictionaryCloningFlags::from_value(data.cloning_flags);
+                    obj.entries = data.entries;
+                    obj.object_references = data.object_references;
+                    obj.preserve_object_reference_stream = true;
+                    obj.entries_complete = data.entries_complete;
                     obj.raw_data = data.raw_data;
+                    obj.raw_dwg_data = Some(reader.raw_merged_data());
+                    obj.raw_dwg_handle_bits = reader.get_handle_bits();
+                    obj.raw_dwg_version = Some(document.version);
                     document.objects.insert(
                         Handle::from(handle),
                         crate::objects::ObjectType::XRecord(obj),
@@ -3094,6 +4940,15 @@ impl DwgDocumentBuilder {
                     let mut obj = crate::objects::PlotSettings::new(&data.page_name);
                     obj.handle = Handle::from(handle);
                     obj.owner = owner_handle;
+                    obj.reactors = non_entity_data
+                        .reactors
+                        .iter()
+                        .copied()
+                        .map(Handle::from)
+                        .collect();
+                    obj.xdictionary_handle = non_entity_data
+                        .xdictionary_handle
+                        .map(Handle::from);
                     obj.printer_name = data.printer_name;
                     obj.paper_size = data.paper_size;
                     obj.plot_view_name = data.plot_view_name;
@@ -3127,6 +4982,22 @@ impl DwgDocumentBuilder {
                     );
                     obj.shade_plot_dpi = data.shade_plot_dpi;
                     obj.flags = crate::objects::PlotFlags::from_bits(data.plot_flags as i32);
+                    obj.standard_scale_factor = data.scale_factor;
+                    obj.paper_image_origin_x = data.paper_image_x;
+                    obj.paper_image_origin_y = data.paper_image_y;
+                    obj.plot_view_handle =
+                        Handle::from(data.plot_view_handle);
+                    if obj.plot_view_name.is_empty()
+                        && !obj.plot_view_handle.is_null()
+                    {
+                        if let Some(name) =
+                            maps.views.get(&obj.plot_view_handle.value())
+                        {
+                            obj.plot_view_name = name.clone();
+                        }
+                    }
+                    obj.visual_style_handle =
+                        Handle::from(data.visual_style_handle);
                     document.objects.insert(
                         Handle::from(handle),
                         crate::objects::ObjectType::PlotSettings(obj),
@@ -3320,6 +5191,7 @@ impl DwgDocumentBuilder {
                     let obj = crate::objects::BookColor {
                         handle: Handle::from(handle),
                         owner: owner_handle,
+                        color: data.color,
                         color_name: data.color_name,
                         book_name: data.book_name,
                     };
@@ -3351,16 +5223,294 @@ impl DwgDocumentBuilder {
                         crate::objects::ObjectType::WipeoutVariables(obj),
                     );
                 }
+                OBJ_VBA_PROJECT => {
+                    if let Some(data) =
+                        crate::io::dwg::dwg_stream_readers::object_reader::class_object::read_class_object_data(
+                            &mut reader,
+                            "VBA_PROJECT",
+                            self.obj_reader.version(),
+                            self.obj_reader.dxf_version(),
+                        )
+                    {
+                        document.objects.insert(
+                            Handle::from(handle),
+                            crate::objects::ObjectType::ClassObject(
+                                crate::objects::ClassObject {
+                                    handle: Handle::from(handle),
+                                    owner: owner_handle,
+                                    reactors: non_entity_data
+                                        .reactors
+                                        .iter()
+                                        .copied()
+                                        .map(Handle::from)
+                                        .collect(),
+                                    xdictionary_handle: non_entity_data
+                                        .xdictionary_handle
+                                        .map(Handle::from),
+                                    data,
+                                },
+                            ),
+                        );
+                    }
+                }
+                OBJ_PROXY_OBJECT => {
+                    let class_id = reader.read_bit_long();
+                    let dxf_subclass = if self.obj_reader.dxf_version()
+                        > crate::types::DxfVersion::AC1015
+                    {
+                        reader.read_variable_text()
+                    } else {
+                        String::new()
+                    };
+                    let (version, dwg_version, maintenance_version) = if self
+                        .obj_reader
+                        .version()
+                        .r2018_plus(self.obj_reader.dxf_version())
+                    {
+                        let dwg_version = reader.read_bit_long();
+                        let maintenance_version = reader.read_bit_long();
+                        (
+                            (maintenance_version << 16)
+                                | (dwg_version & 0xffff),
+                            dwg_version,
+                            maintenance_version,
+                        )
+                    } else {
+                        let version = reader.read_bit_long();
+                        (version, version & 0xffff, version >> 16)
+                    };
+                    let from_dxf = if self.obj_reader.version().r2000_plus() {
+                        reader.read_bit()
+                    } else {
+                        false
+                    };
+                    let object_data_bits = reader.main_remaining_bits() as u32;
+                    let mut object_data =
+                        vec![0u8; object_data_bits.div_ceil(8) as usize];
+                    for bit_index in 0..object_data_bits as usize {
+                        if reader.read_bit() {
+                            object_data[bit_index / 8] |=
+                                0x80 >> (bit_index % 8);
+                        }
+                    }
+                    let text_data_bits =
+                        reader.text_remaining_bits() as u32;
+                    let mut text_data =
+                        vec![0u8; text_data_bits.div_ceil(8) as usize];
+                    for bit_index in 0..text_data_bits as usize {
+                        if reader.read_text_bit() {
+                            text_data[bit_index / 8] |=
+                                0x80 >> (bit_index % 8);
+                        }
+                    }
+                    let mut object_ids = Vec::new();
+                    while reader.handle_remaining_bits() >= 8 {
+                        let (value, reference_type) =
+                            reader.read_handle_reference(handle);
+                        let kind = match reference_type {
+                            crate::io::dwg::dwg_reference_type::DwgReferenceType::SoftOwnership => {
+                                crate::objects::ProxyReferenceKind::SoftOwnership
+                            }
+                            crate::io::dwg::dwg_reference_type::DwgReferenceType::HardOwnership => {
+                                crate::objects::ProxyReferenceKind::HardOwnership
+                            }
+                            crate::io::dwg::dwg_reference_type::DwgReferenceType::SoftPointer => {
+                                crate::objects::ProxyReferenceKind::SoftPointer
+                            }
+                            crate::io::dwg::dwg_reference_type::DwgReferenceType::HardPointer => {
+                                crate::objects::ProxyReferenceKind::HardPointer
+                            }
+                            crate::io::dwg::dwg_reference_type::DwgReferenceType::Undefined => {
+                                crate::objects::ProxyReferenceKind::Undefined
+                            }
+                        };
+                        object_ids.push(crate::objects::ProxyObjectReference {
+                            handle: Handle::from(value),
+                            kind,
+                        });
+                    }
+                    let payload =
+                        crate::objects::ProxyPayload::from_bits(
+                            &object_data,
+                            object_data_bits,
+                        );
+                    let object_type = if let Some(envelope) =
+                        crate::objects::semantic_property::decode_registered_class_envelope(
+                            &payload,
+                        )
+                    {
+                        crate::objects::ObjectType::RegisteredClass(
+                            crate::objects::RegisteredClassObject {
+                                handle: Handle::from(handle),
+                                owner: owner_handle,
+                                reactors: non_entity_data
+                                    .reactors
+                                    .iter()
+                                    .copied()
+                                    .map(Handle::from)
+                                    .collect(),
+                                xdictionary_handle: non_entity_data
+                                    .xdictionary_handle
+                                    .map(Handle::from),
+                                dxf_name: envelope.dxf_name,
+                                cpp_class_name: envelope.cpp_class_name,
+                                properties: envelope.properties,
+                                payload: envelope.payload,
+                                object_ids,
+                            },
+                        )
+                    } else {
+                        crate::objects::ObjectType::ProxyObject(
+                            crate::objects::ProxyObject {
+                                handle: Handle::from(handle),
+                                owner: owner_handle,
+                                reactors: non_entity_data
+                                    .reactors
+                                    .iter()
+                                    .copied()
+                                    .map(Handle::from)
+                                    .collect(),
+                                xdictionary_handle: non_entity_data
+                                    .xdictionary_handle
+                                    .map(Handle::from),
+                                proxy_id: 499,
+                                class_id,
+                                dxf_subclass,
+                                version,
+                                dwg_version,
+                                maintenance_version,
+                                from_dxf,
+                                payload,
+                                text_payload:
+                                    crate::objects::ProxyPayload::from_bits(
+                                        &text_data,
+                                        text_data_bits,
+                                    ),
+                                object_ids,
+                            },
+                        )
+                    };
+                    document.objects.insert(
+                        Handle::from(handle),
+                        object_type,
+                    );
+                }
+                OBJ_VISUALSTYLE => {
+                    let mut obj = objects::read_visual_style(
+                        &mut reader,
+                        self.obj_reader.version(),
+                        self.obj_reader.dxf_version(),
+                    );
+                    obj.handle = Handle::from(handle);
+                    obj.owner = owner_handle;
+                    obj.reactors = non_entity_data
+                        .reactors
+                        .iter()
+                        .copied()
+                        .map(Handle::from)
+                        .collect();
+                    obj.xdictionary_handle = non_entity_data
+                        .xdictionary_handle
+                        .map(Handle::from);
+                    document.objects.insert(
+                        Handle::from(handle),
+                        crate::objects::ObjectType::VisualStyle(obj),
+                    );
+                }
+                OBJ_MATERIAL => {
+                    let mut obj =
+                        objects::read_material(&mut reader, self.obj_reader.version());
+                    obj.handle = Handle::from(handle);
+                    obj.owner = owner_handle;
+                    obj.reactors = non_entity_data
+                        .reactors
+                        .iter()
+                        .copied()
+                        .map(Handle::from)
+                        .collect();
+                    obj.xdictionary_handle = non_entity_data
+                        .xdictionary_handle
+                        .map(Handle::from);
+                    document.objects.insert(
+                        Handle::from(handle),
+                        crate::objects::ObjectType::Material(obj),
+                    );
+                }
+                OBJ_TABLECONTENT => {
+                    let (
+                        name,
+                        description,
+                        columns,
+                        rows,
+                        field_handles,
+                        base_style,
+                        merged_ranges,
+                        style_handle,
+                    ) = entities::read_table_content(
+                        &mut reader,
+                        self.obj_reader.version(),
+                    );
+                    let mut obj = crate::entities::Table::new(
+                        crate::types::Vector3::ZERO,
+                        0,
+                        0,
+                    );
+                    obj.common.handle = Handle::from(handle);
+                    obj.common.owner_handle = owner_handle;
+                    obj.common.reactors = non_entity_data
+                        .reactors
+                        .iter()
+                        .copied()
+                        .map(Handle::from)
+                        .collect();
+                    obj.common.xdictionary_handle = non_entity_data
+                        .xdictionary_handle
+                        .map(Handle::from);
+                    obj.name = name;
+                    obj.description = description;
+                    obj.columns = columns;
+                    obj.rows = rows;
+                    obj.field_handles = field_handles;
+                    obj.base_style = base_style;
+                    obj.merged_ranges = merged_ranges;
+                    obj.table_style_handle = (style_handle != 0)
+                        .then(|| Handle::from(style_handle));
+                    document.objects.insert(
+                        Handle::from(handle),
+                        crate::objects::ObjectType::TableContent(obj),
+                    );
+                }
+                OBJ_TABLESTYLE => {
+                    let mut obj =
+                        objects::read_table_style(&mut reader, self.obj_reader.version());
+                    obj.handle = Handle::from(handle);
+                    obj.owner_handle = owner_handle;
+                    document.objects.insert(
+                        Handle::from(handle),
+                        crate::objects::ObjectType::TableStyle(obj),
+                    );
+                }
                 OBJ_GEODATA => {
                     let data = objects::read_geodata(&mut reader);
                     let mut obj = crate::objects::GeoData::new();
                     obj.handle = Handle::from(handle);
                     obj.owner = owner_handle;
+                    obj.reactors = non_entity_data
+                        .reactors
+                        .iter()
+                        .copied()
+                        .map(Handle::from)
+                        .collect();
+                    obj.xdictionary_handle = non_entity_data
+                        .xdictionary_handle
+                        .map(Handle::from);
                     obj.version = data.version;
                     obj.host_block = Handle::from(data.host_block);
                     obj.coordinate_type = data.coordinate_type;
                     obj.design_point = data.design_point;
                     obj.reference_point = data.reference_point;
+                    obj.obsolete_observation_point = data.obsolete_observation_point;
+                    obj.obsolete_scale_vector = data.obsolete_scale_vector;
                     obj.north_direction = data.north_direction;
                     obj.up_direction = data.up_direction;
                     obj.horizontal_unit_scale = data.horizontal_unit_scale;
@@ -3373,10 +5523,41 @@ impl DwgDocumentBuilder {
                     obj.sea_level_elevation = data.sea_level_elevation;
                     obj.coordinate_projection_radius = data.coordinate_projection_radius;
                     obj.coordinate_system_definition = data.coordinate_system_definition;
+                    obj.coordinate_system_datum = data.coordinate_system_datum;
+                    obj.coordinate_system_wkt = data.coordinate_system_wkt;
                     obj.geo_rss_tag = data.geo_rss_tag;
                     obj.observation_from_tag = data.observation_from_tag;
                     obj.observation_to_tag = data.observation_to_tag;
                     obj.observation_coverage_tag = data.observation_coverage_tag;
+                    obj.mesh_points = data
+                        .mesh_points
+                        .into_iter()
+                        .map(|(source, destination)| crate::objects::GeoDataMeshPoint {
+                            source,
+                            destination,
+                        })
+                        .collect();
+                    obj.mesh_faces = data
+                        .mesh_faces
+                        .into_iter()
+                        .map(|(first, second, third)| crate::objects::GeoDataMeshFace {
+                            first,
+                            second,
+                            third,
+                        })
+                        .collect();
+                    obj.civil_data_present = data.civil_data_present;
+                    obj.civil_obsolete_flag = data.civil_obsolete_flag;
+                    obj.civil_reference_point1 = data.civil_reference_point1;
+                    obj.civil_reference_point2 = data.civil_reference_point2;
+                    obj.civil_unknown1 = data.civil_unknown1;
+                    obj.civil_unknown2 = data.civil_unknown2;
+                    obj.civil_unknown_flag1 = data.civil_unknown_flag1;
+                    obj.civil_zero_point1 = data.civil_zero_point1;
+                    obj.civil_zero_point2 = data.civil_zero_point2;
+                    obj.civil_unknown_flag2 = data.civil_unknown_flag2;
+                    obj.civil_north_angle_degrees = data.civil_north_angle_degrees;
+                    obj.civil_north_angle_radians = data.civil_north_angle_radians;
                     document.objects.insert(
                         Handle::from(handle),
                         crate::objects::ObjectType::GeoData(obj),
@@ -3402,83 +5583,86 @@ impl DwgDocumentBuilder {
                     );
                 }
                 OBJ_BLOCKVISIBILITYPARAMETER => {
-                    // Parse the visibility states into the side map, then still
-                    // store the object verbatim as Unknown so DWG round-trip is
-                    // byte-exact (no typed writer needed).
                     let mut param = objects::read_block_visibility_parameter(&mut reader);
                     param.handle = Handle::from(handle);
                     param.owner = owner_handle;
                     document
                         .block_visibility_params
-                        .insert(Handle::from(handle), param);
-
-                    let type_name = Self::unknown_object_type_name(document, raw_type_code);
-                    let raw_handle_bits = reader.get_handle_bits();
-                    let raw_data = reader.raw_merged_data();
+                        .insert(Handle::from(handle), param.clone());
                     document.objects.insert(
                         Handle::from(handle),
-                        crate::objects::ObjectType::Unknown {
-                            type_name,
-                            handle: Handle::from(handle),
-                            owner: owner_handle,
-                            raw_dxf_codes: None,
-                            raw_dwg_data: Some(raw_data),
-                            raw_dwg_handle_bits: raw_handle_bits,
-                            raw_dwg_version: Some(document.version),
-                        },
+                        crate::objects::ObjectType::BlockVisibilityParameter(param),
                     );
                 }
                 OBJ_BLOCKREPRESENTATIONDATA => {
-                    let block = objects::read_block_representation_data(&mut reader);
+                    let flags = reader.read_bit_short();
+                    let block = Handle::from(reader.read_handle());
                     document
                         .block_representations
                         .insert(Handle::from(handle), block);
-
-                    let type_name = Self::unknown_object_type_name(document, raw_type_code);
-                    let raw_handle_bits = reader.get_handle_bits();
-                    let raw_data = reader.raw_merged_data();
                     document.objects.insert(
                         Handle::from(handle),
-                        crate::objects::ObjectType::Unknown {
-                            type_name,
-                            handle: Handle::from(handle),
-                            owner: owner_handle,
-                            raw_dxf_codes: None,
-                            raw_dwg_data: Some(raw_data),
-                            raw_dwg_handle_bits: raw_handle_bits,
-                            raw_dwg_version: Some(document.version),
-                        },
+                        crate::objects::ObjectType::DynamicBlock(
+                            crate::objects::DynamicBlockObject {
+                                handle: Handle::from(handle),
+                                owner: owner_handle,
+                                reactors: non_entity_data
+                                    .reactors
+                                    .iter()
+                                    .copied()
+                                    .map(Handle::from)
+                                    .collect(),
+                                xdictionary_handle: non_entity_data
+                                    .xdictionary_handle
+                                    .map(Handle::from),
+                                dxf_name:
+                                    "ACDB_BLOCKREPRESENTATION_DATA".to_string(),
+                                cpp_class_name:
+                                    "AcDbBlockRepresentationData".to_string(),
+                                data:
+                                    crate::objects::DynamicBlockData::Representation(
+                                        crate::objects::BlockRepresentationData {
+                                            flags,
+                                            block,
+                                        },
+                                    ),
+                            },
+                        ),
                     );
                 }
                 OBJ_FIELD => {
-                    // Decode the evaluator id + field-code + referenced-object
-                    // handles into the side map; keep the object verbatim as
-                    // Unknown for round-trip.
-                    let data = objects::read_field(&mut reader);
+                    let mut data =
+                        crate::io::dwg::dwg_stream_readers::object_reader::field::read_field_object(
+                            &mut reader,
+                            self.obj_reader.version(),
+                        );
+                    data.handle = Handle::from(handle);
+                    data.owner = owner_handle;
                     document.fields.insert(
                         Handle::from(handle),
                         crate::document::FieldDef {
                             handle: Handle::from(handle),
                             owner: owner_handle,
-                            evaluator: data.id,
-                            code: data.code,
-                            objects: data.objects.into_iter().map(Handle::from).collect(),
+                            evaluator: data.evaluator_id.clone(),
+                            code: data.code.clone(),
+                            objects: data.referenced_objects.clone(),
                         },
                     );
-                    let type_name = Self::unknown_object_type_name(document, raw_type_code);
-                    let raw_handle_bits = reader.get_handle_bits();
-                    let raw_data = reader.raw_merged_data();
                     document.objects.insert(
                         Handle::from(handle),
-                        crate::objects::ObjectType::Unknown {
-                            type_name,
-                            handle: Handle::from(handle),
-                            owner: owner_handle,
-                            raw_dxf_codes: None,
-                            raw_dwg_data: Some(raw_data),
-                            raw_dwg_handle_bits: raw_handle_bits,
-                            raw_dwg_version: Some(document.version),
-                        },
+                        crate::objects::ObjectType::Field(data),
+                    );
+                }
+                OBJ_FIELDLIST => {
+                    let mut data =
+                        crate::io::dwg::dwg_stream_readers::object_reader::field::read_field_list(
+                            &mut reader,
+                        );
+                    data.handle = Handle::from(handle);
+                    data.owner = owner_handle;
+                    document.objects.insert(
+                        Handle::from(handle),
+                        crate::objects::ObjectType::FieldList(data),
                     );
                 }
                 _ => {
@@ -3490,22 +5674,363 @@ impl DwgDocumentBuilder {
                     // and raw_merged_data()/get_handle_bits() snapshot the whole
                     // object independent of either cursor — so we can decode the
                     // fields we understand AND still capture the verbatim record.
-                    let class_name: Option<String> = document
-                        .classes
-                        .iter()
-                        .find(|c| c.class_number == type_code)
-                        .map(|c| c.dxf_name.to_uppercase());
+                    let class_name = class_names
+                        .dxf
+                        .get(&type_code)
+                        .map(|name| name.to_uppercase());
+                    if let Some(dxf_name) = class_name.as_deref() {
+                        if crate::objects::is_associative_object_name(dxf_name) {
+                            if let Some(data) =
+                                crate::io::dwg::dwg_stream_readers::object_reader::associative::read_associative_data(
+                                    &mut reader,
+                                    dxf_name,
+                                    self.obj_reader.version(),
+                                    document.version,
+                                )
+                            {
+                                let cpp_class_name = class_names
+                                    .cpp
+                                    .get(&type_code)
+                                    .cloned()
+                                    .or_else(|| {
+                                        crate::objects::associative_cpp_class_name(dxf_name)
+                                            .map(str::to_string)
+                                    })
+                                    .unwrap_or_default();
+                                document.objects.insert(
+                                    Handle::from(handle),
+                                    crate::objects::ObjectType::Associative(
+                                        crate::objects::AssociativeObject {
+                                            handle: Handle::from(handle),
+                                            owner: owner_handle,
+                                            reactors: non_entity_data
+                                                .reactors
+                                                .iter()
+                                                .map(|&value| Handle::from(value))
+                                                .collect(),
+                                            xdictionary_handle: non_entity_data
+                                                .xdictionary_handle
+                                                .map(Handle::from),
+                                            dxf_name: dxf_name.to_string(),
+                                            cpp_class_name,
+                                            data,
+                                            source_version: Some(document.version),
+                                        },
+                                    ),
+                                );
+                                return;
+                            }
+                        }
+                        if let Some(data) =
+                            crate::io::dwg::dwg_stream_readers::object_reader::data_objects::read_data_object_data(
+                                &mut reader,
+                                dxf_name,
+                            )
+                        {
+                            document.objects.insert(
+                                Handle::from(handle),
+                                crate::objects::ObjectType::DataObject(
+                                    crate::objects::DataObject {
+                                        handle: Handle::from(handle),
+                                        owner: owner_handle,
+                                        reactors: non_entity_data
+                                            .reactors
+                                            .iter()
+                                            .copied()
+                                            .map(Handle::from)
+                                            .collect(),
+                                        xdictionary_handle: non_entity_data
+                                            .xdictionary_handle
+                                            .map(Handle::from),
+                                        data,
+                                    },
+                                ),
+                            );
+                            return;
+                        }
+                        if let Some(data) =
+                            crate::io::dwg::dwg_stream_readers::object_reader::dynamic_block::read_dynamic_block_data(
+                                &mut reader,
+                                dxf_name,
+                            )
+                        {
+                            let cpp_class_name = class_names
+                                .cpp
+                                .get(&type_code)
+                                .cloned()
+                                .unwrap_or_default();
+                            document.objects.insert(
+                                Handle::from(handle),
+                                crate::objects::ObjectType::DynamicBlock(
+                                    crate::objects::DynamicBlockObject {
+                                        handle: Handle::from(handle),
+                                        owner: owner_handle,
+                                        reactors: non_entity_data
+                                            .reactors
+                                            .iter()
+                                            .copied()
+                                            .map(Handle::from)
+                                            .collect(),
+                                        xdictionary_handle: non_entity_data
+                                            .xdictionary_handle
+                                            .map(Handle::from),
+                                        dxf_name: dxf_name.to_string(),
+                                        cpp_class_name,
+                                        data,
+                                    },
+                                ),
+                            );
+                            return;
+                        }
+                        if let Ok(dwg_version) =
+                            crate::io::dwg::dwg_version::DwgVersion::from_dxf_version(
+                                document.version,
+                            )
+                        {
+                            if let Some(data) =
+                                crate::io::dwg::dwg_stream_readers::object_reader::dynamic_block::read_solid_history_data(
+                                    &mut reader,
+                                    dxf_name,
+                                    dwg_version,
+                                    document.version,
+                                )
+                            {
+                                let cpp_class_name = class_names
+                                    .cpp
+                                    .get(&type_code)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                document.objects.insert(
+                                    Handle::from(handle),
+                                    crate::objects::ObjectType::DynamicBlock(
+                                        crate::objects::DynamicBlockObject {
+                                            handle: Handle::from(handle),
+                                            owner: owner_handle,
+                                            reactors: non_entity_data
+                                                .reactors
+                                                .iter()
+                                                .copied()
+                                                .map(Handle::from)
+                                                .collect(),
+                                            xdictionary_handle: non_entity_data
+                                                .xdictionary_handle
+                                                .map(Handle::from),
+                                            dxf_name: dxf_name.to_string(),
+                                            cpp_class_name,
+                                            data,
+                                        },
+                                    ),
+                                );
+                                return;
+                            }
+                        }
+                        let class_name_upper = dxf_name.to_uppercase();
+                        if matches!(
+                            class_name_upper.as_str(),
+                            "LSDEFINITION"
+                                | "LSSYMBOLCOMPONENT"
+                                | "LSCOMPOUNDCOMPONENT"
+                                | "LSSTROKEPATTERNCOMPONENT"
+                                | "LSPOINTCOMPONENT"
+                                | "LSINTERNALCOMPONENT"
+                        ) {
+                            let h = Handle::from(handle);
+                            let Some(data) =
+                                crate::io::dwg::dwg_stream_readers::object_reader::dgn_linestyle::read_dgn_line_style_data(
+                                    &mut reader,
+                                    &class_name_upper,
+                                )
+                            else {
+                                return;
+                            };
+                            match &data {
+                                crate::objects::DgnLineStyleData::Definition {
+                                    description,
+                                    root_component,
+                                    ..
+                                } => {
+                                    document.dgn_ls_definitions.insert(
+                                        h,
+                                        crate::objects::DgnLsDefinition {
+                                            handle: h,
+                                            name: description.clone(),
+                                            root_component: *root_component,
+                                        },
+                                    );
+                                }
+                                crate::objects::DgnLineStyleData::Component {
+                                    kind,
+                                    description,
+                                    scale,
+                                    component,
+                                    ..
+                                } => {
+                                    let references = component.references();
+                                    document.dgn_ls_components.insert(
+                                        h,
+                                        crate::objects::DgnLsComponent {
+                                            handle: h,
+                                            component_type: *kind,
+                                            description: description.clone(),
+                                            refs: references,
+                                            scale: *scale,
+                                        },
+                                    );
+                                }
+                                crate::objects::DgnLineStyleData::Registered {
+                                    ..
+                                } => {}
+                            }
+                            document.objects.insert(
+                                h,
+                                crate::objects::ObjectType::DgnLineStyle(
+                                    crate::objects::DgnLineStyleObject {
+                                        handle: h,
+                                        owner: owner_handle,
+                                        reactors: non_entity_data
+                                            .reactors
+                                            .iter()
+                                            .copied()
+                                            .map(Handle::from)
+                                            .collect(),
+                                        xdictionary_handle: non_entity_data
+                                            .xdictionary_handle
+                                            .map(Handle::from),
+                                        data,
+                                    },
+                                ),
+                            );
+                            return;
+                        }
+                        if matches!(
+                            class_name_upper.as_str(),
+                            "ACAD_PROXY_OBJECT_WRAPPER"
+                                | "AEC_REFEDIT_STATUS_TRACKER"
+                                | "EXACXREFPANELOBJECT"
+                                | "XREFPANELOBJECT"
+                                | "NPOCOLLECTION"
+                                | "MCDBCONTAINER2"
+                        ) {
+                            let (payload, object_ids) =
+                                read_registered_payload(&mut reader, handle);
+                            document.objects.insert(
+                                Handle::from(handle),
+                                crate::objects::ObjectType::RegisteredClass(
+                                    crate::objects::RegisteredClassObject {
+                                        handle: Handle::from(handle),
+                                        owner: owner_handle,
+                                        reactors: non_entity_data
+                                            .reactors
+                                            .iter()
+                                            .copied()
+                                            .map(Handle::from)
+                                            .collect(),
+                                        xdictionary_handle: non_entity_data
+                                            .xdictionary_handle
+                                            .map(Handle::from),
+                                        dxf_name: dxf_name.to_string(),
+                                        cpp_class_name: class_names
+                                            .cpp
+                                            .get(&type_code)
+                                            .cloned()
+                                            .unwrap_or_default(),
+                                        properties: Vec::new(),
+                                        payload,
+                                        object_ids,
+                                    },
+                                ),
+                            );
+                            return;
+                        }
+                        if let Some(data) =
+                            crate::io::dwg::dwg_stream_readers::object_reader::class_object::read_class_object_data(
+                                &mut reader,
+                                dxf_name,
+                                self.obj_reader.version(),
+                                self.obj_reader.dxf_version(),
+                            )
+                        {
+                            if let crate::objects::ClassObjectData::SectionViewStyle(
+                                style,
+                            ) = &data
+                            {
+                                document.section_view_style = Some(
+                                    crate::entities::SectionViewStyle {
+                                        show_arrows: style.flags & 0x02 != 0,
+                                        show_plane_line: style.flags & 0x08 != 0,
+                                        show_end_lines: style.flags & 0x20 != 0,
+                                        arrow_size: style.arrow_symbol_size,
+                                        arrow_extension: style
+                                            .arrow_symbol_extension_length,
+                                        label_height: style.identifier_height,
+                                        label_offset: style.identifier_offset,
+                                        label_position: style
+                                            .identifier_position,
+                                        arrow_position: style.arrow_position,
+                                        end_line_length: style.end_line_length,
+                                        end_line_overshoot: style
+                                            .end_line_overshoot,
+                                        arrow_start_handle: style
+                                            .arrow_start_symbol
+                                            .value(),
+                                        arrow_end_handle: style
+                                            .arrow_end_symbol
+                                            .value(),
+                                        arrow_is_default: style
+                                            .arrow_start_symbol
+                                            .is_null()
+                                            && style
+                                                .arrow_end_symbol
+                                                .is_null(),
+                                    },
+                                );
+                            }
+                            document.objects.insert(
+                                Handle::from(handle),
+                                crate::objects::ObjectType::ClassObject(
+                                    crate::objects::ClassObject {
+                                        handle: Handle::from(handle),
+                                        owner: owner_handle,
+                                        reactors: non_entity_data
+                                            .reactors
+                                            .iter()
+                                            .copied()
+                                            .map(Handle::from)
+                                            .collect(),
+                                        xdictionary_handle: non_entity_data
+                                            .xdictionary_handle
+                                            .map(Handle::from),
+                                        data,
+                                    },
+                                ),
+                            );
+                            return;
+                        }
+                    }
                     let is_context_data = class_name
                         .as_deref()
-                        .map(|n| n.contains("OBJECTCONTEXTDATA"))
+                        .map(|n| {
+                            n.contains("OBJECTCONTEXTDATA")
+                                || n == "ACDB_HATCHSCALECONTEXTDATA_CLASS"
+                                || n == "ACDB_HATCHVIEWCONTEXTDATA_CLASS"
+                        })
                         .unwrap_or(false);
-
-                    // For the context leaves whose placement payload we model,
-                    // decode into a typed ObjectContextData (lets OCS create /
-                    // edit them). The verbatim `source_raw` is still kept so
-                    // reading an existing file re-emits it byte-for-byte.
+                    // Decode every context leaf with a known schema into native,
+                    // version-portable fields. These objects no longer depend
+                    // on same-version raw-record passthrough.
                     let modeled = if is_context_data {
                         match class_name.as_deref().unwrap_or("") {
+                            "ACDB_ANNOTSCALEOBJECTCONTEXTDATA_CLASS" => {
+                                let class_version = reader.read_bit_short();
+                                let is_default = reader.read_bit();
+                                let scale = reader.read_handle();
+                                Some((
+                                    crate::objects::ObjectContextKind::AnnotScale,
+                                    class_version,
+                                    is_default,
+                                    scale,
+                                ))
+                            }
                             "ACDB_BLKREFOBJECTCONTEXTDATA_CLASS" => {
                                 let class_version = reader.read_bit_short();
                                 let is_default = reader.read_bit();
@@ -3615,6 +6140,365 @@ impl DwgDocumentBuilder {
                                             extents_height,
                                             column_type,
                                             columns,
+                                        },
+                                    ),
+                                    class_version,
+                                    is_default,
+                                    scale,
+                                ))
+                            }
+                            "ACDB_MLEADEROBJECTCONTEXTDATA_CLASS" => {
+                                let class_version = reader.read_bit_short();
+                                let is_default = reader.read_bit();
+                                let scale = reader.read_handle();
+                                let context = entities::read_multileader_annotation_context(
+                                    &mut reader,
+                                    self.obj_reader.version(),
+                                    self.obj_reader.dxf_version(),
+                                    true,
+                                );
+                                Some((
+                                    crate::objects::ObjectContextKind::MLeader(
+                                        context,
+                                    ),
+                                    class_version,
+                                    is_default,
+                                    scale,
+                                ))
+                            }
+                            "ACDB_MTEXTATTRIBUTEOBJECTCONTEXTDATA_CLASS" => {
+                                let class_version = reader.read_bit_short();
+                                let is_default = reader.read_bit();
+                                let horizontal_mode = reader.read_bit_short();
+                                let rotation = reader.read_bit_double();
+                                let insertion = crate::types::Vector2::new(
+                                    reader.read_raw_double(),
+                                    reader.read_raw_double(),
+                                );
+                                let alignment = crate::types::Vector2::new(
+                                    reader.read_raw_double(),
+                                    reader.read_raw_double(),
+                                );
+                                let enable_context = reader.read_bit();
+                                let context_data = if enable_context {
+                                    // The nested object omits its type, handle and
+                                    // EED preface, but retains the non-entity common
+                                    // tail before AcDbObjectContextData.
+                                    let embedded_reactor_count =
+                                        reader.read_bit_long().max(0).min(100_000)
+                                            as usize;
+                                    let embedded_no_xdic = reader.read_bit();
+                                    let embedded_has_binary_data = if self
+                                        .obj_reader
+                                        .version()
+                                        .r2013_plus(self.obj_reader.dxf_version())
+                                    {
+                                        reader.read_bit()
+                                    } else {
+                                        false
+                                    };
+                                    let embedded_class_version =
+                                        reader.read_bit_short();
+                                    let embedded_is_default =
+                                        reader.read_bit();
+                                    let attachment = reader.read_bit_long();
+                                    let x_axis_dir = crate::types::Vector3::new(
+                                        reader.read_bit_double(),
+                                        reader.read_bit_double(),
+                                        reader.read_bit_double(),
+                                    );
+                                    let context_insertion =
+                                        crate::types::Vector3::new(
+                                            reader.read_bit_double(),
+                                            reader.read_bit_double(),
+                                            reader.read_bit_double(),
+                                        );
+                                    let rect_width = reader.read_bit_double();
+                                    let rect_height = reader.read_bit_double();
+                                    let extents_width =
+                                        reader.read_bit_double();
+                                    let extents_height =
+                                        reader.read_bit_double();
+                                    let column_type = reader.read_bit_long();
+                                    let columns = if column_type != 0 {
+                                        let num_heights =
+                                            reader.read_bit_long();
+                                        let width = reader.read_bit_double();
+                                        let gutter = reader.read_bit_double();
+                                        let auto_height = reader.read_bit();
+                                        let flow_reversed = reader.read_bit();
+                                        let heights =
+                                            if !auto_height && column_type == 2 {
+                                                (0..num_heights.max(0))
+                                                    .map(|_| {
+                                                        reader.read_bit_double()
+                                                    })
+                                                    .collect()
+                                            } else {
+                                                Vec::new()
+                                            };
+                                        Some(crate::objects::MTextColumns {
+                                            num_heights,
+                                            width,
+                                            gutter,
+                                            auto_height,
+                                            flow_reversed,
+                                            heights,
+                                        })
+                                    } else {
+                                        None
+                                    };
+                                    Some((
+                                        embedded_reactor_count,
+                                        embedded_no_xdic,
+                                        embedded_has_binary_data,
+                                        embedded_class_version,
+                                        embedded_is_default,
+                                        crate::objects::MTextContext {
+                                            attachment,
+                                            x_axis_dir,
+                                            insertion: context_insertion,
+                                            rect_width,
+                                            rect_height,
+                                            extents_width,
+                                            extents_height,
+                                            column_type,
+                                            columns,
+                                        },
+                                    ))
+                                } else {
+                                    None
+                                };
+                                let scale = reader.read_handle();
+                                let context = context_data.map(
+                                    |(
+                                        embedded_reactor_count,
+                                        embedded_no_xdic,
+                                        embedded_has_binary_data,
+                                        embedded_class_version,
+                                        embedded_is_default,
+                                        mtext,
+                                    )| {
+                                    let embedded_owner =
+                                        reader.read_handle();
+                                    let embedded_reactors = (0
+                                        ..embedded_reactor_count)
+                                        .map(|_| Handle::from(reader.read_handle()))
+                                        .collect();
+                                    let embedded_xdictionary_handle =
+                                        if embedded_no_xdic {
+                                            None
+                                        } else {
+                                            Some(Handle::from(
+                                                reader.read_handle(),
+                                            ))
+                                        };
+                                    let context_scale =
+                                        reader.read_handle();
+                                    crate::objects::EmbeddedMTextContext {
+                                        owner_handle: Handle::from(
+                                            embedded_owner,
+                                        ),
+                                        reactors: embedded_reactors,
+                                        xdictionary_handle:
+                                            embedded_xdictionary_handle,
+                                        has_binary_data:
+                                            embedded_has_binary_data,
+                                        class_version:
+                                            embedded_class_version,
+                                        is_default: embedded_is_default,
+                                        scale: Handle::from(context_scale),
+                                        mtext,
+                                    }
+                                });
+                                Some((
+                                    crate::objects::ObjectContextKind::MTextAttribute(
+                                        crate::objects::MTextAttributeContext {
+                                            horizontal_mode,
+                                            rotation,
+                                            insertion,
+                                            alignment,
+                                            enable_context,
+                                            context,
+                                        },
+                                    ),
+                                    class_version,
+                                    is_default,
+                                    scale,
+                                ))
+                            }
+                            "ACDB_LEADEROBJECTCONTEXTDATA_CLASS" => {
+                                let class_version = reader.read_bit_short();
+                                let is_default = reader.read_bit();
+                                let mut points = Vec::new();
+                                for _ in 0..reader.read_bit_long().max(0).min(100_000) {
+                                    points.push(reader.read_3bit_double());
+                                }
+                                let x_direction = reader.read_3bit_double();
+                                let annotation_enabled = reader.read_bit();
+                                let insertion_offset =
+                                    reader.read_3bit_double();
+                                let endpoint_projection =
+                                    reader.read_3bit_double();
+                                let scale = reader.read_handle();
+                                Some((
+                                    crate::objects::ObjectContextKind::Leader(
+                                        crate::objects::LeaderContext {
+                                            points,
+                                            x_direction,
+                                            annotation_enabled,
+                                            insertion_offset,
+                                            endpoint_projection,
+                                        },
+                                    ),
+                                    class_version,
+                                    is_default,
+                                    scale,
+                                ))
+                            }
+                            "ACDB_FCFOBJECTCONTEXTDATA_CLASS" => {
+                                let class_version = reader.read_bit_short();
+                                let is_default = reader.read_bit();
+                                let location = crate::types::Vector3::new(
+                                    reader.read_bit_double(),
+                                    reader.read_bit_double(),
+                                    reader.read_bit_double(),
+                                );
+                                let horizontal_direction = crate::types::Vector3::new(
+                                    reader.read_bit_double(),
+                                    reader.read_bit_double(),
+                                    reader.read_bit_double(),
+                                );
+                                let scale = reader.read_handle();
+                                Some((
+                                    crate::objects::ObjectContextKind::Fcf {
+                                        location,
+                                        horizontal_direction,
+                                    },
+                                    class_version,
+                                    is_default,
+                                    scale,
+                                ))
+                            }
+                            "ACDB_HATCHSCALECONTEXTDATA_CLASS" => {
+                                let class_version = reader.read_bit_short();
+                                let is_default = reader.read_bit();
+                                let mut pattern_lines = Vec::new();
+                                for _ in 0..reader.read_bit_short().max(0).min(10_000) {
+                                    let angle = reader.read_bit_double();
+                                    let base_point = crate::types::Vector2::new(
+                                        reader.read_bit_double(),
+                                        reader.read_bit_double(),
+                                    );
+                                    let offset = crate::types::Vector2::new(
+                                        reader.read_bit_double(),
+                                        reader.read_bit_double(),
+                                    );
+                                    let mut dash_lengths = Vec::new();
+                                    for _ in
+                                        0..reader.read_bit_short().max(0).min(10_000)
+                                    {
+                                        dash_lengths.push(reader.read_bit_double());
+                                    }
+                                    pattern_lines.push(
+                                        crate::entities::HatchPatternLine {
+                                            angle,
+                                            base_point,
+                                            offset,
+                                            dash_lengths,
+                                        },
+                                    );
+                                }
+                                let pattern_scale = reader.read_bit_double();
+                                let pattern_base = crate::types::Vector3::new(
+                                    reader.read_bit_double(),
+                                    reader.read_bit_double(),
+                                    reader.read_bit_double(),
+                                );
+                                let mut loop_types = Vec::new();
+                                for _ in 0..reader.read_bit_long().max(0).min(100_000) {
+                                    loop_types.push(reader.read_bit_long());
+                                }
+                                let supports_context = reader.read_bit();
+                                let scale = reader.read_handle();
+                                Some((
+                                    crate::objects::ObjectContextKind::HatchScale(
+                                        crate::objects::HatchScaleContext {
+                                            pattern_lines,
+                                            pattern_scale,
+                                            pattern_base,
+                                            loop_types,
+                                            supports_context,
+                                        },
+                                    ),
+                                    class_version,
+                                    is_default,
+                                    scale,
+                                ))
+                            }
+                            "ACDB_HATCHVIEWCONTEXTDATA_CLASS" => {
+                                let class_version = reader.read_bit_short();
+                                let is_default = reader.read_bit();
+                                let mut pattern_lines = Vec::new();
+                                for _ in 0..reader.read_bit_short().max(0).min(10_000) {
+                                    let angle = reader.read_bit_double();
+                                    let base_point = crate::types::Vector2::new(
+                                        reader.read_bit_double(),
+                                        reader.read_bit_double(),
+                                    );
+                                    let offset = crate::types::Vector2::new(
+                                        reader.read_bit_double(),
+                                        reader.read_bit_double(),
+                                    );
+                                    let mut dash_lengths = Vec::new();
+                                    for _ in
+                                        0..reader.read_bit_short().max(0).min(10_000)
+                                    {
+                                        dash_lengths.push(reader.read_bit_double());
+                                    }
+                                    pattern_lines.push(
+                                        crate::entities::HatchPatternLine {
+                                            angle,
+                                            base_point,
+                                            offset,
+                                            dash_lengths,
+                                        },
+                                    );
+                                }
+                                let pattern_scale = reader.read_bit_double();
+                                let pattern_base = crate::types::Vector3::new(
+                                    reader.read_bit_double(),
+                                    reader.read_bit_double(),
+                                    reader.read_bit_double(),
+                                );
+                                let mut loop_types = Vec::new();
+                                for _ in 0..reader.read_bit_long().max(0).min(100_000) {
+                                    loop_types.push(reader.read_bit_long());
+                                }
+                                let supports_context = reader.read_bit();
+                                let view_normal = crate::types::Vector3::new(
+                                    reader.read_bit_double(),
+                                    reader.read_bit_double(),
+                                    reader.read_bit_double(),
+                                );
+                                let view_rotation = reader.read_bit_double();
+                                let evaluate_hatch = reader.read_bit();
+                                let scale = reader.read_handle();
+                                let view = reader.read_handle();
+                                Some((
+                                    crate::objects::ObjectContextKind::HatchView(
+                                        crate::objects::HatchViewContext {
+                                            hatch: crate::objects::HatchScaleContext {
+                                                pattern_lines,
+                                                pattern_scale,
+                                                pattern_base,
+                                                loop_types,
+                                                supports_context,
+                                            },
+                                            view: Handle::from(view),
+                                            view_normal,
+                                            view_rotation,
+                                            evaluate_hatch,
                                         },
                                     ),
                                     class_version,
@@ -3766,83 +6650,6 @@ impl DwgDocumentBuilder {
                         }
                     }
 
-                    // DGN line-style objects (AcDbLS*): decode the header + the
-                    // component tree (handle references) into typed side tables
-                    // for rendering. Identified by class name so it is not tied to
-                    // this file's class numbering. The object still falls through
-                    // to the verbatim `Unknown` storage below, so the DWG
-                    // round-trips byte-for-byte; only the leaf stroke/placement
-                    // data-stream fields remain undecoded. The data and handle
-                    // read cursors are independent and the raw snapshot was
-                    // already taken, so these reads are side-effect free.
-                    if let Some(cn) = class_name.as_deref() {
-                        let is_ls_def = cn == "LSDEFINITION";
-                        let is_ls_comp = matches!(
-                            cn,
-                            "LSSYMBOLCOMPONENT"
-                                | "LSCOMPOUNDCOMPONENT"
-                                | "LSSTROKEPATTERNCOMPONENT"
-                                | "LSPOINTCOMPONENT"
-                        );
-                        if is_ls_def || is_ls_comp {
-                            use crate::objects::{
-                                DgnLsComponent, DgnLsComponentType, DgnLsDefinition,
-                            };
-                            let description = reader.read_variable_text();
-                            let _version = reader.read_bit_long();
-                            let type_field = reader.read_bit_long();
-                            let h = Handle::from(handle);
-                            if is_ls_def {
-                                let root = reader.read_handle();
-                                document.dgn_ls_definitions.insert(
-                                    h,
-                                    DgnLsDefinition {
-                                        handle: h,
-                                        name: description,
-                                        root_component: Handle::from(root),
-                                    },
-                                );
-                            } else if let Some(ct) = DgnLsComponentType::from_code(type_field) {
-                                // Component tree references from the handle stream
-                                // (after the common owner/reactor/xdict handles).
-                                let mut refs = Vec::new();
-                                for _ in 0..16 {
-                                    let r = reader.read_handle();
-                                    if r == 0 {
-                                        break;
-                                    }
-                                    refs.push(Handle::from(r));
-                                }
-                                // Symbol scale: a byte-aligned big-endian f64 in
-                                // the leaf (the DGN line-style leaf stores raw
-                                // big-endian floats). Empirically at byte 35.
-                                let scale = if ct == DgnLsComponentType::Symbol
-                                    && raw_data.len() >= 43
-                                {
-                                    let v =
-                                        f64::from_be_bytes(raw_data[35..43].try_into().unwrap());
-                                    if v.is_finite() && v.abs() > 1e-9 && v.abs() < 1e6 {
-                                        v
-                                    } else {
-                                        1.0
-                                    }
-                                } else {
-                                    1.0
-                                };
-                                document.dgn_ls_components.insert(
-                                    h,
-                                    DgnLsComponent {
-                                        handle: h,
-                                        component_type: ct,
-                                        description,
-                                        refs,
-                                        scale,
-                                    },
-                                );
-                            }
-                        }
-                    }
-
                     if let Some((kind, class_version, is_default, scale)) = modeled {
                         if scale != 0 {
                             document
@@ -3868,9 +6675,6 @@ impl DwgDocumentBuilder {
                                     is_default,
                                     scale: Handle::from(scale),
                                     kind,
-                                    source_raw: Some(raw_data),
-                                    source_handle_bits: raw_handle_bits,
-                                    source_version: Some(document.version),
                                 },
                             ),
                         );
@@ -3887,7 +6691,8 @@ impl DwgDocumentBuilder {
                                     .insert(Handle::from(handle), Handle::from(scale));
                             }
                         }
-                        let type_name = Self::unknown_object_type_name(document, raw_type_code);
+                        let type_name =
+                            Self::unknown_object_type_name(class_names, raw_type_code);
                         document.objects.insert(
                             Handle::from(handle),
                             crate::objects::ObjectType::Unknown {
@@ -3938,12 +6743,11 @@ impl DwgDocumentBuilder {
 
     /// Name an unsupported object by its CLASSES-section dxfname when the
     /// drawing's class map knows it, falling back to the positional code.
-    fn unknown_object_type_name(document: &CadDocument, raw_type_code: i16) -> String {
-        document
-            .classes
-            .iter()
-            .find(|class| class.class_number == raw_type_code)
-            .map(|class| class.dxf_name.clone())
+    fn unknown_object_type_name(class_names: &ClassNames, raw_type_code: i16) -> String {
+        class_names
+            .dxf
+            .get(&raw_type_code)
+            .cloned()
             .unwrap_or_else(|| format!("DWG_OBJ_{}", raw_type_code))
     }
 }
@@ -3962,7 +6766,10 @@ mod tests {
         document.classes.push_preserving(class);
 
         assert_eq!(
-            DwgDocumentBuilder::unknown_object_type_name(&document, 524),
+            DwgDocumentBuilder::unknown_object_type_name(
+                &ClassNames::from_document(&document),
+                524
+            ),
             "IRD_OBJ_RECORD"
         );
     }
@@ -3973,7 +6780,10 @@ mod tests {
         document.classes.clear();
 
         assert_eq!(
-            DwgDocumentBuilder::unknown_object_type_name(&document, 524),
+            DwgDocumentBuilder::unknown_object_type_name(
+                &ClassNames::from_document(&document),
+                524
+            ),
             "DWG_OBJ_524"
         );
     }
@@ -3991,111 +6801,102 @@ mod tests {
 
         assert_eq!(DwgDocumentBuilder::resolve_type_code(524, &class_map), 82);
         assert_eq!(
-            DwgDocumentBuilder::unknown_object_type_name(&document, 524),
+            DwgDocumentBuilder::unknown_object_type_name(
+                &ClassNames::from_document(&document),
+                524
+            ),
             "IRD_OBJ_RECORD"
         );
     }
 }
 
+fn read_registered_payload(
+    reader: &mut crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader,
+    current_handle: u64,
+) -> (
+    crate::objects::ProxyPayload,
+    Vec<crate::objects::ProxyObjectReference>,
+) {
+    let bit_count = reader.main_remaining_bits().max(0) as u32;
+    let mut data = vec![0u8; bit_count.div_ceil(8) as usize];
+    for bit_index in 0..bit_count as usize {
+        if reader.read_bit() {
+            data[bit_index / 8] |= 0x80 >> (bit_index % 8);
+        }
+    }
+    let mut references = Vec::new();
+    while reader.handle_remaining_bits() >= 8 {
+        let (handle, reference_type) =
+            reader.read_handle_reference(current_handle);
+        if handle == 0 {
+            break;
+        }
+        let kind = match reference_type {
+            crate::io::dwg::dwg_reference_type::DwgReferenceType::SoftOwnership => {
+                crate::objects::ProxyReferenceKind::SoftOwnership
+            }
+            crate::io::dwg::dwg_reference_type::DwgReferenceType::HardOwnership => {
+                crate::objects::ProxyReferenceKind::HardOwnership
+            }
+            crate::io::dwg::dwg_reference_type::DwgReferenceType::SoftPointer => {
+                crate::objects::ProxyReferenceKind::SoftPointer
+            }
+            crate::io::dwg::dwg_reference_type::DwgReferenceType::HardPointer => {
+                crate::objects::ProxyReferenceKind::HardPointer
+            }
+            crate::io::dwg::dwg_reference_type::DwgReferenceType::Undefined => {
+                crate::objects::ProxyReferenceKind::Undefined
+            }
+        };
+        references.push(crate::objects::ProxyObjectReference {
+            handle: Handle::from(handle),
+            kind,
+        });
+    }
+    (
+        crate::objects::ProxyPayload::from_bits(&data, bit_count),
+        references,
+    )
+}
+
 /// Build a [`Matrix4`](crate::types::Matrix4) from 12 doubles holding a 3×4
 /// transform in row-major order (3 rows of 4: `[R | t]`); bottom row implied.
-/// Decode an `AcDbSectionSymbol` (DWG class 825) into its display geometry.
+/// Decode an `AcDbSectionSymbol` from its `AcDbViewSymbol` base followed by the
+/// complete repeated point records.
 ///
-/// `reader` must be positioned at the class-specific data (i.e. after
-/// `read_common_entity_data`). The section-symbol serialization is undocumented,
-/// so rather than parse every field we locate the two cut-line endpoints
-/// structurally: each is a 2-D point stored as **two consecutive full IEEE
-/// doubles** (BD prefix `00`) 66 bits apart. The variable-length header and the
-/// lone signed "tick" doubles between/after the ends have no such paired
-/// neighbour, so scanning for the first two full-BD *pairs* in a plausible
-/// coordinate range reliably isolates the endpoints regardless of the header
-/// field layout. The identifier string ("A") comes from the string stream.
-///
-/// Returns `None` if the record is too short or no endpoint pair is found; the
-/// caller then keeps the entity as a plain unknown (raw bytes preserved).
+/// The field order is cross-validated with ODA DXF exports of native R2013 and
+/// R2018 SECTIONLINE entities. Unknown-but-verified scalar fields are retained
+/// under `raw_*` names instead of assigning speculative semantics.
 fn decode_section_symbol(
     reader: &mut crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader,
 ) -> Option<SectionSymbol> {
-    let start = reader.position_in_bits() as usize;
-    let full = reader.raw_merged_data();
-    let total = full.len() * 8;
-    let bit = |off: usize| -> u8 { (full[off / 8] >> (7 - off % 8)) & 1 };
-    // Read a full-precision BD (2-bit prefix `00` then 64 IEEE bits) at bit `b`.
-    // Byte reconstruction matches the bit reader (MSB-first 8-bit groups).
-    let read_bd_full = |b: usize| -> Option<f64> {
-        if b + 66 > total || bit(b) != 0 || bit(b + 1) != 0 {
-            return None;
-        }
-        let mut by = [0u8; 8];
-        for k in 0..8 {
-            let mut v = 0u8;
-            for j in 0..8 {
-                v = (v << 1) | bit(b + 2 + k * 8 + j);
-            }
-            by[k] = v;
-        }
-        Some(f64::from_le_bytes(by))
-    };
-    // A drawing coordinate: finite, non-trivial magnitude, not padding. Both
-    // components of a real endpoint clear this (a mantissa window that lands in
-    // range by chance is usually paired with a 0.0 padding double, which fails).
-    let coord = |v: f64| v.is_finite() && v.abs() > 1e-6 && v.abs() < 5.0e6;
-    // First bit position where two full-BDs 66 bits apart are both real
-    // coordinates — i.e. a 2-D (X, Y) endpoint.
-    let find_point = |from: usize| -> Option<(usize, f64, f64)> {
-        let mut b = from;
-        while b + 132 <= total {
-            if let (Some(x), Some(y)) = (read_bd_full(b), read_bd_full(b + 66)) {
-                if coord(x) && coord(y) {
-                    return Some((b, x, y));
-                }
-            }
-            b += 1;
-        }
-        None
-    };
-    // A lone in-range full-BD (a signed tick length) in [from, to); returns its
-    // value and end bit so the caller can resume the scan past it.
-    let find_tick = |from: usize, to: usize| -> (f64, usize) {
-        let mut b = from;
-        while b + 66 <= to.min(total) {
-            if let Some(v) = read_bd_full(b) {
-                if v.abs() > 1e-9 && v.abs() < 1.0e5 {
-                    return (v, b + 66);
-                }
-            }
-            b += 1;
-        }
-        (0.0, from)
-    };
+    let mut symbol = SectionSymbol::new();
+    symbol.view_symbol_version = reader.read_bit_short();
+    symbol.style_handle = Handle::from(reader.read_handle());
+    symbol.symbol_scale = reader.read_bit_double();
+    symbol.view_rep_handle = Handle::from(reader.read_handle());
+    symbol.raw_view_symbol_70 = reader.read_bit_short();
+    symbol.version = reader.read_bit_short();
+    symbol.raw_point_count_90 = reader.read_bit_long();
+    symbol.raw_flags_90 = reader.read_bit_long();
+    symbol.raw_point_record_count = reader.read_bit_long();
 
-    let (a_bit, ax, ay) = find_point(start)?;
-    let after_a = a_bit + 132;
-    // The tick sits between the two ends; search for END-B only *past* it so a
-    // window inside the tick double's mantissa can't masquerade as an endpoint.
-    let (tick_a, past_tick_a) = find_tick(after_a, after_a + 200);
-    let (b_bit, bx, by) = find_point(past_tick_a.max(after_a))?;
-    let after_b = b_bit + 132;
-    let (tick_b, _) = find_tick(after_b, total);
-    // Identifier from the string stream (first variable text of the record).
-    let label = reader.read_variable_text();
-    // Object-specific handle references (the common entity handles were already
-    // consumed): the section-view style, then the parent view's AcDbViewRep.
-    // The handle cursor is independent of the data/string cursors, so these
-    // reads don't disturb the geometry above.
-    let style_handle = reader.read_handle();
-    let view_rep_handle = reader.read_handle();
-
-    Some(SectionSymbol {
-        end_a: [ax, ay],
-        end_b: [bx, by],
-        tick_a,
-        tick_b,
-        label,
-        style_handle,
-        view_rep_handle,
-        ..SectionSymbol::new()
-    })
+    let point_count = usize::try_from(symbol.raw_point_record_count).ok()?;
+    if point_count > 1_000_000 {
+        return None;
+    }
+    symbol.points.reserve(point_count);
+    for _ in 0..point_count {
+        symbol.points.push(crate::entities::SectionSymbolPoint {
+            point: reader.read_3bit_double(),
+            bulge: reader.read_bit_double(),
+            label: reader.read_variable_text(),
+            label_offset: reader.read_3bit_double(),
+            raw_flag_280: reader.read_byte(),
+        });
+    }
+    symbol.sync_display_fields();
+    Some(symbol)
 }
 
 /// Decode the display fields of an `AcDbSectionViewStyle` (DWG class 795).
@@ -4207,6 +7008,7 @@ fn map_dimension_common(
     base.version = common.version_byte;
     base.normal = common.normal;
     base.text_middle_point = common.text_middle_point;
+    base.dwg_flags_byte = common.flags_byte;
     // Flags byte bit 0: dimension text positioned at a user-defined location.
     base.text_user_positioned = (common.flags_byte & 0x01) != 0;
     base.text = common.text.clone();
@@ -4225,6 +7027,12 @@ fn map_dimension_common(
         _ => crate::entities::dimension::AttachmentPointType::MiddleCenter,
     };
     base.line_spacing_factor = common.linespacing_factor;
+    base.line_spacing_style = common.linespacing_style;
+    base.insertion_scale = common.ins_scale;
+    base.insertion_rotation = common.ins_rotation;
+    base.dwg_unknown_bit = common.unknown_bit;
+    base.flip_arrow1 = common.flip_arrow1;
+    base.flip_arrow2 = common.flip_arrow2;
     base.actual_measurement = common.actual_measurement;
     base.insertion_point =
         crate::types::Vector3::new(common.insertion_point.x, common.insertion_point.y, 0.0);
@@ -4260,6 +7068,10 @@ fn map_entity_common(
     common.reactors = data.reactors.iter().map(|&h| Handle::from(h)).collect();
     // XDictionary handle
     common.xdictionary_handle = data.xdictionary_handle.map(Handle::from);
+    common.color_book_handle = data.color_book_handle.map(Handle::from);
+    common.full_visual_style_handle = data.full_visual_style_handle.map(Handle::from);
+    common.face_visual_style_handle = data.face_visual_style_handle.map(Handle::from);
+    common.edge_visual_style_handle = data.edge_visual_style_handle.map(Handle::from);
     // Linetype (from flags + optional handle)
     // EntityCommon uses empty string for "ByLayer" convention
     common.linetype = match data.linetype_flags {
@@ -4273,6 +7085,8 @@ fn map_entity_common(
             .unwrap_or_default(),
         _ => String::new(),
     };
+    common.linetype_handle =
+        (data.linetype_handle != 0).then(|| Handle::from(data.linetype_handle));
     // EED raw bytes for DWG round-trip
     common.extended_data.raw_dwg_eed = data.common.eed_raw.clone();
     // Graphic data for DWG round-trip

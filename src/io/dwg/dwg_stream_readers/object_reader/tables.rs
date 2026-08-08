@@ -26,6 +26,32 @@ pub struct TableControlData {
     pub entry_handles: Vec<u64>,
 }
 
+/// Parsed VX_CONTROL data. VX uses a bit-short count, unlike the other
+/// R13+ table controls which use a bit-long count.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct VxControlData {
+    pub entry_count: i16,
+    pub entry_handles: Vec<u64>,
+}
+
+/// Parsed VX_TABLE_RECORD / VPENT_HDR data (R13-R2000).
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct VxTableRecordData {
+    pub name: String,
+    pub is_xref_reference: bool,
+    pub is_xref_resolved: bool,
+    pub is_xref_dependent: bool,
+    pub xref_handle: u64,
+    pub is_on: bool,
+    pub viewport: u64,
+    pub previous_entry: u64,
+    pub legacy_viewport_entity_address: u16,
+    pub legacy_viewport_index: i16,
+    pub legacy_previous_entry_index: i16,
+}
+
 /// Parsed BLOCK_CONTROL data (special — has *Model_Space and *Paper_Space).
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -113,6 +139,10 @@ pub struct LinetypeSegment {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ViewData {
     pub name: String,
+    pub xref_reference: bool,
+    pub xref_resolved: bool,
+    pub xref_dependent: bool,
+    pub xref_handle: u64,
     pub height: f64,
     pub width: f64,
     pub center: Vector2,
@@ -127,7 +157,25 @@ pub struct ViewData {
     pub back_clipping: bool,
     pub front_clip_z: bool,
     pub render_mode: Option<u8>,
+    pub use_default_lights: bool,
+    pub default_lighting_type: u8,
+    pub brightness: f64,
+    pub contrast: f64,
+    pub ambient_color: Color,
     pub paper_space: bool,
+    pub ucs_associated: bool,
+    pub ucs_origin: Vector3,
+    pub ucs_x_axis: Vector3,
+    pub ucs_y_axis: Vector3,
+    pub ucs_elevation: f64,
+    pub ucs_ortho_type: i16,
+    pub camera_plottable: bool,
+    pub background_handle: u64,
+    pub live_section_handle: u64,
+    pub visual_style_handle: u64,
+    pub sun_handle: u64,
+    pub named_ucs_handle: u64,
+    pub base_ucs_handle: u64,
     pub view_control_handle: u64,
 }
 
@@ -136,12 +184,18 @@ pub struct ViewData {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct UcsData {
     pub name: String,
+    pub xref_reference: bool,
+    pub xref_resolved: bool,
+    pub xref_dependent: bool,
+    pub xref_handle: u64,
     pub origin: Vector3,
     pub x_axis: Vector3,
     pub y_axis: Vector3,
     pub elevation: Option<f64>,
     pub ortho_view_type: Option<i16>,
     pub ortho_type: Option<i16>,
+    pub named_ucs_handle: u64,
+    pub base_ucs_handle: u64,
     pub ucs_control_handle: u64,
 }
 
@@ -150,6 +204,9 @@ pub struct UcsData {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VPortData {
     pub name: String,
+    pub xref_reference: bool,
+    pub xref_resolved: bool,
+    pub xref_dependent: bool,
     pub view_height: f64,
     pub aspect_ratio_times_height: f64,
     pub view_center: Vector2,
@@ -159,6 +216,10 @@ pub struct VPortData {
     pub lens_length: f64,
     pub front_clip: f64,
     pub back_clip: f64,
+    pub perspective: bool,
+    pub front_clipping: bool,
+    pub back_clipping: bool,
+    pub front_clip_at_eye: bool,
     pub lower_left: Vector2,
     pub upper_right: Vector2,
     pub ucsfollow: bool,
@@ -176,6 +237,25 @@ pub struct VPortData {
     pub snap_spacing: Vector2,
     pub xref_handle: u64,
     pub render_mode: Option<u8>,
+    pub use_default_lights: bool,
+    pub default_lighting_type: u8,
+    pub brightness: f64,
+    pub contrast: f64,
+    pub ambient_color: Color,
+    pub ucs_at_origin: bool,
+    pub ucs_per_viewport: bool,
+    pub ucs_origin: Vector3,
+    pub ucs_x_axis: Vector3,
+    pub ucs_y_axis: Vector3,
+    pub ucs_elevation: f64,
+    pub ucs_ortho_type: i16,
+    pub grid_flags: i16,
+    pub grid_major: i16,
+    pub background_handle: u64,
+    pub visual_style_handle: u64,
+    pub sun_handle: u64,
+    pub named_ucs_handle: u64,
+    pub base_ucs_handle: u64,
 }
 
 /// Parsed APPID data.
@@ -192,6 +272,9 @@ pub struct AppIdData {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DimStyleData {
     pub name: String,
+    pub xref_reference: bool,
+    pub xref_resolved: bool,
+    pub xref_dependent: bool,
     // We store all the dimstyle fields
     pub dimpost: String,
     pub dimapost: String,
@@ -250,6 +333,8 @@ pub struct DimStyleData {
     pub dimalttz: i16,
     pub dimupt: bool,
     pub dimfit: i16,
+    pub dimatfit: i16,
+    pub dimunit: i16,
     pub dimlwd: i16,
     pub dimlwe: i16,
     pub dimfxl: f64,
@@ -259,6 +344,13 @@ pub struct DimStyleData {
     pub dimarcsym: i16,
     pub dimfxlon: bool,
     pub dimtxtdirection: bool,
+    pub dimaltmzf: f64,
+    pub dimaltmzs: String,
+    pub dimmzf: f64,
+    pub dimmzs: String,
+    pub dimblk_name: String,
+    pub dimblk1_name: String,
+    pub dimblk2_name: String,
     pub xref_handle: u64,
     pub dimtxsty_handle: u64,
     pub dimldrblk_handle: Option<u64>,
@@ -306,18 +398,35 @@ pub struct BlockHeaderData {
 /// Returns `true` if the entry is xref-dependent.
 /// - Pre-R2007: B (64-flag) + BS (xrefindex+1) + B (xdep)
 /// - R2007+: BS (combined)
-fn read_xref_dependant_bits(reader: &mut DwgMergedReader, version: DwgVersion) -> bool {
+#[derive(Debug, Clone, Copy, Default)]
+struct XrefTableFlags {
+    reference: bool,
+    resolved: bool,
+    dependent: bool,
+}
+
+fn read_xref_table_flags(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+) -> XrefTableFlags {
     if version.r2007_plus() {
-        let combined = reader.read_bit_short();
-        // Bits 0-7 = xrefindex+1, bit 8 (0x100) = xref_dependent
-        (combined & 0x100) != 0
+        let resolved = reader.read_bit_short() == 256;
+        XrefTableFlags {
+            reference: true,
+            resolved,
+            dependent: resolved,
+        }
     } else {
-        // Pre-R2007 (R13/R14/R2000-R2006): B + BS + B
-        let _xref_64 = reader.read_bit();
-        let _xref_index = reader.read_bit_short();
-        let xref_dep = reader.read_bit();
-        xref_dep
+        XrefTableFlags {
+            reference: reader.read_bit(),
+            resolved: reader.read_bit_short() == 256,
+            dependent: reader.read_bit(),
+        }
     }
+}
+
+fn read_xref_dependant_bits(reader: &mut DwgMergedReader, version: DwgVersion) -> bool {
+    read_xref_table_flags(reader, version).dependent
 }
 
 /// Read a generic table control object (after non-entity common data).
@@ -332,6 +441,45 @@ pub fn read_table_control(
     TableControlData {
         entry_count,
         entry_handles,
+    }
+}
+
+/// Read VX_CONTROL (R13-R2000).
+pub fn read_vx_control(reader: &mut DwgMergedReader) -> VxControlData {
+    let entry_count = reader.read_bit_short().max(0);
+    let mut entry_handles = Vec::with_capacity(entry_count as usize);
+    for _ in 0..entry_count {
+        entry_handles.push(reader.read_handle());
+    }
+    VxControlData {
+        entry_count,
+        entry_handles,
+    }
+}
+
+/// Read VX_TABLE_RECORD / VPENT_HDR (R13-R2000).
+pub fn read_vx_table_record(reader: &mut DwgMergedReader) -> VxTableRecordData {
+    let name = reader.read_variable_text();
+    let is_xref_reference = reader.read_bit();
+    let is_xref_resolved = reader.read_bit_short() == 256;
+    let is_xref_dependent = reader.read_bit();
+    let is_on = reader.read_bit();
+    let xref_handle = reader.read_handle();
+    let viewport = reader.read_handle();
+    let previous_entry = reader.read_handle();
+
+    VxTableRecordData {
+        name,
+        is_xref_reference,
+        is_xref_resolved,
+        is_xref_dependent,
+        xref_handle,
+        is_on,
+        viewport,
+        previous_entry,
+        legacy_viewport_entity_address: 0,
+        legacy_viewport_index: 0,
+        legacy_previous_entry_index: 0,
     }
 }
 
@@ -461,7 +609,12 @@ pub fn read_text_style(
 /// terminated by a 0x0000 word). shape_number is still a BYTE offset.
 /// The 512-byte size = 256 chars × 2 bytes matches the R2004 256 ASCII chars.
 /// Per OpenDesign spec §20.4.58.
-fn extract_text_strings(segments: &mut [LinetypeSegment], area: &[u8], unicode: bool) {
+fn extract_text_strings(
+    segments: &mut [LinetypeSegment],
+    area: &[u8],
+    unicode: bool,
+    decode_legacy: impl Fn(&[u8]) -> String,
+) {
     let cap = area.len();
     for seg in segments.iter_mut() {
         // DWG convention: bit 0x02 = text element (0x04 = shape)
@@ -487,7 +640,7 @@ fn extract_text_strings(segments: &mut [LinetypeSegment], area: &[u8], unicode: 
                     .position(|&b| b == 0)
                     .map(|i| start + i)
                     .unwrap_or(cap);
-                seg.text = String::from_utf8_lossy(&area[start..end]).into_owned();
+                seg.text = decode_legacy(&area[start..end]);
             }
         }
     }
@@ -524,17 +677,16 @@ pub fn read_linetype(
 
     // Per spec (OpenDesign §20.4.58):
     //   R2004 and earlier: 256-byte text area (always present).
-    //   R2007+: 512-byte text area ONLY if the 0x02 bit (text) or 0x04 bit (shape)
-    //   is set on any ShapeFlag entry.
+    //   R2007+: 512-byte text area ONLY if the 0x02 text bit is set on any
+    //   ShapeFlag entry. Shape-only elements do not carry this area.
     if version.r2007_plus() {
-        // Text area is present if any element is complex (text 0x02 or shape 0x04).
-        let has_complex_elem = segments.iter().any(|s| s.dwg_flags & 0x06 != 0);
-        if has_complex_elem {
+        let has_text = segments.iter().any(|s| s.dwg_flags & 0x02 != 0);
+        if has_text {
             let mut text_area = [0u8; 512];
             for b in text_area.iter_mut() {
                 *b = reader.read_byte();
             }
-            extract_text_strings(&mut segments, &text_area, true);
+            extract_text_strings(&mut segments, &text_area, true, |_| String::new());
         }
     } else {
         // R2004 and earlier: unconditional 256-byte text area.
@@ -542,7 +694,9 @@ pub fn read_linetype(
         for b in text_area.iter_mut() {
             *b = reader.read_byte();
         }
-        extract_text_strings(&mut segments, &text_area, false);
+        extract_text_strings(&mut segments, &text_area, false, |bytes| {
+            reader.decode_legacy_text(bytes)
+        });
     }
 
     // Xref handle
@@ -566,7 +720,7 @@ pub fn read_view(
     version: DwgVersion,
 ) -> ViewData {
     let name = reader.read_variable_text();
-    read_xref_dependant_bits(reader, version);
+    let xref = read_xref_table_flags(reader, version);
 
     let height = reader.read_bit_double();
     let width = reader.read_bit_double();
@@ -590,40 +744,97 @@ pub fn read_view(
         None
     };
 
-    if version.r2007_plus() {
-        let _use_default_lights = reader.read_bit();
-        let _default_lighting = reader.read_byte();
-        let _brightness = reader.read_bit_double();
-        let _contrast = reader.read_bit_double();
-        let _ambient_color = reader.read_cm_color();
-    }
+    let (use_default_lights, default_lighting_type, brightness, contrast, ambient_color) =
+        if version.r2007_plus() {
+            (
+                reader.read_bit(),
+                reader.read_byte(),
+                reader.read_bit_double(),
+                reader.read_bit_double(),
+                reader.read_cm_color(),
+            )
+        } else {
+            (true, 1, 0.0, 0.0, Color::from_index(250))
+        };
 
     let paper_space = reader.read_bit();
 
-    if version.r2000_plus() {
-        let _is_ucs_associated = reader.read_bit();
-    }
+    let ucs_associated = version.r2000_plus() && reader.read_bit();
+    let (ucs_origin, ucs_x_axis, ucs_y_axis, ucs_elevation, ucs_ortho_type) =
+        if ucs_associated {
+            (
+                reader.read_3bit_double(),
+                reader.read_3bit_double(),
+                reader.read_3bit_double(),
+                reader.read_bit_double(),
+                reader.read_bit_short(),
+            )
+        } else {
+            (
+                Vector3::ZERO,
+                Vector3::UNIT_X,
+                Vector3::UNIT_Y,
+                0.0,
+                0,
+            )
+        };
+    let camera_plottable = version.r2007_plus() && reader.read_bit();
 
-    // Xref block handle (parent/control handle is already in common data as owner)
+    // Handles are consumed in their object-handle-stream order.
+    let xref_handle = reader.read_handle();
+    let (background_handle, visual_style_handle, sun_handle) =
+        if version.r2007_plus() {
+            (
+                reader.read_handle(),
+                reader.read_handle(),
+                reader.read_handle(),
+            )
+        } else {
+            (0, 0, 0)
+        };
+    let (base_ucs_handle, named_ucs_handle) =
+        if version.r2000_plus() && ucs_associated {
+            (reader.read_handle(), reader.read_handle())
+        } else {
+            (0, 0)
+        };
+    let live_section_handle = if version.r2007_plus() {
+        reader.read_handle()
+    } else {
+        0
+    };
     let view_control_handle = 0;
-    let _xref_block = reader.read_handle();
-
-    if version.r2007_plus() {
-        let _camera_plottable = reader.read_bit();
-        let _bg_handle = reader.read_handle();
-        let _live_section_handle = reader.read_handle();
-        let _style_handle = reader.read_handle();
-    }
-
-    if version.r2007_plus() {
-        let _sun_handle = reader.read_handle();
-    }
 
     ViewData {
-        name, height, width, center, target, direction,
+        name,
+        xref_reference: xref.reference,
+        xref_resolved: xref.resolved,
+        xref_dependent: xref.dependent,
+        xref_handle,
+        height, width, center, target, direction,
         twist_angle, lens_length, front_clip, back_clip,
         perspective, front_clipping, back_clipping, front_clip_z,
-        render_mode, paper_space, view_control_handle,
+        render_mode,
+        use_default_lights,
+        default_lighting_type,
+        brightness,
+        contrast,
+        ambient_color,
+        paper_space,
+        ucs_associated,
+        ucs_origin,
+        ucs_x_axis,
+        ucs_y_axis,
+        ucs_elevation,
+        ucs_ortho_type,
+        camera_plottable,
+        background_handle,
+        live_section_handle,
+        visual_style_handle,
+        sun_handle,
+        named_ucs_handle,
+        base_ucs_handle,
+        view_control_handle,
     }
 }
 
@@ -633,7 +844,7 @@ pub fn read_ucs(
     version: DwgVersion,
 ) -> UcsData {
     let name = reader.read_variable_text();
-    read_xref_dependant_bits(reader, version);
+    let xref = read_xref_table_flags(reader, version);
 
     let origin = reader.read_3bit_double();
     let x_axis = reader.read_3bit_double();
@@ -648,17 +859,28 @@ pub fn read_ucs(
         (None, None, None)
     };
 
-    // External reference block handle (owner/control already in common data)
-    let ucs_control_handle = reader.read_handle();
-
-    if version.r2000_plus() {
-        let _named_ucs = reader.read_handle();
-        let _base_ucs = reader.read_handle();
-    }
+    let xref_handle = reader.read_handle();
+    let (base_ucs_handle, named_ucs_handle) = if version.r2000_plus() {
+        (reader.read_handle(), reader.read_handle())
+    } else {
+        (0, 0)
+    };
 
     UcsData {
-        name, origin, x_axis, y_axis, elevation,
-        ortho_view_type, ortho_type, ucs_control_handle,
+        name,
+        xref_reference: xref.reference,
+        xref_resolved: xref.resolved,
+        xref_dependent: xref.dependent,
+        xref_handle,
+        origin,
+        x_axis,
+        y_axis,
+        elevation,
+        ortho_view_type,
+        ortho_type,
+        named_ucs_handle,
+        base_ucs_handle,
+        ucs_control_handle: 0,
     }
 }
 
@@ -668,7 +890,7 @@ pub fn read_vport(
     version: DwgVersion,
 ) -> VPortData {
     let name = reader.read_variable_text();
-    read_xref_dependant_bits(reader, version);
+    let xref = read_xref_table_flags(reader, version);
 
     let view_height = reader.read_bit_double();
     let aspect_ratio_times_height = reader.read_bit_double();
@@ -681,10 +903,10 @@ pub fn read_vport(
     let back_clip = reader.read_bit_double();
 
     // View mode (4 bits)
-    let _perspective = reader.read_bit();
-    let _front_clipping = reader.read_bit();
-    let _back_clipping = reader.read_bit();
-    let _front_clip_z = reader.read_bit();
+    let perspective = reader.read_bit();
+    let front_clipping = reader.read_bit();
+    let back_clipping = reader.read_bit();
+    let front_clip_at_eye = reader.read_bit();
 
     // R2000+: render mode
     let render_mode = if version.r2000_plus() {
@@ -694,13 +916,18 @@ pub fn read_vport(
     };
 
     // R2007+: lighting
-    if version.r2007_plus() {
-        let _use_default_lights = reader.read_bit();
-        let _default_lighting = reader.read_byte();
-        let _brightness = reader.read_bit_double();
-        let _contrast = reader.read_bit_double();
-        let _ambient_color = reader.read_cm_color();
-    }
+    let (use_default_lights, default_lighting_type, brightness, contrast, ambient_color) =
+        if version.r2007_plus() {
+            (
+                reader.read_bit(),
+                reader.read_byte(),
+                reader.read_bit_double(),
+                reader.read_bit_double(),
+                reader.read_cm_color(),
+            )
+        } else {
+            (true, 1, 0.0, 0.0, Color::from_index(250))
+        };
 
     // Common viewport fields
     let lower_left = reader.read_2raw_double();
@@ -721,47 +948,119 @@ pub fn read_vport(
     let snap_spacing = reader.read_2raw_double();
 
     // R2000+: UCS fields
-    if version.r2000_plus() {
-        let _unknown = reader.read_bit();
-        let _ucs_per_viewport = reader.read_bit();
-        let _ucs_origin = reader.read_3bit_double();
-        let _ucs_x_axis = reader.read_3bit_double();
-        let _ucs_y_axis = reader.read_3bit_double();
-        let _ucs_elevation = reader.read_bit_double();
-        let _ucs_ortho_type = reader.read_bit_short();
-    }
+    let (
+        ucs_at_origin,
+        ucs_per_viewport,
+        ucs_origin,
+        ucs_x_axis,
+        ucs_y_axis,
+        ucs_elevation,
+        ucs_ortho_type,
+    ) = if version.r2000_plus() {
+        (
+            reader.read_bit(),
+            reader.read_bit(),
+            reader.read_3bit_double(),
+            reader.read_3bit_double(),
+            reader.read_3bit_double(),
+            reader.read_bit_double(),
+            reader.read_bit_short(),
+        )
+    } else {
+        (
+            false,
+            true,
+            Vector3::ZERO,
+            Vector3::UNIT_X,
+            Vector3::UNIT_Y,
+            0.0,
+            0,
+        )
+    };
 
     // R2007+: grid flags
-    if version.r2007_plus() {
-        let _grid_flags = reader.read_bit_short();
-        let _grid_major = reader.read_bit_short();
-    }
+    let (grid_flags, grid_major) = if version.r2007_plus() {
+        (reader.read_bit_short(), reader.read_bit_short())
+    } else {
+        (2, 5)
+    };
 
     // External reference block handle
     let xref_handle = reader.read_handle();
 
     // R2007+: extra handles
-    if version.r2007_plus() {
-        let _bg_handle = reader.read_handle();
-        let _visual_style_handle = reader.read_handle();
-        let _sun_handle = reader.read_handle();
-    }
+    let (background_handle, visual_style_handle, sun_handle) =
+        if version.r2007_plus() {
+            (
+                reader.read_handle(),
+                reader.read_handle(),
+                reader.read_handle(),
+            )
+        } else {
+            (0, 0, 0)
+        };
 
     // R2000+: UCS handles
-    if version.r2000_plus() {
-        let _named_ucs_handle = reader.read_handle();
-        let _base_ucs_handle = reader.read_handle();
-    }
+    let (named_ucs_handle, base_ucs_handle) = if version.r2000_plus() {
+        (reader.read_handle(), reader.read_handle())
+    } else {
+        (0, 0)
+    };
 
     VPortData {
-        name, view_height, aspect_ratio_times_height,
-        view_center, view_target, view_direction,
-        view_twist, lens_length, front_clip, back_clip,
-        lower_left, upper_right, ucsfollow, circle_zoom,
-        fast_zoom, ucsicon_lower, ucsicon_origin, grid_on,
-        grid_spacing, snap_on, snap_style, snap_isopair,
-        snap_rotation, snap_base, snap_spacing, xref_handle,
+        name,
+        xref_reference: xref.reference,
+        xref_resolved: xref.resolved,
+        xref_dependent: xref.dependent,
+        view_height,
+        aspect_ratio_times_height,
+        view_center,
+        view_target,
+        view_direction,
+        view_twist,
+        lens_length,
+        front_clip,
+        back_clip,
+        perspective,
+        front_clipping,
+        back_clipping,
+        front_clip_at_eye,
+        lower_left,
+        upper_right,
+        ucsfollow,
+        circle_zoom,
+        fast_zoom,
+        ucsicon_lower,
+        ucsicon_origin,
+        grid_on,
+        grid_spacing,
+        snap_on,
+        snap_style,
+        snap_isopair,
+        snap_rotation,
+        snap_base,
+        snap_spacing,
+        xref_handle,
         render_mode,
+        use_default_lights,
+        default_lighting_type,
+        brightness,
+        contrast,
+        ambient_color,
+        ucs_at_origin,
+        ucs_per_viewport,
+        ucs_origin,
+        ucs_x_axis,
+        ucs_y_axis,
+        ucs_elevation,
+        ucs_ortho_type,
+        grid_flags,
+        grid_major,
+        background_handle,
+        visual_style_handle,
+        sun_handle,
+        named_ucs_handle,
+        base_ucs_handle,
     }
 }
 
@@ -788,11 +1087,14 @@ pub fn read_dimstyle(
     _dxf_version: DxfVersion,
 ) -> DimStyleData {
     let name = reader.read_variable_text();
-    read_xref_dependant_bits(reader, version);
+    let xref = read_xref_table_flags(reader, version);
 
     // Defaults
     let mut ds = DimStyleData {
         name,
+        xref_reference: xref.reference,
+        xref_resolved: xref.resolved,
+        xref_dependent: xref.dependent,
         dimpost: String::new(), dimapost: String::new(),
         dimscale: 1.0, dimasz: 0.18, dimexo: 0.0625, dimdli: 0.38,
         dimexe: 0.18, dimrnd: 0.0, dimdle: 0.0, dimtp: 0.0, dimtm: 0.0,
@@ -808,7 +1110,8 @@ pub fn read_dimstyle(
         dimaltu: 2, dimalttd: 2, dimaunit: 0, dimfrac: 0,
         dimlunit: 2, dimdsep: 46, dimtmove: 0, dimjust: 0,
         dimsd1: false, dimsd2: false, dimtolj: 1, dimtzin: 0,
-        dimaltz: 0, dimalttz: 0, dimupt: false, dimfit: 3,
+        dimaltz: 0, dimalttz: 0, dimupt: false, dimfit: 0,
+        dimatfit: 3, dimunit: 2,
         dimlwd: 0, dimlwe: 0,
         xref_handle: 0, dimtxsty_handle: 0,
         dimldrblk_handle: None, dimblk_handle: None,
@@ -816,7 +1119,74 @@ pub fn read_dimstyle(
         dimltype_handle: 0, dimltex1_handle: 0, dimltex2_handle: 0,
         dimfxl: 0.0, dimjogang: 0.0, dimtfill: 0, dimtfillclr: Color::from_index(0),
         dimarcsym: 0, dimfxlon: false, dimtxtdirection: false,
+        dimaltmzf: 0.0, dimaltmzs: String::new(),
+        dimmzf: 0.0, dimmzs: String::new(),
+        dimblk_name: String::new(),
+        dimblk1_name: String::new(),
+        dimblk2_name: String::new(),
     };
+
+    // R13/R14 only: the older DimStyle field block. Field order/types mirror
+    // the writer's r13_14_only block (matches ACadSharp). Without this the
+    // whole record was skipped, leaving DIMTAD/DIMASZ/DIMGAP at their defaults
+    // (0 / 0.18 / 0.09) — so a leader that hooks its text via DIMTAD never
+    // drew the underline. dimblk names are strings here (handles only R2000+).
+    if version.r13_14_only() {
+        ds.dimtol = reader.read_bit();
+        ds.dimlim = reader.read_bit();
+        ds.dimtih = reader.read_bit();
+        ds.dimtoh = reader.read_bit();
+        ds.dimse1 = reader.read_bit();
+        ds.dimse2 = reader.read_bit();
+        ds.dimalt = reader.read_bit();
+        ds.dimtofl = reader.read_bit();
+        ds.dimsah = reader.read_bit();
+        ds.dimtix = reader.read_bit();
+        ds.dimsoxd = reader.read_bit();
+        ds.dimaltd = reader.read_byte() as i16;
+        ds.dimzin = reader.read_byte() as i16;
+        ds.dimsd1 = reader.read_bit();
+        ds.dimsd2 = reader.read_bit();
+        ds.dimtolj = reader.read_byte() as i16;
+        ds.dimjust = reader.read_byte() as i16;
+        ds.dimfit = reader.read_byte() as i16;
+        ds.dimupt = reader.read_bit();
+        ds.dimtzin = reader.read_byte() as i16;
+        ds.dimaltz = reader.read_byte() as i16;
+        ds.dimalttz = reader.read_byte() as i16;
+        ds.dimtad = reader.read_byte() as i16;
+        ds.dimunit = reader.read_bit_short();
+        ds.dimaunit = reader.read_bit_short();
+        ds.dimdec = reader.read_bit_short();
+        ds.dimtdec = reader.read_bit_short();
+        ds.dimaltu = reader.read_bit_short();
+        ds.dimalttd = reader.read_bit_short();
+        ds.dimscale = reader.read_bit_double();
+        ds.dimasz = reader.read_bit_double();
+        ds.dimexo = reader.read_bit_double();
+        ds.dimdli = reader.read_bit_double();
+        ds.dimexe = reader.read_bit_double();
+        ds.dimrnd = reader.read_bit_double();
+        ds.dimdle = reader.read_bit_double();
+        ds.dimtp = reader.read_bit_double();
+        ds.dimtm = reader.read_bit_double();
+        ds.dimtxt = reader.read_bit_double();
+        ds.dimcen = reader.read_bit_double();
+        ds.dimtsz = reader.read_bit_double();
+        ds.dimaltf = reader.read_bit_double();
+        ds.dimlfac = reader.read_bit_double();
+        ds.dimtvp = reader.read_bit_double();
+        ds.dimtfac = reader.read_bit_double();
+        ds.dimgap = reader.read_bit_double();
+        ds.dimpost = reader.read_variable_text();
+        ds.dimapost = reader.read_variable_text();
+        ds.dimblk_name = reader.read_variable_text();
+        ds.dimblk1_name = reader.read_variable_text();
+        ds.dimblk2_name = reader.read_variable_text();
+        ds.dimclrd = reader.read_cm_color();
+        ds.dimclre = reader.read_cm_color();
+        ds.dimclrt = reader.read_cm_color();
+    }
 
     // R2000+
     if version.r2000_plus() {
@@ -897,7 +1267,7 @@ pub fn read_dimstyle(
         ds.dimaltz = reader.read_bit_short();
         ds.dimalttz = reader.read_bit_short();
         ds.dimupt = reader.read_bit();
-        ds.dimfit = reader.read_bit_short();
+        ds.dimatfit = reader.read_bit_short();
     }
 
     // R2007+
@@ -908,10 +1278,10 @@ pub fn read_dimstyle(
     // R2010+
     if version.r2010_plus() {
         ds.dimtxtdirection = reader.read_bit();
-        let _dimaltmzf = reader.read_bit_double();
-        let _dimaltmzs = reader.read_variable_text();
-        let _dimmzf = reader.read_bit_double();
-        let _dimmzs = reader.read_variable_text();
+        ds.dimaltmzf = reader.read_bit_double();
+        ds.dimaltmzs = reader.read_variable_text();
+        ds.dimmzf = reader.read_bit_double();
+        ds.dimmzs = reader.read_variable_text();
     }
 
     // R2000+

@@ -142,6 +142,23 @@ pub struct Leader {
     pub block_offset: Vector3,
     /// Annotation placement offset
     pub annotation_offset: Vector3,
+    /// Original leader origin stored in DWG.
+    pub origin: Vector3,
+    /// R13/R14 dimension gap used by the leader.
+    pub dimension_gap: f64,
+    /// Arrowhead type flags. Bit 3 controls the hookline state.
+    pub arrowhead_type: i16,
+    /// R13/R14 arrow size.
+    pub arrow_size: f64,
+    /// R13/R14 by-block color index.
+    pub byblock_color: i16,
+    /// Undocumented DWG fields preserved for round-trip.
+    pub dwg_unknown_bit1: bool,
+    pub dwg_unknown_bit2: bool,
+    pub dwg_unknown_bit3: bool,
+    pub dwg_unknown_bit4: bool,
+    pub dwg_unknown_bit5: bool,
+    pub dwg_unknown_short1: i16,
 }
 
 impl Leader {
@@ -149,7 +166,7 @@ impl Leader {
     pub fn new() -> Self {
         Self {
             common: EntityCommon::default(),
-            dimension_style: "STANDARD".to_string(),
+            dimension_style: "Standard".to_string(),
             arrow_enabled: true,
             path_type: LeaderPathType::StraightLine,
             creation_type: LeaderCreationType::WithText,
@@ -164,6 +181,17 @@ impl Leader {
             horizontal_direction: Vector3::UNIT_X,
             block_offset: Vector3::ZERO,
             annotation_offset: Vector3::ZERO,
+            origin: Vector3::ZERO,
+            dimension_gap: 0.0,
+            arrowhead_type: 0,
+            arrow_size: 0.0,
+            byblock_color: 0,
+            dwg_unknown_bit1: false,
+            dwg_unknown_bit2: false,
+            dwg_unknown_bit3: false,
+            dwg_unknown_bit4: false,
+            dwg_unknown_bit5: false,
+            dwg_unknown_short1: 0,
         }
     }
 
@@ -591,4 +619,3 @@ mod tests {
         assert_eq!(bbox.max.y, 10.0);
     }
 }
-

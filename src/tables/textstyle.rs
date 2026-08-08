@@ -55,6 +55,10 @@ pub struct TextStyle {
     pub true_type_font: String,
     /// Whether this style is xref-dependent
     pub xref_dependent: bool,
+    /// Whether this STYLE record names an SHX shape file.
+    pub is_shape_file: bool,
+    /// Whether glyphs are drawn vertically.
+    pub is_vertical: bool,
     /// Annotative: entities using this style scale with the annotation scale.
     /// Persisted as XDATA under the `AcadAnnotative` application:
     /// `AnnotativeData { 1 <flag> }`.
@@ -76,6 +80,8 @@ impl TextStyle {
             big_font_file: String::new(),
             true_type_font: String::new(),
             xref_dependent: false,
+            is_shape_file: false,
+            is_vertical: false,
             annotative: false,
         }
     }
@@ -94,6 +100,8 @@ impl TextStyle {
             big_font_file: String::new(),
             true_type_font: String::new(),
             xref_dependent: false,
+            is_shape_file: false,
+            is_vertical: false,
             annotative: false,
         }
     }
@@ -195,5 +203,4 @@ mod tests {
         assert!(style.is_upside_down());
     }
 }
-
 

@@ -245,6 +245,10 @@ pub struct Viewport {
     pub clip_boundary_handle: Handle,
     /// Render mode
     pub render_mode: ViewportRenderMode,
+    /// Plot style sheet assigned directly to the viewport.
+    pub style_sheet: String,
+    /// Place the UCS icon at the UCS origin.
+    pub ucs_at_origin: bool,
     /// UCS per viewport flag
     pub ucs_per_viewport: bool,
     /// UCS icon visibility
@@ -275,6 +279,8 @@ pub struct Viewport {
     pub shade_plot_handle: Handle,
     /// Visual style handle
     pub visual_style_handle: Handle,
+    /// Sun object owned by this viewport.
+    pub sun_handle: Handle,
     /// Default lighting on
     pub default_lighting: bool,
     /// Default lighting type
@@ -283,8 +289,8 @@ pub struct Viewport {
     pub brightness: f64,
     /// View contrast
     pub contrast: f64,
-    /// Ambient light color (RGB)
-    pub ambient_color: i32,
+    /// Ambient light color.
+    pub ambient_color: Color,
     /// Custom scale factor
     pub custom_scale: f64,
 }
@@ -315,6 +321,8 @@ impl Viewport {
             frozen_layers: Vec::new(),
             clip_boundary_handle: Handle::NULL,
             render_mode: ViewportRenderMode::Wireframe2D,
+            style_sheet: String::new(),
+            ucs_at_origin: false,
             ucs_per_viewport: false,
             ucs_icon_visible: true,
             ucs_origin: Vector3::ZERO,
@@ -330,11 +338,12 @@ impl Viewport {
             background_handle: Handle::NULL,
             shade_plot_handle: Handle::NULL,
             visual_style_handle: Handle::NULL,
+            sun_handle: Handle::NULL,
             default_lighting: true,
             default_lighting_type: 1,
             brightness: 0.0,
             contrast: 0.0,
-            ambient_color: 0,
+            ambient_color: Color::from_index(0),
             custom_scale: 1.0,
         }
     }
@@ -774,4 +783,3 @@ mod tests {
         assert!(vp.is_locked());
     }
 }
-

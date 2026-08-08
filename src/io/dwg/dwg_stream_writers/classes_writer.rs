@@ -36,6 +36,20 @@ use crate::types::DxfVersion;
 /// # Returns
 /// Complete section bytes including sentinels and CRC.
 pub fn write_classes(version: DxfVersion, classes: &[DxfClass], maintenance_version: u8) -> Vec<u8> {
+    write_classes_with_encoding(
+        version,
+        classes,
+        maintenance_version,
+        encoding_rs::WINDOWS_1252,
+    )
+}
+
+pub fn write_classes_with_encoding(
+    version: DxfVersion,
+    classes: &[DxfClass],
+    maintenance_version: u8,
+    encoding: &'static encoding_rs::Encoding,
+) -> Vec<u8> {
     let dwg_version =
         DwgVersion::from_dxf_version(version).unwrap_or(DwgVersion::AC15);
 
@@ -46,7 +60,8 @@ pub fn write_classes(version: DxfVersion, classes: &[DxfClass], maintenance_vers
     // DwgMergedStreamWriter for R2007+.
     // Pre-R2007: Use DwgMergedWriter in two-stream mode (text = main).
     if version >= DxfVersion::AC1021 {
-        let mut writer = DwgMergedWriter::new(dwg_version, version);
+        let mut writer =
+            DwgMergedWriter::with_encoding(dwg_version, version, encoding);
 
         // Save position for the size placeholder (4-byte RL = total data bits)
         writer.save_position_for_size();
@@ -73,10 +88,10 @@ pub fn write_classes(version: DxfVersion, classes: &[DxfClass], maintenance_vers
             writer.write_bit(c.was_zombie);
             writer.write_bit_short(c.item_class_id);
             writer.write_bit_long(c.instance_count);
-            writer.write_bit_long(0);
-            writer.write_bit_long(0);
-            writer.write_bit_long(0);
-            writer.write_bit_long(0);
+            writer.write_bit_long(c.dwg_version);
+            writer.write_bit_long(c.maintenance_version);
+            writer.write_bit_long(c.unknown1);
+            writer.write_bit_long(c.unknown2);
         }
 
         // merge() handles: RL patching, text-size flags, byte alignment
@@ -84,7 +99,8 @@ pub fn write_classes(version: DxfVersion, classes: &[DxfClass], maintenance_vers
         write_size_and_crc(version, maintenance_version, &section_data)
     } else {
         // Pre-R2007: use DwgMergedWriter (two-stream mode, text inline)
-        let mut writer = DwgMergedWriter::new(dwg_version, version);
+        let mut writer =
+            DwgMergedWriter::with_encoding(dwg_version, version, encoding);
 
         // R2004+: section header
         if version >= DxfVersion::AC1018 {
@@ -111,10 +127,10 @@ pub fn write_classes(version: DxfVersion, classes: &[DxfClass], maintenance_vers
 
             if version >= DxfVersion::AC1018 {
                 writer.write_bit_long(c.instance_count);
-                writer.write_bit_long(0);
-                writer.write_bit_long(0);
-                writer.write_bit_long(0);
-                writer.write_bit_long(0);
+                writer.write_bit_long(c.dwg_version);
+                writer.write_bit_long(c.maintenance_version);
+                writer.write_bit_long(c.unknown1);
+                writer.write_bit_long(c.unknown2);
             }
         }
 
@@ -182,6 +198,10 @@ mod tests {
             is_an_entity: false,
             class_number: number,
             item_class_id: 0x1F3, // object
+            dwg_version: 0,
+            maintenance_version: 0,
+            unknown1: 0,
+            unknown2: 0,
         }
     }
 

@@ -1,6 +1,6 @@
 //! DXF binary reader
 
-use super::stream_reader::{CodePairValue, DxfCodePair, DxfStreamReader};
+use super::stream_reader::{CodePairValue, DxfCodePair, DxfStreamContext, DxfStreamReader};
 use crate::error::{DxfError, Result};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
@@ -16,6 +16,7 @@ pub struct DxfBinaryReader<R: Read + Seek> {
     use_single_byte_codes: bool,
     /// Reusable buffer for reading null-terminated strings.
     str_buf: Vec<u8>,
+    context: DxfStreamContext,
 }
 
 impl<R: Read + Seek> DxfBinaryReader<R> {
@@ -47,11 +48,15 @@ impl<R: Read + Seek> DxfBinaryReader<R> {
             peeked_pair: None,
             use_single_byte_codes,
             str_buf: Vec::with_capacity(256),
+            context: DxfStreamContext::default(),
         })
     }
     
     /// Read a code/value pair from the binary stream
     fn read_pair_internal(&mut self) -> Result<Option<DxfCodePair>> {
+        let pair_offset = self.reader.stream_position().ok();
+        self.context.source_offset = pair_offset;
+        self.context.source_line = None;
         let code = if self.use_single_byte_codes {
             // Pre-AC1012: single byte codes, with 255 as escape for extended codes
             let mut code_byte = [0u8; 1];
@@ -81,7 +86,23 @@ impl<R: Read + Seek> DxfBinaryReader<R> {
         };
         
         // Read value based on code type and construct typed pair
-        self.read_pair_for_code(code)
+        let pair = self.read_pair_for_code(code)?;
+        if let Some(pair) = &pair {
+            self.observe_pair(pair, pair_offset);
+        }
+        Ok(pair)
+    }
+
+    fn observe_pair(&mut self, pair: &DxfCodePair, pair_offset: Option<u64>) {
+        self.context.source_offset = pair_offset;
+        if pair.code == 0 {
+            self.context.record_type = Some(pair.value_string.clone());
+            self.context.record_handle = None;
+        } else if pair.code == 105
+            || (pair.code == 5 && self.context.record_type.as_deref() != Some("DIMSTYLE"))
+        {
+            self.context.record_handle = pair.as_handle();
+        }
     }
     
     /// Read a null-terminated string from the binary stream, reusing str_buf.
@@ -220,6 +241,7 @@ impl<R: Read + Seek> DxfStreamReader for DxfBinaryReader<R> {
     fn reset(&mut self) -> Result<()> {
         self.reader.seek(SeekFrom::Start(0))?;
         self.peeked_pair = None;
+        self.context = DxfStreamContext::default();
         
         // Re-verify sentinel using stack array
         let mut sentinel = [0u8; 22];
@@ -236,6 +258,8 @@ impl<R: Read + Seek> DxfStreamReader for DxfBinaryReader<R> {
         
         Ok(())
     }
+
+    fn diagnostic_context(&self) -> DxfStreamContext {
+        self.context.clone()
+    }
 }
-
-

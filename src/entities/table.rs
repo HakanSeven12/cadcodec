@@ -397,6 +397,8 @@ pub struct CellBorder {
     pub color: Color,
     /// Border line weight.
     pub line_weight: LineWeight,
+    /// Line type object used for the border.
+    pub line_type_handle: Option<Handle>,
     /// Whether the border is invisible.
     pub invisible: bool,
     /// Double line spacing.
@@ -412,6 +414,7 @@ impl CellBorder {
             border_type: BorderType::Single,
             color: Color::ByBlock,
             line_weight: LineWeight::ByLayer,
+            line_type_handle: None,
             invisible: false,
             double_spacing: 0.0,
             override_flags: BorderPropertyFlags::NONE,
@@ -450,10 +453,20 @@ impl Default for CellBorder {
 pub struct CellValue {
     /// Value type.
     pub value_type: CellValueType,
+    /// Exact DWG/DXF type code. Preserves vendor-defined values that map to
+    /// [`CellValueType::Unknown`].
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub raw_type_code: i32,
     /// Unit type.
     pub unit_type: ValueUnitType,
+    /// Exact DWG/DXF unit code, including code 12 whose value-string is absent.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub raw_unit_type_code: i32,
     /// Value flags.
     pub flags: i32,
+    /// Stored size field used by Date, Point and General values.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub data_size: i32,
     /// Text string value.
     pub text: String,
     /// Format string.
@@ -464,6 +477,10 @@ pub struct CellValue {
     pub numeric_value: f64,
     /// Handle value (for Handle type).
     pub handle_value: Option<Handle>,
+    /// Point value for Point2D/Point3D cell values.
+    pub point_value: Vector3,
+    /// Date/buffer/result-buffer payload.
+    pub binary_value: Vec<u8>,
 }
 
 impl CellValue {
@@ -471,13 +488,18 @@ impl CellValue {
     pub fn new() -> Self {
         Self {
             value_type: CellValueType::Unknown,
+            raw_type_code: 0,
             unit_type: ValueUnitType::NoUnits,
+            raw_unit_type_code: 0,
             flags: 0,
+            data_size: 0,
             text: String::new(),
             format: String::new(),
             formatted_value: String::new(),
             numeric_value: 0.0,
             handle_value: None,
+            point_value: Vector3::ZERO,
+            binary_value: Vec::new(),
         }
     }
 
@@ -485,13 +507,18 @@ impl CellValue {
     pub fn text(s: &str) -> Self {
         Self {
             value_type: CellValueType::String,
+            raw_type_code: CellValueType::String as i32,
             unit_type: ValueUnitType::NoUnits,
+            raw_unit_type_code: 0,
             flags: 0,
+            data_size: 0,
             text: s.to_string(),
             format: String::new(),
             formatted_value: s.to_string(),
             numeric_value: 0.0,
             handle_value: None,
+            point_value: Vector3::ZERO,
+            binary_value: Vec::new(),
         }
     }
 
@@ -499,13 +526,18 @@ impl CellValue {
     pub fn number(n: f64) -> Self {
         Self {
             value_type: CellValueType::Double,
+            raw_type_code: CellValueType::Double as i32,
             unit_type: ValueUnitType::NoUnits,
+            raw_unit_type_code: 0,
             flags: 0,
+            data_size: 0,
             text: String::new(),
             format: String::new(),
             formatted_value: n.to_string(),
             numeric_value: n,
             handle_value: None,
+            point_value: Vector3::ZERO,
+            binary_value: Vec::new(),
         }
     }
 
@@ -513,13 +545,18 @@ impl CellValue {
     pub fn integer(n: i64) -> Self {
         Self {
             value_type: CellValueType::Long,
+            raw_type_code: CellValueType::Long as i32,
             unit_type: ValueUnitType::NoUnits,
+            raw_unit_type_code: 0,
             flags: 0,
+            data_size: 0,
             text: String::new(),
             format: String::new(),
             formatted_value: n.to_string(),
             numeric_value: n as f64,
             handle_value: None,
+            point_value: Vector3::ZERO,
+            binary_value: Vec::new(),
         }
     }
 
@@ -536,6 +573,24 @@ impl CellValue {
             &self.text
         } else {
             ""
+        }
+    }
+
+    /// Type code to serialize after accounting for API-side type changes.
+    pub fn type_code(&self) -> i32 {
+        if CellValueType::from(self.raw_type_code as u32) == self.value_type {
+            self.raw_type_code
+        } else {
+            self.value_type as i32
+        }
+    }
+
+    /// Unit code to serialize after accounting for API-side unit changes.
+    pub fn unit_type_code(&self) -> i32 {
+        if ValueUnitType::from(self.raw_unit_type_code as u32) == self.unit_type {
+            self.raw_unit_type_code
+        } else {
+            self.unit_type as i32
         }
     }
 }
@@ -562,6 +617,9 @@ pub struct CellContent {
     pub block_handle: Option<Handle>,
     /// Text style handle.
     pub text_style_handle: Option<Handle>,
+    /// Text style name used by legacy DXF table cells.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub text_style_name: String,
     /// Content color.
     pub color: Color,
     /// Rotation angle in radians.
@@ -570,6 +628,19 @@ pub struct CellContent {
     pub scale: f64,
     /// Text height.
     pub text_height: f64,
+    /// Referenced FIELD object for field content.
+    pub field_handle: Option<Handle>,
+    /// Block attribute values attached to block content.
+    pub attributes: Vec<TableAttribute>,
+    /// Content-format override flags.
+    pub format_override_flags: i32,
+    pub format_property_flags: i32,
+    pub format_value_data_type: i32,
+    pub format_value_unit_type: i32,
+    pub value_format: String,
+    pub alignment: i32,
+    /// Cached content geometry.
+    pub geometry: Option<CellContentGeometry>,
 }
 
 impl CellContent {
@@ -580,10 +651,20 @@ impl CellContent {
             value: CellValue::new(),
             block_handle: None,
             text_style_handle: None,
+            text_style_name: String::new(),
             color: Color::ByBlock,
             rotation: 0.0,
             scale: 1.0,
             text_height: 0.18,
+            field_handle: None,
+            attributes: Vec::new(),
+            format_override_flags: 0,
+            format_property_flags: 0,
+            format_value_data_type: 0,
+            format_value_unit_type: 0,
+            value_format: String::new(),
+            alignment: 0,
+            geometry: None,
         }
     }
 
@@ -594,10 +675,20 @@ impl CellContent {
             value: CellValue::text(s),
             block_handle: None,
             text_style_handle: None,
+            text_style_name: String::new(),
             color: Color::ByBlock,
             rotation: 0.0,
             scale: 1.0,
             text_height: 0.18,
+            field_handle: None,
+            attributes: Vec::new(),
+            format_override_flags: 0,
+            format_property_flags: 0,
+            format_value_data_type: 0,
+            format_value_unit_type: 0,
+            value_format: String::new(),
+            alignment: 0,
+            geometry: None,
         }
     }
 
@@ -608,10 +699,20 @@ impl CellContent {
             value: CellValue::new(),
             block_handle: Some(block_handle),
             text_style_handle: None,
+            text_style_name: String::new(),
             color: Color::ByBlock,
             rotation: 0.0,
             scale: 1.0,
             text_height: 0.18,
+            field_handle: None,
+            attributes: Vec::new(),
+            format_override_flags: 0,
+            format_property_flags: 0,
+            format_value_data_type: 0,
+            format_value_unit_type: 0,
+            value_format: String::new(),
+            alignment: 0,
+            geometry: None,
         }
     }
 }
@@ -620,6 +721,36 @@ impl Default for CellContent {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Attribute value attached to block content in a table cell.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TableAttribute {
+    pub definition_handle: Handle,
+    pub value: String,
+    pub index: i32,
+}
+
+/// Cached table-cell content geometry.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CellContentGeometry {
+    pub distance_to_top_left: Vector3,
+    pub distance_to_center: Vector3,
+    pub width: f64,
+    pub height: f64,
+    pub outer_width: f64,
+    pub outer_height: f64,
+    pub flags: i32,
+}
+
+/// Named custom data value used by tables, rows, columns and cells.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TableCustomData {
+    pub name: String,
+    pub value: CellValue,
 }
 
 // ============================================================================
@@ -634,12 +765,23 @@ pub struct CellStyle {
     pub style_type: CellStyleType,
     /// Property override flags.
     pub property_flags: CellStylePropertyFlags,
+    /// Complete style override flag word.
+    pub override_flags: i32,
+    /// Nested content-format metadata.
+    pub content_format_override_flags: i32,
+    pub content_property_flags: i32,
+    pub value_data_type: i32,
+    pub value_unit_type: i32,
+    pub value_format: String,
     /// Background fill color.
     pub background_color: Color,
     /// Content color.
     pub content_color: Color,
     /// Text style handle.
     pub text_style_handle: Option<Handle>,
+    /// Text style name used by legacy DXF table cells.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub text_style_name: String,
     /// Text height.
     pub text_height: f64,
     /// Rotation angle.
@@ -652,6 +794,9 @@ pub struct CellStyle {
     pub fill_enabled: bool,
     /// Content layout flags.
     pub layout_flags: ContentLayoutFlags,
+    /// Exact margin-override flag word stored by DWG.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub margin_override_flags: i16,
     /// Margins.
     pub margin_left: f64,
     pub margin_top: f64,
@@ -665,6 +810,12 @@ pub struct CellStyle {
     pub right_border: CellBorder,
     pub bottom_border: CellBorder,
     pub left_border: CellBorder,
+    /// Border edge records actually present in the DWG cell style.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub applied_border_edges: CellEdgeFlags,
+    /// Borders not covered by the four outer edges (inside horizontal/vertical
+    /// and vendor-defined edge masks).
+    pub additional_borders: Vec<(u32, CellBorder)>,
 }
 
 impl CellStyle {
@@ -673,15 +824,23 @@ impl CellStyle {
         Self {
             style_type: CellStyleType::Cell,
             property_flags: CellStylePropertyFlags::NONE,
+            override_flags: 0,
+            content_format_override_flags: 0,
+            content_property_flags: 0,
+            value_data_type: 0,
+            value_unit_type: 0,
+            value_format: String::new(),
             background_color: Color::ByBlock,
             content_color: Color::ByBlock,
             text_style_handle: None,
+            text_style_name: String::new(),
             text_height: 0.18,
             rotation: 0.0,
             scale: 1.0,
             alignment: 0,
             fill_enabled: false,
             layout_flags: ContentLayoutFlags::FLOW,
+            margin_override_flags: 0,
             margin_left: 0.06,
             margin_top: 0.06,
             margin_right: 0.06,
@@ -692,6 +851,8 @@ impl CellStyle {
             right_border: CellBorder::new(),
             bottom_border: CellBorder::new(),
             left_border: CellBorder::new(),
+            applied_border_edges: CellEdgeFlags::NONE,
+            additional_borders: Vec::new(),
         }
     }
 
@@ -722,6 +883,11 @@ impl Default for CellStyle {
 // Table Cell
 // ============================================================================
 
+#[cfg(feature = "serde")]
+fn default_cell_geometry_scale() -> f64 {
+    1.0
+}
+
 /// A cell in a table.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -738,6 +904,9 @@ pub struct TableCell {
     pub tooltip: String,
     /// Rotation angle.
     pub rotation: f64,
+    /// R2010+ cached cell-geometry scale.
+    #[cfg_attr(feature = "serde", serde(default = "default_cell_geometry_scale"))]
+    pub geometry_scale: f64,
     /// Auto-fit content.
     pub auto_fit: bool,
     /// Merged cell width (number of columns).
@@ -754,6 +923,33 @@ pub struct TableCell {
     pub has_linked_data: bool,
     /// Custom data value.
     pub custom_data: i32,
+    /// Pre-R2010 edge flag byte.
+    pub edge_flags: u8,
+    /// Pre-R2010 text/block value handle.
+    pub value_handle: Option<Handle>,
+    /// Pre-R2010 block scale.
+    pub block_scale: f64,
+    /// Named custom data entries.
+    pub custom_data_items: Vec<TableCustomData>,
+    /// Linked data object and its stored range dimensions.
+    pub data_link_handle: Option<Handle>,
+    pub data_link_rows: i32,
+    pub data_link_columns: i32,
+    pub data_link_unknown: i32,
+    /// Cell style identifier.
+    pub style_id: i32,
+    /// Cached geometry metadata.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub geometry_data_flag: i32,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub geometry_width_with_gap: f64,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub geometry_height_with_gap: f64,
+    pub geometry_flags: i32,
+    pub geometry_handle: Option<Handle>,
+    pub geometry: Option<CellContentGeometry>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub geometries: Vec<CellContentGeometry>,
 }
 
 impl TableCell {
@@ -766,6 +962,7 @@ impl TableCell {
             style: None,
             tooltip: String::new(),
             rotation: 0.0,
+            geometry_scale: 1.0,
             auto_fit: false,
             merge_width: 1,
             merge_height: 1,
@@ -774,6 +971,22 @@ impl TableCell {
             virtual_edge: 0,
             has_linked_data: false,
             custom_data: 0,
+            edge_flags: 0,
+            value_handle: None,
+            block_scale: 1.0,
+            custom_data_items: Vec::new(),
+            data_link_handle: None,
+            data_link_rows: 0,
+            data_link_columns: 0,
+            data_link_unknown: 0,
+            style_id: 0,
+            geometry_data_flag: 0,
+            geometry_width_with_gap: 0.0,
+            geometry_height_with_gap: 0.0,
+            geometry_flags: 0,
+            geometry_handle: None,
+            geometry: None,
+            geometries: Vec::new(),
         }
     }
 
@@ -849,6 +1062,8 @@ pub struct TableRow {
     pub style: Option<CellStyle>,
     /// Custom data value.
     pub custom_data: i32,
+    pub custom_data_items: Vec<TableCustomData>,
+    pub style_id: i32,
 }
 
 impl TableRow {
@@ -860,6 +1075,8 @@ impl TableRow {
             cells,
             style: None,
             custom_data: 0,
+            custom_data_items: Vec::new(),
+            style_id: 0,
         }
     }
 
@@ -871,6 +1088,8 @@ impl TableRow {
             cells,
             style: None,
             custom_data: 0,
+            custom_data_items: Vec::new(),
+            style_id: 0,
         }
     }
 
@@ -912,6 +1131,8 @@ pub struct TableColumn {
     pub style: Option<CellStyle>,
     /// Custom data value.
     pub custom_data: i32,
+    pub custom_data_items: Vec<TableCustomData>,
+    pub style_id: i32,
 }
 
 impl TableColumn {
@@ -922,6 +1143,8 @@ impl TableColumn {
             width: 2.5,
             style: None,
             custom_data: 0,
+            custom_data_items: Vec::new(),
+            style_id: 0,
         }
     }
 
@@ -932,6 +1155,8 @@ impl TableColumn {
             width,
             style: None,
             custom_data: 0,
+            custom_data_items: Vec::new(),
+            style_id: 0,
         }
     }
 
@@ -942,6 +1167,8 @@ impl TableColumn {
             width,
             style: None,
             custom_data: 0,
+            custom_data_items: Vec::new(),
+            style_id: 0,
         }
     }
 }
@@ -1019,6 +1246,64 @@ impl Default for CellRange {
     }
 }
 
+/// One manual table-break position.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TableBreakData {
+    pub position: Vector3,
+    pub height: f64,
+    pub flags: i32,
+}
+
+/// Cached range attached to a table break.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TableBreakRange {
+    pub position: Vector3,
+    pub start_row: i32,
+    pub end_row: i32,
+}
+
+/// Pre-R2010 table-wide style overrides.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LegacyTableStyleOverride {
+    pub flags: i32,
+    pub title_suppressed: Option<bool>,
+    /// Header suppression retained from legacy DXF.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub header_suppressed: Option<bool>,
+    pub flow_direction: Option<i16>,
+    pub horizontal_cell_margin: Option<f64>,
+    pub vertical_cell_margin: Option<f64>,
+    pub row_colors: Vec<Color>,
+    pub row_fill_none: Vec<bool>,
+    pub row_fill_colors: Vec<Color>,
+    pub row_alignments: Vec<i16>,
+    /// Text-style names retained from legacy DXF.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub text_style_names: Vec<String>,
+    pub text_style_handles: Vec<Handle>,
+    pub row_heights: Vec<f64>,
+}
+
+/// Pre-R2010 border overrides. Values follow set-bit order from bit 0 through 17.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LegacyBorderOverrides<T> {
+    pub flags: i32,
+    pub values: Vec<T>,
+}
+
+impl<T> Default for LegacyBorderOverrides<T> {
+    fn default() -> Self {
+        Self {
+            flags: 0,
+            values: Vec::new(),
+        }
+    }
+}
+
 // ============================================================================
 // Table Entity
 // ============================================================================
@@ -1063,6 +1348,9 @@ pub struct Table {
     pub table_style_handle: Option<Handle>,
     /// Block record handle (table is based on block).
     pub block_record_handle: Option<Handle>,
+    /// Anonymous block name stored by the legacy DXF INSERT base.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub block_name: String,
     /// Table data version.
     pub data_version: i16,
     /// Table value flags.
@@ -1072,6 +1360,11 @@ pub struct Table {
     pub override_border_color: bool,
     pub override_border_line_weight: bool,
     pub override_border_visibility: bool,
+    /// Native pre-R2010 table and border overrides.
+    pub legacy_style_override: Option<LegacyTableStyleOverride>,
+    pub legacy_border_colors: Option<LegacyBorderOverrides<Color>>,
+    pub legacy_border_line_weights: Option<LegacyBorderOverrides<LineWeight>>,
+    pub legacy_border_visibility: Option<LegacyBorderOverrides<bool>>,
     /// Rows.
     pub rows: Vec<TableRow>,
     /// Columns.
@@ -1082,9 +1375,179 @@ pub struct Table {
     pub break_flow_direction: BreakFlowDirection,
     /// Break spacing.
     pub break_spacing: f64,
+    /// Linked table-data name and description.
+    pub name: String,
+    pub description: String,
+    /// FIELD objects referenced by the table content.
+    pub field_handles: Vec<Handle>,
+    /// Base style applied to the table.
+    pub base_style: Option<CellStyle>,
+    /// Merged cell ranges.
+    pub merged_ranges: Vec<CellRange>,
+    /// Manual break positions and cached break ranges.
+    pub break_data: Vec<TableBreakData>,
+    pub break_ranges: Vec<TableBreakRange>,
+    /// Undocumented header values retained by the native DWG codec.
+    pub dwg_unknown_byte: u8,
+    pub dwg_unknown_handle: Option<Handle>,
+    pub dwg_unknown_long1: i32,
+    pub dwg_unknown_long2: i32,
+    pub dwg_unknown_short: i16,
+}
+
+fn visit_table_value_handles(
+    value: &mut CellValue,
+    visit: &mut impl FnMut(&mut Handle),
+) {
+    if let Some(handle) = value.handle_value.as_mut() {
+        visit(handle);
+    }
+}
+
+fn visit_table_border_handles(
+    value: &mut CellBorder,
+    visit: &mut impl FnMut(&mut Handle),
+) {
+    if let Some(handle) = value.line_type_handle.as_mut() {
+        visit(handle);
+    }
+}
+
+fn visit_table_style_handles(
+    value: &mut CellStyle,
+    visit: &mut impl FnMut(&mut Handle),
+) {
+    if let Some(handle) = value.text_style_handle.as_mut() {
+        visit(handle);
+    }
+    visit_table_border_handles(&mut value.top_border, visit);
+    visit_table_border_handles(&mut value.right_border, visit);
+    visit_table_border_handles(&mut value.bottom_border, visit);
+    visit_table_border_handles(&mut value.left_border, visit);
+    for (_, border) in &mut value.additional_borders {
+        visit_table_border_handles(border, visit);
+    }
+}
+
+fn visit_table_custom_data_handles(
+    values: &mut [TableCustomData],
+    visit: &mut impl FnMut(&mut Handle),
+) {
+    for value in values {
+        visit_table_value_handles(&mut value.value, visit);
+    }
+}
+
+fn visit_table_cell_handles(
+    value: &mut TableCell,
+    visit: &mut impl FnMut(&mut Handle),
+) {
+    for content in &mut value.contents {
+        visit_table_value_handles(&mut content.value, visit);
+        if let Some(handle) = content.block_handle.as_mut() {
+            visit(handle);
+        }
+        if let Some(handle) = content.text_style_handle.as_mut() {
+            visit(handle);
+        }
+        if let Some(handle) = content.field_handle.as_mut() {
+            visit(handle);
+        }
+        for attribute in &mut content.attributes {
+            visit(&mut attribute.definition_handle);
+        }
+    }
+    if let Some(style) = value.style.as_mut() {
+        visit_table_style_handles(style, visit);
+    }
+    if let Some(handle) = value.value_handle.as_mut() {
+        visit(handle);
+    }
+    visit_table_custom_data_handles(&mut value.custom_data_items, visit);
+    if let Some(handle) = value.data_link_handle.as_mut() {
+        visit(handle);
+    }
+    if let Some(handle) = value.geometry_handle.as_mut() {
+        visit(handle);
+    }
 }
 
 impl Table {
+    pub(crate) fn visit_object_handles_mut(
+        &mut self,
+        visit: &mut impl FnMut(&mut Handle),
+    ) {
+        if let Some(handle) = self.common.linetype_handle.as_mut() {
+            visit(handle);
+        }
+        for handle in &mut self.common.reactors {
+            visit(handle);
+        }
+        if let Some(handle) = self.common.xdictionary_handle.as_mut() {
+            visit(handle);
+        }
+        visit(&mut self.common.owner_handle);
+        if let Some(handle) = self.common.color_book_handle.as_mut() {
+            visit(handle);
+        }
+        if let Some(handle) = self.common.full_visual_style_handle.as_mut() {
+            visit(handle);
+        }
+        if let Some(handle) = self.common.face_visual_style_handle.as_mut() {
+            visit(handle);
+        }
+        if let Some(handle) = self.common.edge_visual_style_handle.as_mut() {
+            visit(handle);
+        }
+        if let Some(handle) = self.common.material_handle.as_mut() {
+            visit(handle);
+        }
+        if let Some(handle) = self.common.plotstyle_handle.as_mut() {
+            visit(handle);
+        }
+        if let Some(handle) = self.table_style_handle.as_mut() {
+            visit(handle);
+        }
+        if let Some(handle) = self.block_record_handle.as_mut() {
+            visit(handle);
+        }
+        if let Some(style) = self.legacy_style_override.as_mut() {
+            for handle in &mut style.text_style_handles {
+                visit(handle);
+            }
+        }
+        for row in &mut self.rows {
+            if let Some(style) = row.style.as_mut() {
+                visit_table_style_handles(style, visit);
+            }
+            visit_table_custom_data_handles(
+                &mut row.custom_data_items,
+                visit,
+            );
+            for cell in &mut row.cells {
+                visit_table_cell_handles(cell, visit);
+            }
+        }
+        for column in &mut self.columns {
+            if let Some(style) = column.style.as_mut() {
+                visit_table_style_handles(style, visit);
+            }
+            visit_table_custom_data_handles(
+                &mut column.custom_data_items,
+                visit,
+            );
+        }
+        for handle in &mut self.field_handles {
+            visit(handle);
+        }
+        if let Some(style) = self.base_style.as_mut() {
+            visit_table_style_handles(style, visit);
+        }
+        if let Some(handle) = self.dwg_unknown_handle.as_mut() {
+            visit(handle);
+        }
+    }
+
     /// Creates a new table with the given dimensions.
     pub fn new(insertion_point: Vector3, num_rows: usize, num_cols: usize) -> Self {
         let rows = (0..num_rows).map(|_| TableRow::new(num_cols)).collect();
@@ -1097,17 +1560,34 @@ impl Table {
             normal: Vector3::new(0.0, 0.0, 1.0),
             table_style_handle: None,
             block_record_handle: None,
+            block_name: String::new(),
             data_version: 0,
             value_flags: 0,
             override_flag: false,
             override_border_color: false,
             override_border_line_weight: false,
             override_border_visibility: false,
+            legacy_style_override: None,
+            legacy_border_colors: None,
+            legacy_border_line_weights: None,
+            legacy_border_visibility: None,
             rows,
             columns,
             break_options: BreakOptionFlags::NONE,
             break_flow_direction: BreakFlowDirection::Right,
             break_spacing: 0.0,
+            name: String::new(),
+            description: String::new(),
+            field_handles: Vec::new(),
+            base_style: None,
+            merged_ranges: Vec::new(),
+            break_data: Vec::new(),
+            break_ranges: Vec::new(),
+            dwg_unknown_byte: 0,
+            dwg_unknown_handle: None,
+            dwg_unknown_long1: 0,
+            dwg_unknown_long2: 0,
+            dwg_unknown_short: 38,
         }
     }
 
@@ -1608,4 +2088,3 @@ mod tests {
         assert!(!flags.contains(CellStateFlags::LINKED));
     }
 }
-

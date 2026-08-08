@@ -17,6 +17,24 @@ pub struct Ucs {
     pub x_axis: Vector3,
     /// Y-axis direction
     pub y_axis: Vector3,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub elevation: f64,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ortho_view_type: i16,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ortho_type: i16,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub named_ucs_handle: Handle,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub base_ucs_handle: Handle,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_reference: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_resolved: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_dependent: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_handle: Handle,
 }
 
 impl Ucs {
@@ -28,6 +46,15 @@ impl Ucs {
             origin: Vector3::ZERO,
             x_axis: Vector3::UNIT_X,
             y_axis: Vector3::UNIT_Y,
+            elevation: 0.0,
+            ortho_view_type: 0,
+            ortho_type: 0,
+            named_ucs_handle: Handle::NULL,
+            base_ucs_handle: Handle::NULL,
+            xref_reference: false,
+            xref_resolved: false,
+            xref_dependent: false,
+            xref_handle: Handle::NULL,
         }
     }
 
@@ -44,6 +71,15 @@ impl Ucs {
             origin,
             x_axis,
             y_axis,
+            elevation: 0.0,
+            ortho_view_type: 0,
+            ortho_type: 0,
+            named_ucs_handle: Handle::NULL,
+            base_ucs_handle: Handle::NULL,
+            xref_reference: false,
+            xref_resolved: false,
+            xref_dependent: false,
+            xref_handle: Handle::NULL,
         }
     }
 
@@ -70,5 +106,4 @@ impl TableEntry for Ucs {
         self.name = name;
     }
 }
-
 

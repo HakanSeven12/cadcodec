@@ -410,6 +410,88 @@ impl Default for RowCellStyle {
     }
 }
 
+/// Complete R2010+ content-format payload used by TABLESTYLE cell styles.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TableContentFormat {
+    pub property_override_flags: i32,
+    pub property_flags: i32,
+    pub value_data_type: i32,
+    pub value_unit_type: i32,
+    pub value_format_string: String,
+    pub rotation: f64,
+    pub block_scale: f64,
+    pub cell_alignment: i32,
+    pub content_color: Color,
+    pub text_style: Handle,
+    pub text_height: f64,
+}
+
+impl Default for TableContentFormat {
+    fn default() -> Self {
+        Self {
+            property_override_flags: 0,
+            property_flags: 0,
+            value_data_type: 512,
+            value_unit_type: 0,
+            value_format_string: String::new(),
+            rotation: 0.0,
+            block_scale: 1.0,
+            cell_alignment: 5,
+            content_color: Color::ByBlock,
+            text_style: Handle::NULL,
+            text_height: 0.18,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TableGridFormat {
+    pub index_mask: i32,
+    pub border: TableCellBorder,
+    pub line_type: Handle,
+}
+
+impl Default for TableGridFormat {
+    fn default() -> Self {
+        Self {
+            index_mask: 0,
+            border: TableCellBorder::default(),
+            line_type: Handle::NULL,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TableCellStyleData {
+    pub style_type: i32,
+    pub data_flags: i16,
+    pub property_override_flags: i32,
+    pub merge_flags: i32,
+    pub background_color: Color,
+    pub content_layout: i32,
+    pub content_format: TableContentFormat,
+    pub margin_override_flags: i16,
+    pub vertical_margin: f64,
+    pub horizontal_margin: f64,
+    pub bottom_margin: f64,
+    pub right_margin: f64,
+    pub horizontal_spacing: f64,
+    pub vertical_spacing: f64,
+    pub borders: Vec<TableGridFormat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct NamedTableCellStyle {
+    pub cell_style: TableCellStyleData,
+    pub id: i32,
+    pub style_type: i32,
+    pub name: String,
+}
+
 // ============================================================================
 // TableStyle
 // ============================================================================
@@ -484,10 +566,20 @@ pub struct TableStyle {
 
     /// Title row cell style.
     pub title_row_style: RowCellStyle,
+    /// R2010+ object metadata and complete named cell-style payload.
+    pub modern_unknown_byte: u8,
+    pub modern_unknown_long1: i32,
+    pub modern_unknown_long2: i32,
+    pub modern_cell_style_handle: Handle,
+    pub modern_style: Option<NamedTableCellStyle>,
+    pub modern_overrides: Vec<(i32, NamedTableCellStyle)>,
     /// Annotative: tables using this style scale with the annotation scale.
     /// Persisted as XDATA under the `AcadAnnotative` application:
     /// `AnnotativeData { 1 <flag> }`.
     pub annotative: bool,
+    /// Original DXF group-code payload for lossless DXF round-trips.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_dxf_codes: Option<Vec<(i32, String)>>,
 }
 
 impl TableStyle {
@@ -517,7 +609,14 @@ impl TableStyle {
             data_row_style: RowCellStyle::data_row(),
             header_row_style: RowCellStyle::header_row(),
             title_row_style: RowCellStyle::title_row(),
+            modern_unknown_byte: 0,
+            modern_unknown_long1: 8,
+            modern_unknown_long2: 101,
+            modern_cell_style_handle: Handle::NULL,
+            modern_style: None,
+            modern_overrides: Vec::new(),
             annotative: false,
+            raw_dxf_codes: None,
         }
     }
 
@@ -809,4 +908,3 @@ mod tests {
         assert_eq!(TableBorderType::from(2), TableBorderType::Double);
     }
 }
-

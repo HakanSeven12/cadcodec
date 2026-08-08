@@ -12,13 +12,10 @@
 //!
 //! followed by a type-specific placement payload ([`ObjectContextKind`]).
 //!
-//! Objects read from a file keep their verbatim record bytes in
-//! [`ObjectContextData::source_raw`] so they re-emit byte-for-byte on a
-//! same-version save (the existing round-trip guarantee is preserved exactly);
-//! only objects synthesized in memory (`source_raw == None`) are encoded from
-//! their fields.
+//! Recognised context classes are decoded and encoded from the semantic fields
+//! below, including cross-version saves.
 
-use crate::types::{DxfVersion, Handle, Vector2, Vector3};
+use crate::types::{Handle, Vector2, Vector3};
 
 /// A per-scale annotative representation (`AcDb*ObjectContextData` leaf).
 #[derive(Debug, Clone, PartialEq)]
@@ -45,21 +42,6 @@ pub struct ObjectContextData {
     /// Type-specific placement payload.
     pub kind: ObjectContextKind,
 
-    /// Verbatim source record bytes captured on read (the full merged
-    /// data+handle stream between the length prefix and the CRC). Re-emitted
-    /// byte-for-byte on same-version save so reading these objects never
-    /// perturbs an existing file. `None` for in-memory-synthesized objects,
-    /// which are encoded from the fields above.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub source_raw: Option<Vec<u8>>,
-    /// Handle-stream bit count that accompanies [`source_raw`](Self::source_raw)
-    /// (needed to reproduce the data/handle split on verbatim re-emit).
-    pub source_handle_bits: i64,
-    /// DWG version [`source_raw`](Self::source_raw) was read from. Verbatim
-    /// re-emit is only valid within the same encoding family; on an incompatible
-    /// cross-version save the writer drops the object (parity with `Unknown`).
-    /// `None` for synthesized objects, which are always encoded from fields.
-    pub source_version: Option<DxfVersion>,
 }
 
 /// The type-specific placement payload of an annotative context leaf. Field
@@ -67,6 +49,9 @@ pub struct ObjectContextData {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ObjectContextKind {
+    /// Bare `AcDbAnnotScaleObjectContextData` leaf.
+    AnnotScale,
+
     /// `AcDbBlkRefObjectContextData` (`ACDB_BLKREFOBJECTCONTEXTDATA_CLASS`,
     /// class 533): per-scale placement of an annotative block INSERT.
     ///
@@ -110,18 +95,61 @@ pub enum ObjectContextKind {
 
     /// A dimension per-scale context (`ACDB_<AL|ANG|DM|RA|RADIMLG|ORD>DIMOBJECTCONTEXTDATA_CLASS`).
     ///
-    /// ⚠ Layout confidence: the shared `AcDbDimensionObjectContextData` base +
-    /// the *aligned* subtype are LibreDWG "UNSTABLE" (partially verified); the
-    /// other five subtypes are LibreDWG "DEBUGGING" (best-guess, not
-    /// round-trip-verified) and ACadSharp models none of them. Encoded from the
-    /// verbatim `dwg2.spec` layout; read objects always re-emit verbatim.
+    /// The shared base and aligned subtype are verified by native DWG→DWG→DWG
+    /// plus ODA conversion. The remaining subtype tails follow the same
+    /// Autodesk DXF field contract and LibreDWG binary layout; public fixtures
+    /// for those five tails are not currently available.
     Dim(DimContext),
 
-    /// A context leaf whose type is recognised as annotation-context (so its
-    /// scale handle is captured) but whose placement payload is not yet modeled.
-    /// Always carries [`source_raw`](ObjectContextData::source_raw) and is
-    /// re-emitted verbatim; it is never synthesized.
+    /// `AcDbMLeaderObjectContextData`; a standalone annotation context using
+    /// the same semantic payload as an inline [`MultiLeader`](crate::entities::MultiLeader).
+    MLeader(crate::entities::multileader::MultiLeaderAnnotContext),
+
+    /// Annotative MTEXT attribute placement and optional embedded scale.
+    MTextAttribute(MTextAttributeContext),
+
+    /// Annotative LEADER vertex and direction data.
+    Leader(LeaderContext),
+
+    /// Annotative feature-control-frame placement.
+    Fcf {
+        location: Vector3,
+        horizontal_direction: Vector3,
+    },
+
+    /// Per-scale hatch pattern and boundary-loop metadata.
+    HatchScale(HatchScaleContext),
+
+    /// Per-view hatch context. This extends the complete per-scale hatch
+    /// payload with the target view and its projection parameters.
+    HatchView(HatchViewContext),
+
+    /// A context leaf whose type is recognised as annotation-context but whose
+    /// placement payload is not yet modeled.
     Opaque,
+}
+
+/// Shared `AcDbHatchObjectContextData` payload used by both hatch context
+/// classes. Pattern-line angles are stored in radians in memory.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct HatchScaleContext {
+    pub pattern_lines: Vec<crate::entities::HatchPatternLine>,
+    pub pattern_scale: f64,
+    pub pattern_base: Vector3,
+    pub loop_types: Vec<i32>,
+    pub supports_context: bool,
+}
+
+/// `AcDbHatchViewContextData` payload.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct HatchViewContext {
+    pub hatch: HatchScaleContext,
+    pub view: Handle,
+    pub view_normal: Vector3,
+    pub view_rotation: f64,
+    pub evaluate_hatch: bool,
 }
 
 /// MTEXT per-scale placement payload (`AcDbMTextObjectContextData`).
@@ -146,6 +174,46 @@ pub struct MTextContext {
     pub column_type: i32,
     /// Column sub-fields, present only when `column_type != 0`.
     pub columns: Option<MTextColumns>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MTextAttributeContext {
+    pub horizontal_mode: i16,
+    pub rotation: f64,
+    pub insertion: Vector2,
+    pub alignment: Vector2,
+    pub enable_context: bool,
+    pub context: Option<EmbeddedMTextContext>,
+}
+
+/// Embedded `AcDbMTextObjectContextData` carried by an MTEXT attribute
+/// context. It has its own object-context base and annotation-scale handle.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct EmbeddedMTextContext {
+    /// Embedded object's owner. Native records normally use null.
+    pub owner_handle: Handle,
+    /// Embedded object's persistent reactors.
+    pub reactors: Vec<Handle>,
+    /// Embedded object's extension dictionary.
+    pub xdictionary_handle: Option<Handle>,
+    /// R2013+ embedded binary-data flag.
+    pub has_binary_data: bool,
+    pub class_version: i16,
+    pub is_default: bool,
+    pub scale: Handle,
+    pub mtext: MTextContext,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LeaderContext {
+    pub points: Vec<Vector3>,
+    pub x_direction: Vector3,
+    pub annotation_enabled: bool,
+    pub insertion_offset: Vector3,
+    pub endpoint_projection: Vector3,
 }
 
 /// Dimension per-scale context (`AcDbDimensionObjectContextData` base + a
@@ -258,10 +326,19 @@ impl ObjectContextData {
     /// The DXF class / record name for this leaf's kind.
     pub fn class_name(&self) -> &'static str {
         match &self.kind {
+            ObjectContextKind::AnnotScale => "ACDB_ANNOTSCALEOBJECTCONTEXTDATA_CLASS",
             ObjectContextKind::BlkRef { .. } => "ACDB_BLKREFOBJECTCONTEXTDATA_CLASS",
             ObjectContextKind::Text { .. } => "ACDB_TEXTOBJECTCONTEXTDATA_CLASS",
             ObjectContextKind::MText(_) => "ACDB_MTEXTOBJECTCONTEXTDATA_CLASS",
             ObjectContextKind::Dim(d) => d.subtype.class_name(),
+            ObjectContextKind::MLeader(_) => "ACDB_MLEADEROBJECTCONTEXTDATA_CLASS",
+            ObjectContextKind::MTextAttribute(_) => {
+                "ACDB_MTEXTATTRIBUTEOBJECTCONTEXTDATA_CLASS"
+            }
+            ObjectContextKind::Leader(_) => "ACDB_LEADEROBJECTCONTEXTDATA_CLASS",
+            ObjectContextKind::Fcf { .. } => "ACDB_FCFOBJECTCONTEXTDATA_CLASS",
+            ObjectContextKind::HatchScale(_) => "ACDB_HATCHSCALECONTEXTDATA_CLASS",
+            ObjectContextKind::HatchView(_) => "ACDB_HATCHVIEWCONTEXTDATA_CLASS",
             ObjectContextKind::Opaque => "ACDB_OBJECTCONTEXTDATA_CLASS",
         }
     }

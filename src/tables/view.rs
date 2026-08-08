@@ -1,7 +1,8 @@
 //! View table entry
 
 use super::TableEntry;
-use crate::types::{Handle, Vector3};
+use crate::entities::ViewportRenderMode;
+use crate::types::{Color, Handle, Vector3};
 
 /// A view table entry
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +33,60 @@ pub struct View {
     /// Perspective projection flag (VIEWMODE bit 0). True for views created by
     /// the CAMERA command; used to draw the camera display glyph.
     pub perspective: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub front_clipping: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub back_clipping: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub front_clip_at_eye: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub render_mode: ViewportRenderMode,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub use_default_lights: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub default_lighting_type: i16,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub brightness: f64,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub contrast: f64,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ambient_color: Color,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub paper_space: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucs_associated: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucs_origin: Vector3,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucs_x_axis: Vector3,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucs_y_axis: Vector3,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucs_elevation: f64,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucs_ortho_type: i16,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub camera_plottable: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_reference: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_resolved: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_dependent: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_handle: Handle,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub background_handle: Handle,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub live_section_handle: Handle,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub visual_style_handle: Handle,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub sun_handle: Handle,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub named_ucs_handle: Handle,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub base_ucs_handle: Handle,
 }
 
 impl View {
@@ -50,6 +105,33 @@ impl View {
             back_clip: 0.0,
             twist_angle: 0.0,
             perspective: false,
+            front_clipping: false,
+            back_clipping: false,
+            front_clip_at_eye: false,
+            render_mode: ViewportRenderMode::Wireframe2D,
+            use_default_lights: true,
+            default_lighting_type: 1,
+            brightness: 0.0,
+            contrast: 0.0,
+            ambient_color: Color::from_index(250),
+            paper_space: false,
+            ucs_associated: false,
+            ucs_origin: Vector3::ZERO,
+            ucs_x_axis: Vector3::UNIT_X,
+            ucs_y_axis: Vector3::UNIT_Y,
+            ucs_elevation: 0.0,
+            ucs_ortho_type: 0,
+            camera_plottable: false,
+            xref_reference: false,
+            xref_resolved: false,
+            xref_dependent: false,
+            xref_handle: Handle::NULL,
+            background_handle: Handle::NULL,
+            live_section_handle: Handle::NULL,
+            visual_style_handle: Handle::NULL,
+            sun_handle: Handle::NULL,
+            named_ucs_handle: Handle::NULL,
+            base_ucs_handle: Handle::NULL,
         }
     }
 }
@@ -71,5 +153,4 @@ impl TableEntry for View {
         self.name = name;
     }
 }
-
 

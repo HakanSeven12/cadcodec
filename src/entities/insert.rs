@@ -43,8 +43,19 @@ pub struct Insert {
     pub column_spacing: f64,
     /// Row spacing (for array inserts)
     pub row_spacing: f64,
+    /// Preserve the fixed DWG MINSERT type even for a 1×1 array.
+    dwg_minsert: bool,
     /// Attribute entities attached to this insert
     pub attributes: Vec<AttributeEntity>,
+    /// Model-documentation viewport referenced by
+    /// `AcDbViewRepBlockReference`; `None` for ordinary INSERT entities.
+    pub view_rep_handle: Option<Handle>,
+    /// SEQEND handle terminating the attribute sequence.
+    ///
+    /// Older DWG versions require this structural record to remain adjacent
+    /// to the INSERT/ATTRIB handle chain. Preserve its source handle when the
+    /// insert came from a file; newly created inserts leave it unset.
+    pub seqend_handle: Option<Handle>,
 }
 
 impl Insert {
@@ -63,7 +74,10 @@ impl Insert {
             row_count: 1,
             column_spacing: 0.0,
             row_spacing: 0.0,
+            dwg_minsert: false,
             attributes: Vec::new(),
+            view_rep_handle: None,
+            seqend_handle: None,
         }
     }
 
@@ -147,7 +161,13 @@ impl Insert {
         self.row_count = rows;
         self.column_spacing = col_spacing;
         self.row_spacing = row_spacing;
+        self.dwg_minsert = true;
         self
+    }
+
+    /// Preserve this block reference as the DWG MINSERT fixed type.
+    pub fn mark_as_minsert(&mut self) {
+        self.dwg_minsert = true;
     }
 
     // ── Queries ─────────────────────────────────────────────────
@@ -166,7 +186,7 @@ impl Insert {
 
     /// True when DXF object type is MINSERT (array insert).
     pub fn is_minsert(&self) -> bool {
-        self.is_array()
+        self.dwg_minsert || self.is_array()
     }
 
     /// Get the total number of instances in the array

@@ -12,9 +12,15 @@
 //!
 //! Based on ACadSharp's `DwgObjectReader.cs`.
 
+pub mod associative;
 pub mod common;
+pub mod class_object;
+pub mod data_objects;
+pub mod dgn_linestyle;
 pub mod entities;
 pub mod objects;
+pub mod dynamic_block;
+pub mod field;
 pub mod tables;
 
 use crate::error::{DxfError, Result};
@@ -22,6 +28,7 @@ use crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader;
 use crate::io::dwg::dwg_version::DwgVersion;
 use crate::types::{Color, DxfVersion, Transparency};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Maximum number of items in any array read from the stream.
 /// Prevents infinite loops when reading corrupt data.
@@ -82,6 +89,8 @@ pub struct EntityCommonData {
     pub linetype_flags: u8,
     /// Linetype handle (only valid if linetype_flags == 0b11)
     pub linetype_handle: u64,
+    /// AcDbColor object handle for a color-book color — R2004+
+    pub color_book_handle: Option<u64>,
     /// Previous entity handle (pre-R2004)
     pub prev_entity_handle: Option<u64>,
     /// Next entity handle (pre-R2004)
@@ -96,6 +105,12 @@ pub struct EntityCommonData {
     pub plotstyle_flags: u8,
     /// Plotstyle handle (if plotstyle_flags == 0b11)
     pub plotstyle_handle: Option<u64>,
+    /// Full visual-style override handle — R2010+
+    pub full_visual_style_handle: Option<u64>,
+    /// Face visual-style override handle — R2010+
+    pub face_visual_style_handle: Option<u64>,
+    /// Edge visual-style override handle — R2010+
+    pub edge_visual_style_handle: Option<u64>,
     /// R2013+ `has_ds_data` bit: the entity's geometry lives in the AcDs
     /// (Autodesk Data Store) section. For a 3DSOLID/REGION/BODY/SURFACE this
     /// signals that a SAB blob in `AcDb:AcDsPrototype_1b` belongs to it; the
@@ -127,6 +142,8 @@ pub struct DwgObjectReader {
     dxf_version: DxfVersion,
     /// Handle → byte-offset map (from handle section)
     handle_map: HashMap<u64, i64>,
+    /// Document code page used by pre-R2007 object strings.
+    encoding: &'static encoding_rs::Encoding,
 }
 
 impl DwgObjectReader {
@@ -141,13 +158,56 @@ impl DwgObjectReader {
         dxf_version: DxfVersion,
         handle_map: HashMap<u64, i64>,
     ) -> Result<Self> {
+        Self::with_encoding(
+            data,
+            dxf_version,
+            handle_map,
+            encoding_rs::WINDOWS_1252,
+        )
+    }
+
+    pub fn with_encoding(
+        data: Vec<u8>,
+        dxf_version: DxfVersion,
+        handle_map: HashMap<u64, i64>,
+        encoding: &'static encoding_rs::Encoding,
+    ) -> Result<Self> {
         let version = DwgVersion::from_dxf_version(dxf_version)?;
         Ok(DwgObjectReader {
             data,
             version,
             dxf_version,
             handle_map,
+            encoding,
         })
+    }
+
+    /// Read only the type prefix of an object record.
+    /// Pass-1 cataloguing needs no payload, text, or handle cursor; avoiding a
+    /// full record allocation here removes one complete copy of every entity.
+    pub fn type_code_at(&self, offset: usize) -> Result<i16> {
+        if offset >= self.data.len() {
+            return Err(DxfError::Parse(format!(
+                "Object offset {} out of range (data len {})",
+                offset,
+                self.data.len()
+            )));
+        }
+        let (size, ms_len) = read_modular_short(&self.data[offset..]);
+        let mut pos = offset + ms_len;
+        if self.version.r2010_plus() {
+            let (_, mc_len) = read_modular_char(&self.data[pos..]);
+            pos += mc_len;
+        }
+        if size == 0 || pos >= self.data.len() {
+            return Err(DxfError::Parse(format!(
+                "Object record at {} has no type prefix",
+                offset
+            )));
+        }
+        let prefix_len = size.min(32).min(self.data.len() - pos);
+        Ok(PrefixBitReader::new(&self.data[pos..pos + prefix_len])
+            .read_object_type(self.dxf_version))
     }
 
     /// Read a single object record at the given byte offset.
@@ -192,7 +252,7 @@ impl DwgObjectReader {
                 self.data.len()
             )));
         }
-        let merged_data = self.data[pos..pos + size].to_vec();
+        let merged_data: Arc<[u8]> = Arc::from(&self.data[pos..pos + size]);
 
         // 4. For R2007+ (ThreeStream): read type_code from a temp reader,
         //    then manually construct the three sub-readers with correct
@@ -209,10 +269,11 @@ impl DwgObjectReader {
             let dwg = DwgVersion::from_dxf_version(self.dxf_version).unwrap_or(DwgVersion::AC15);
 
             // Read type_code from temp reader
-            let mut temp = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-                merged_data.clone(),
+            let mut temp = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::from_shared_with_encoding(
+                Arc::clone(&merged_data),
                 dwg,
                 self.dxf_version,
+                self.encoding,
             );
             let type_code = temp.read_object_type();
 
@@ -240,27 +301,31 @@ impl DwgObjectReader {
             }
 
             // Main reader: starts at data_start_bits (after type_code [+ RL])
-            let mut main_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-                merged_data.clone(),
+            let mut main_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::from_shared_with_encoding(
+                Arc::clone(&merged_data),
                 dwg,
                 self.dxf_version,
+                self.encoding,
             );
             main_reader.set_position_in_bits(data_start_bits);
 
             // Text reader: positioned by flag at flag_position
-            let mut text_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-                merged_data.clone(),
+            let mut text_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::from_shared_with_encoding(
+                Arc::clone(&merged_data),
                 dwg,
                 self.dxf_version,
+                self.encoding,
             );
-            text_reader.set_position_by_flag(flag_position);
+            let main_data_end =
+                text_reader.set_position_by_flag(flag_position);
 
             // Handle reader: starts at bit position handle_start (NOT byte-aligned).
             let mut handle_reader =
-                crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-                    merged_data.clone(),
+                crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::from_shared_with_encoding(
+                    Arc::clone(&merged_data),
                     dwg,
                     self.dxf_version,
+                    self.encoding,
                 );
             handle_reader.set_position_in_bits(handle_start);
 
@@ -272,6 +337,7 @@ impl DwgObjectReader {
             );
             reader.set_handle_bits(handle_bits);
             reader.set_handle_start(handle_start);
+            reader.set_main_data_end(main_data_end);
             return Ok((type_code, reader));
         }
 
@@ -292,10 +358,11 @@ impl DwgObjectReader {
         let handle_start_bits = if self.version.r2000_plus() {
             // Read BS + RL from a disposable temp reader to discover
             // the split point without consuming from the final reader.
-            let mut temp = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-                merged_data.clone(),
+            let mut temp = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::from_shared_with_encoding(
+                Arc::clone(&merged_data),
                 dwg,
                 self.dxf_version,
+                self.encoding,
             );
             let _tc = temp.read_object_type(); // BS
             temp.read_raw_long() as i64 // RL = main_size_bits
@@ -305,17 +372,19 @@ impl DwgObjectReader {
         };
 
         // Create main reader (reads from bit 0)
-        let main_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-            merged_data.clone(),
+        let main_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::from_shared_with_encoding(
+            Arc::clone(&merged_data),
             dwg,
             self.dxf_version,
+            self.encoding,
         );
 
         // Create handle reader positioned at handle_start_bits
-        let mut handle_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
+        let mut handle_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::from_shared_with_encoding(
             merged_data,
             dwg,
             self.dxf_version,
+            self.encoding,
         );
         handle_reader.set_position_in_bits(handle_start_bits);
 
@@ -325,6 +394,8 @@ impl DwgObjectReader {
             Some(handle_reader),
             self.dxf_version,
         );
+        reader.set_handle_start(handle_start_bits);
+        reader.set_main_data_end(handle_start_bits);
 
         // 6. Read the type code from the reader
         let type_code = reader.read_object_type();
@@ -502,10 +573,17 @@ impl DwgObjectReader {
                 reader.set_position_in_bits(start);
                 let v_without = peek(reader, false);
                 reader.set_position_in_bits(start);
-                // Only consume the bit when reading it makes the version decode
-                // sanely and skipping it does not — otherwise leave it (matching
-                // the omitting writers), which is the safe default.
-                if plausible(v_with) && !plausible(v_without) {
+                // Decide by which offset decodes the class_version sanely.
+                // AutoCAD only ever writes 2, so an exact 2 outranks the
+                // broader 0..=10 plausibility band — a 1-bit misalignment can
+                // still decode to a "plausible" small integer (e.g. the BS
+                // '10' code = 0), which the old rule wrongly trusted.
+                let consume = if (v_with == 2) != (v_without == 2) {
+                    v_with == 2
+                } else {
+                    plausible(v_with) && !plausible(v_without)
+                };
+                if consume {
                     has_ds_data = reader.read_bit();
                 }
             } else {
@@ -516,12 +594,14 @@ impl DwgObjectReader {
         // R13-R14: layer + linetype
         let mut layer_handle = 0u64;
         let mut linetype_flags = 0u8;
+        let mut linetype_handle = 0u64;
         if self.version.r13_14_only() {
             layer_handle = reader.read_handle();
             let is_bylayer_lt = reader.read_bit();
             if !is_bylayer_lt {
                 // Linetype handle (hard pointer) — present if NOT by-layer
-                let _linetype_handle = reader.read_handle();
+                linetype_flags = 0b11;
+                linetype_handle = reader.read_handle();
             }
         }
 
@@ -544,9 +624,11 @@ impl DwgObjectReader {
         };
 
         // R2004+: Color book color handle (hard pointer) — only if flagged
-        if self.version.r2004_plus() && has_color_handle {
-            let _color_book_handle = reader.read_handle();
-        }
+        let color_book_handle = if self.version.r2004_plus() && has_color_handle {
+            Some(reader.read_handle())
+        } else {
+            None
+        };
 
         // Linetype scale
         let linetype_scale = reader.read_bit_double();
@@ -571,7 +653,8 @@ impl DwgObjectReader {
                 invisible,
                 layer_handle,
                 linetype_flags,
-                linetype_handle: 0,
+                linetype_handle,
+                color_book_handle,
                 prev_entity_handle,
                 next_entity_handle,
                 material_flags: 0,
@@ -579,6 +662,9 @@ impl DwgObjectReader {
                 shadow_flags: 0,
                 plotstyle_flags: 0,
                 plotstyle_handle: None,
+                full_visual_style_handle: None,
+                face_visual_style_handle: None,
+                edge_visual_style_handle: None,
                 has_ds_data,
             };
         }
@@ -589,7 +675,7 @@ impl DwgObjectReader {
         }
 
         // Linetype flags (2 bits): 00=bylayer, 01=byblock, 10=continuous, 11=handle present
-        let mut linetype_handle = 0u64;
+        linetype_handle = 0;
         linetype_flags = reader.main_mut().read_2bits();
         if linetype_flags == 0b11 {
             // Linetype handle (hard pointer) — present when flags == 11
@@ -621,15 +707,18 @@ impl DwgObjectReader {
         }
 
         // R2010+: visual style bits — each bit conditionally followed by a handle
+        let mut full_visual_style_handle = None;
+        let mut face_visual_style_handle = None;
+        let mut edge_visual_style_handle = None;
         if self.version.r2010_plus() {
             if reader.read_bit() {
-                let _full_visual_style_handle = reader.read_handle();
+                full_visual_style_handle = Some(reader.read_handle());
             }
             if reader.read_bit() {
-                let _face_visual_style_handle = reader.read_handle();
+                face_visual_style_handle = Some(reader.read_handle());
             }
             if reader.read_bit() {
-                let _edge_visual_style_handle = reader.read_handle();
+                edge_visual_style_handle = Some(reader.read_handle());
             }
         }
 
@@ -659,6 +748,7 @@ impl DwgObjectReader {
             layer_handle,
             linetype_flags,
             linetype_handle,
+            color_book_handle,
             prev_entity_handle,
             next_entity_handle,
             material_flags,
@@ -666,6 +756,9 @@ impl DwgObjectReader {
             shadow_flags,
             plotstyle_flags,
             plotstyle_handle,
+            full_visual_style_handle,
+            face_visual_style_handle,
+            edge_visual_style_handle,
             has_ds_data,
         }
     }
@@ -777,6 +870,69 @@ impl DwgObjectReader {
 // ════════════════════════════════════════════════════════════════════════════
 //  Modular encoding readers (byte-level, for record framing)
 // ════════════════════════════════════════════════════════════════════════════
+
+/// Allocation-free reader for the few leading bits that encode an object type.
+/// A full `DwgBitReader` owns its backing bytes, which is useful for persistent
+/// merged streams but wasteful for the pass-1 type catalog.
+struct PrefixBitReader<'a> {
+    data: &'a [u8],
+    bit: usize,
+}
+
+impl<'a> PrefixBitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, bit: 0 }
+    }
+
+    fn read_bit(&mut self) -> u8 {
+        let shift = 7 - self.bit % 8;
+        let value = (self
+            .data
+            .get(self.bit / 8)
+            .copied()
+            .unwrap_or(0)
+            >> shift)
+            & 1;
+        self.bit += 1;
+        value
+    }
+
+    fn read_2bits(&mut self) -> u8 {
+        (self.read_bit() << 1) | self.read_bit()
+    }
+
+    fn read_byte(&mut self) -> u8 {
+        let mut value = 0u8;
+        for _ in 0..8 {
+            value = (value << 1) | self.read_bit();
+        }
+        value
+    }
+
+    fn read_raw_short(&mut self) -> i16 {
+        i16::from_le_bytes([self.read_byte(), self.read_byte()])
+    }
+
+    fn read_object_type(&mut self, version: DxfVersion) -> i16 {
+        let pair = self.read_2bits();
+        if version >= DxfVersion::AC1024 {
+            match pair {
+                0 => self.read_byte() as i16,
+                1 => 0x1F0 + self.read_byte() as i16,
+                2 | 3 => self.read_raw_short(),
+                _ => unreachable!(),
+            }
+        } else {
+            match pair {
+                0 => self.read_raw_short(),
+                1 => self.read_byte() as i16,
+                2 => 0,
+                3 => 256,
+                _ => unreachable!(),
+            }
+        }
+    }
+}
 
 /// Read a ModularShort (MS) from a byte slice.
 /// Returns (value, bytes_consumed).

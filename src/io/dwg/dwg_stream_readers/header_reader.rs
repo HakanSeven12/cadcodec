@@ -60,13 +60,18 @@ struct SectionReader {
 }
 
 impl SectionReader {
-    fn new(data: Vec<u8>, version: DxfVersion) -> Result<Self> {
+    fn with_encoding(
+        data: Vec<u8>,
+        version: DxfVersion,
+        encoding: &'static encoding_rs::Encoding,
+    ) -> Result<Self> {
         if version >= DxfVersion::AC1021 {
             // R2007+: three-stream merge.
             // The section data starts with an RL (total size in bits).
             // Create a DwgMergedReader in ThreeStream mode and set up
             // text/handle sub-streams from the RL.
-            let mut merged = DwgMergedReader::new(data, version, 0);
+            let mut merged =
+                DwgMergedReader::new_with_encoding(data, version, 0, encoding);
             // Read the RL (total_size_bits) stored by save_position_for_size
             let total_size_bits = merged.main_mut().read_raw_long() as i64;
             merged.setup_text_and_handle(total_size_bits);
@@ -74,7 +79,7 @@ impl SectionReader {
         } else {
             // Pre-R2007: single stream, everything inline
             let dwg = DwgVersion::from_dxf_version(version)?;
-            let reader = DwgBitReader::new(data, dwg, version);
+            let reader = DwgBitReader::with_encoding(data, dwg, version, encoding);
             Ok(SectionReader { inner: SectionReaderInner::BitReader(reader) })
         }
     }
@@ -178,6 +183,20 @@ impl SectionReader {
 /// # Returns
 /// `HeaderVariables` populated with all header variables.
 pub fn read_header(data: &[u8], version: DxfVersion, maintenance_version: u8) -> Result<HeaderVariables> {
+    read_header_with_encoding(
+        data,
+        version,
+        maintenance_version,
+        encoding_rs::WINDOWS_1252,
+    )
+}
+
+pub fn read_header_with_encoding(
+    data: &[u8],
+    version: DxfVersion,
+    maintenance_version: u8,
+    encoding: &'static encoding_rs::Encoding,
+) -> Result<HeaderVariables> {
     // ── Verify start sentinel ──
     if data.len() < 36 {
         return Err(DxfError::Parse("Header section too short".to_string()));
@@ -201,7 +220,11 @@ pub fn read_header(data: &[u8], version: DxfVersion, maintenance_version: u8) ->
 
     let section_data = &data[size_offset..size_offset + section_size];
 
-    let mut r = SectionReader::new(section_data.to_vec(), version)?;
+    let mut r = SectionReader::with_encoding(
+        section_data.to_vec(),
+        version,
+        encoding,
+    )?;
     let mut h = HeaderVariables::default();
 
     read_header_fields(&mut r, version, &mut h);
@@ -240,7 +263,7 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
 
     // Pre-2004: current viewport header handle
     if v < DxfVersion::AC1018 {
-        let _ = r.read_handle();
+        h.current_vx_handle = Handle::new(r.read_handle());
     }
 
     // ── Drawing mode flags (Common) ──

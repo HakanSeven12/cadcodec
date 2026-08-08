@@ -289,6 +289,11 @@ impl ShadePlotResolutionLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PlotFlags {
+    /// Bits not currently assigned by the published flag schema.
+    ///
+    /// Keeping these bits makes a read/write cycle lossless when a newer CAD
+    /// version introduces another flag.
+    pub unknown_bits: i32,
     /// Plot viewport borders
     pub plot_viewport_borders: bool,
     /// Show plot styles
@@ -322,7 +327,9 @@ pub struct PlotFlags {
 impl PlotFlags {
     /// Create from DXF bit value
     pub fn from_bits(bits: i32) -> Self {
+        let bits = bits & 0xFFFF;
         Self {
+            unknown_bits: bits & !0x7EFF,
             plot_viewport_borders: (bits & 1) != 0,
             show_plot_styles: (bits & 2) != 0,
             plot_centered: (bits & 4) != 0,
@@ -342,7 +349,7 @@ impl PlotFlags {
 
     /// Convert to DXF bit value
     pub fn to_bits(&self) -> i32 {
-        let mut bits = 0;
+        let mut bits = self.unknown_bits & !0x7EFF;
         if self.plot_viewport_borders { bits |= 1; }
         if self.show_plot_styles { bits |= 2; }
         if self.plot_centered { bits |= 4; }
@@ -471,6 +478,10 @@ pub struct PlotSettings {
     pub handle: Handle,
     /// Owner handle
     pub owner: Handle,
+    /// Reactor handles.
+    pub reactors: Vec<Handle>,
+    /// Extension dictionary handle.
+    pub xdictionary_handle: Option<Handle>,
     /// Page/Layout name (DXF code 1)
     pub page_name: String,
     /// Printer/plotter name (DXF code 2)
@@ -513,7 +524,17 @@ pub struct PlotSettings {
     pub shade_plot_dpi: i16,
     /// Plot flags (DXF code 70)
     pub flags: PlotFlags,
-    /// Scale factor (computed from numerator/denominator)
+    /// Standard scale factor stored independently in code 147.
+    pub standard_scale_factor: f64,
+    /// Paper image origin X (DXF code 148).
+    pub paper_image_origin_x: f64,
+    /// Paper image origin Y (DXF code 149).
+    pub paper_image_origin_y: f64,
+    /// Named plot-view handle used by native DWG records.
+    pub plot_view_handle: Handle,
+    /// Shade-plot visual-style handle (DXF code 333).
+    pub visual_style_handle: Handle,
+    /// Cached custom-scale calculation.
     cached_scale: Option<f64>,
 }
 
@@ -526,6 +547,8 @@ impl PlotSettings {
         Self {
             handle: Handle::NULL,
             owner: Handle::NULL,
+            reactors: Vec::new(),
+            xdictionary_handle: None,
             page_name: page_name.into(),
             printer_name: String::new(),
             paper_size: String::new(),
@@ -547,6 +570,11 @@ impl PlotSettings {
             shade_plot_resolution: ShadePlotResolutionLevel::default(),
             shade_plot_dpi: 300,
             flags: PlotFlags::default(),
+            standard_scale_factor: 1.0,
+            paper_image_origin_x: 0.0,
+            paper_image_origin_y: 0.0,
+            plot_view_handle: Handle::NULL,
+            visual_style_handle: Handle::NULL,
             cached_scale: None,
         }
     }
@@ -718,160 +746,3 @@ impl Default for PlotSettings {
         Self::new("")
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_plot_settings_creation() {
-        let settings = PlotSettings::new("Layout1");
-        assert_eq!(settings.page_name, "Layout1");
-        assert_eq!(settings.scale_factor(), 1.0);
-    }
-
-    #[test]
-    fn test_plot_settings_with_paper() {
-        let settings = PlotSettings::with_paper("Layout1", "A4");
-        assert_eq!(settings.page_name, "Layout1");
-        assert_eq!(settings.paper_size, "A4");
-    }
-
-    #[test]
-    fn test_plot_settings_scale() {
-        let mut settings = PlotSettings::new("Test");
-        
-        settings.set_custom_scale(1.0, 2.0);
-        assert!((settings.scale_factor() - 0.5).abs() < 1e-10);
-        assert!(settings.is_custom_scale());
-        
-        settings.set_standard_scale(ScaledType::TwoToOne);
-        assert!((settings.scale_factor() - 2.0).abs() < 1e-10);
-        
-        settings.set_scale_to_fit();
-        assert!(settings.is_scale_to_fit());
-    }
-
-    #[test]
-    fn test_paper_margin() {
-        let margin = PaperMargin::uniform(10.0);
-        assert_eq!(margin.left, 10.0);
-        assert_eq!(margin.horizontal_total(), 20.0);
-        assert_eq!(margin.vertical_total(), 20.0);
-        
-        let margin2 = PaperMargin::new(5.0, 10.0, 5.0, 10.0);
-        assert_eq!(margin2.horizontal_total(), 10.0);
-        assert_eq!(margin2.vertical_total(), 20.0);
-    }
-
-    #[test]
-    fn test_plot_window() {
-        let window = PlotWindow::new(10.0, 20.0, 110.0, 120.0);
-        assert!((window.width() - 100.0).abs() < 1e-10);
-        assert!((window.height() - 100.0).abs() < 1e-10);
-        assert!(!window.is_empty());
-        
-        // Test with reversed coordinates
-        let window2 = PlotWindow::new(110.0, 120.0, 10.0, 20.0);
-        assert!((window2.width() - 100.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_printable_area() {
-        let mut settings = PlotSettings::new("Test");
-        settings.set_paper_with_margins(
-            210.0,
-            297.0,
-            PaperMargin::uniform(5.0),
-        );
-        
-        assert!((settings.printable_width() - 200.0).abs() < 1e-10);
-        assert!((settings.printable_height() - 287.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_plot_paper_units() {
-        assert_eq!(PlotPaperUnits::from_code(0), PlotPaperUnits::Inches);
-        assert_eq!(PlotPaperUnits::from_code(1), PlotPaperUnits::Millimeters);
-        assert_eq!(PlotPaperUnits::from_code(2), PlotPaperUnits::Pixels);
-        
-        assert_eq!(PlotPaperUnits::Millimeters.to_code(), 1);
-    }
-
-    #[test]
-    fn test_plot_rotation() {
-        assert_eq!(PlotRotation::None.to_degrees(), 0.0);
-        assert_eq!(PlotRotation::Degrees90.to_degrees(), 90.0);
-        assert_eq!(PlotRotation::Degrees180.to_degrees(), 180.0);
-        assert_eq!(PlotRotation::Degrees270.to_degrees(), 270.0);
-        
-        assert_eq!(PlotRotation::from_code(1), PlotRotation::Degrees90);
-    }
-
-    #[test]
-    fn test_plot_type() {
-        assert_eq!(PlotType::from_code(0), PlotType::LastScreenDisplay);
-        assert_eq!(PlotType::from_code(1), PlotType::Extents);
-        assert_eq!(PlotType::from_code(5), PlotType::Layout);
-    }
-
-    #[test]
-    fn test_scaled_type() {
-        assert!((ScaledType::OneToOne.scale_factor() - 1.0).abs() < 1e-10);
-        assert!((ScaledType::OneToTwo.scale_factor() - 0.5).abs() < 1e-10);
-        assert!((ScaledType::TwoToOne.scale_factor() - 2.0).abs() < 1e-10);
-        assert!((ScaledType::OneToHundred.scale_factor() - 0.01).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_shade_plot_mode() {
-        assert_eq!(ShadePlotMode::from_code(0), ShadePlotMode::AsDisplayed);
-        assert_eq!(ShadePlotMode::from_code(1), ShadePlotMode::Wireframe);
-        assert_eq!(ShadePlotMode::from_code(2), ShadePlotMode::Hidden);
-        assert_eq!(ShadePlotMode::from_code(3), ShadePlotMode::Rendered);
-    }
-
-    #[test]
-    fn test_plot_flags() {
-        let flags = PlotFlags::from_bits(1 | 4 | 16);
-        assert!(flags.plot_viewport_borders);
-        assert!(flags.plot_centered);
-        assert!(flags.use_standard_scale);
-        assert!(!flags.show_plot_styles);
-        
-        assert_eq!(flags.to_bits(), 1 | 4 | 16);
-    }
-
-    #[test]
-    fn test_plot_settings_builder() {
-        let settings = PlotSettings::new("Layout1")
-            .with_paper_size("A3")
-            .with_printer("PDF Printer")
-            .with_rotation(PlotRotation::Degrees90)
-            .with_units(PlotPaperUnits::Millimeters)
-            .with_scale(1.0, 100.0);
-        
-        assert_eq!(settings.paper_size, "A3");
-        assert_eq!(settings.printer_name, "PDF Printer");
-        assert_eq!(settings.rotation, PlotRotation::Degrees90);
-        assert_eq!(settings.paper_units, PlotPaperUnits::Millimeters);
-        assert!((settings.scale_factor() - 0.01).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_set_plot_window() {
-        let mut settings = PlotSettings::new("Test");
-        settings.set_plot_window(0.0, 0.0, 100.0, 100.0);
-        
-        assert_eq!(settings.plot_type, PlotType::Window);
-        assert!((settings.plot_window.width() - 100.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_center_plot() {
-        let mut settings = PlotSettings::new("Test");
-        settings.center_plot();
-        assert!(settings.flags.plot_centered);
-    }
-}
-

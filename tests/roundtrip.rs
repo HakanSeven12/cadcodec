@@ -655,6 +655,13 @@ fn normalize_entity_for_comparison(entity: &mut EntityType) {
         EntityType::MLine(ml) => {
             ml.style_handle = None;
         }
+        // MText: this is a lossless cache of the raw DWG X-axis vector.
+        // Programmatic entities leave it empty and the writer derives the
+        // equivalent vector from rotation, so it is not part of semantic
+        // roundtrip equality.
+        EntityType::MText(m) => {
+            m.dwg_x_direction = None;
+        }
         // MultiLeader: many handle fields at multiple levels
         EntityType::MultiLeader(mld) => {
             mld.style_handle = None;
@@ -2134,8 +2141,8 @@ fn dwg_mtext_static_columns_r2018() {
 
 #[test]
 fn dwg_mtext_background_no_regression_all_versions() {
-    // A plain MTEXT (no fill, annotative) must still round-trip its core data
-    // on every supported version after the background/column changes.
+    // A plain MTEXT (no fill) must still round-trip its core data on every
+    // supported version after the background/column changes.
     for &(version, label) in DWG_VERSIONS {
         let mut mtext = MText::with_value("Plain", Vector3::new(7.0, 8.0, 0.0));
         mtext.height = 3.0;
@@ -2143,7 +2150,14 @@ fn dwg_mtext_background_no_regression_all_versions() {
         assert_eq!(rt.value, "Plain", "DWG {} plain MTEXT value desynced", label);
         assert_eq!(rt.height, 3.0, "DWG {} plain MTEXT height desynced", label);
         assert_eq!(rt.background_fill_flags, 0, "DWG {} plain MTEXT spurious flags", label);
-        assert!(rt.is_annotative, "DWG {} plain MTEXT annotative flag", label);
+        // A plain (default) MTEXT is non-annotative on every version: R2018+
+        // round-trips the false inline bit, and older versions carry no bit at
+        // all. Annotativeness comes from the context/style, not a fresh entity.
+        assert!(
+            !rt.is_annotative,
+            "DWG {} plain MTEXT should be non-annotative",
+            label
+        );
     }
 }
 

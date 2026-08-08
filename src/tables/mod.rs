@@ -26,6 +26,7 @@ pub mod appid;
 pub mod view;
 pub mod vport;
 pub mod ucs;
+pub mod vx;
 
 pub use layer::{Layer, LayerFlags};
 pub use linetype::{LineType, LineTypeComplexData, LineTypeComplexContent, LineTypeElement};
@@ -36,6 +37,7 @@ pub use appid::AppId;
 pub use view::View;
 pub use vport::VPort;
 pub use ucs::Ucs;
+pub use vx::VxTableRecord;
 
 /// Base trait for all table entries
 pub trait TableEntry {

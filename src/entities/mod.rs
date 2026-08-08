@@ -56,12 +56,15 @@ pub mod ole_presentation;
 pub mod polygon_mesh;
 pub mod light;
 pub mod section_symbol;
+pub mod proxy_graphics;
 pub mod unknown_entity;
 pub mod view_border;
+pub mod extended_entity;
 pub mod explode;
 pub mod translate;
 pub mod transform;
 pub mod mirror;
+pub mod embedded_entity;
 
 pub use point::Point;
 pub use line::Line;
@@ -89,7 +92,8 @@ pub use attribute_entity::AttributeEntity;
 pub use leader::{Leader, LeaderPathType, LeaderCreationType, HooklineDirection};
 pub use multileader::{
     MultiLeader, MultiLeaderBuilder, MultiLeaderAnnotContext,
-    LeaderRoot, LeaderLine, BlockAttribute, StartEndPointPair,
+    LeaderRoot, LeaderLine, BlockAttribute, MultiLeaderArrowheadOverride,
+    StartEndPointPair,
     LeaderContentType, MultiLeaderPathType, TextAttachmentType, TextAngleType,
     BlockContentConnectionType, TextAttachmentDirectionType, TextAttachmentPointType,
     TextAlignmentType, FlowDirectionType, LineSpacingStyle,
@@ -105,10 +109,10 @@ pub use raster_image::{
     ClipMode, ClipType, ImageDisplayFlags, ImageDisplayQuality, ResolutionUnit,
 };
 pub use solid3d::{
-    Solid3D, Region, Body, Wire, Silhouette, AcisData,
+    Solid3D, Region, Body, Wire, Silhouette, AcisData, AcisMaterial,
     WireType, AcisVersion,
 };
-pub use surface::{Surface, SurfaceKind};
+pub use surface::{Surface, SurfaceData, SurfaceKind, SurfaceSweepOptions};
 pub use table::{
     Table, TableBuilder, TableCell, TableRow, TableColumn,
     CellContent, CellValue, CellStyle, CellBorder, CellRange,
@@ -116,6 +120,9 @@ pub use table::{
     TableCellContentType, CellStyleType, BreakFlowDirection,
     CellEdgeFlags, CellStateFlags, CellStylePropertyFlags,
     BorderPropertyFlags, ContentLayoutFlags, BreakOptionFlags,
+    TableAttribute, CellContentGeometry, TableCustomData,
+    TableBreakData, TableBreakRange, LegacyTableStyleOverride,
+    LegacyBorderOverrides,
 };
 pub use tolerance::{Tolerance, gdt_symbols};
 pub use polyface_mesh::{
@@ -132,15 +139,22 @@ pub use underlay::{
     PdfUnderlayDefinition, DwfUnderlayDefinition, DgnUnderlayDefinition,
 };
 pub use seqend::Seqend;
-pub use ole2frame::{Ole2Frame, OleObjectType};
+pub use ole2frame::{Ole2Frame, OleFrameEnvelope, OleObjectType};
 pub use ole_presentation::{extract_presentation, OlePresentation};
 pub use polygon_mesh::{
     PolygonMesh as PolygonMeshEntity, PolygonMeshVertex, PolygonMeshFlags, SurfaceSmoothType,
 };
-pub use light::Light;
-pub use section_symbol::{SectionSymbol, SectionViewStyle};
+pub use light::{Light, LightPhotometricData};
+pub use section_symbol::{
+    SectionSymbol, SectionSymbolPoint, SectionViewStyle,
+};
+pub use proxy_graphics::{
+    ProxyGraphicRecord, ProxyGraphics, ProxyUnicodeText,
+};
 pub use unknown_entity::UnknownEntity;
 pub use view_border::ViewBorder;
+pub use extended_entity::*;
+pub use embedded_entity::EmbeddedEntity;
 
 /// Base trait for all CAD entities
 pub trait Entity {
@@ -268,10 +282,17 @@ pub struct EntityCommon {
     pub line_weight: LineWeight,
     /// Linetype name (empty string = "ByLayer")
     pub linetype: String,
+    /// DWG linetype handle. Preserved so R13/R14 entities can round-trip
+    /// non-ByLayer linetypes even when the table name cannot be resolved.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub linetype_handle: Option<Handle>,
     /// Linetype scale factor (default 1.0)
     pub linetype_scale: f64,
     /// Transparency
     pub transparency: Transparency,
+    /// DXF named/color-book color name (group code 430).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub color_name: Option<String>,
     /// Visibility flag
     pub invisible: bool,
     /// Extended data (XDATA)
@@ -286,7 +307,18 @@ pub struct EntityCommon {
     /// Owner handle (soft pointer, code 330)
     pub owner_handle: Handle,
 
-    // ── DWG round-trip fields (not exposed via DXF) ──
+    // ── Native reference/round-trip fields ──
+    /// AcDbColor object handle for a color-book color — R2004+.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub color_book_handle: Option<Handle>,
+    /// Full visual-style override handle — R2010+; DXF code 348.
+    pub full_visual_style_handle: Option<Handle>,
+    /// Face visual-style override handle — R2010+.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub face_visual_style_handle: Option<Handle>,
+    /// Edge visual-style override handle — R2010+.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub edge_visual_style_handle: Option<Handle>,
     /// Material flags (BB: 00=bylayer, 01=byblock, 10=reserved, 11=handle) — R2007+
     #[cfg_attr(feature = "serde", serde(skip))]
     pub material_flags: u8,
@@ -323,14 +355,20 @@ impl EntityCommon {
             color: Color::ByLayer,
             line_weight: LineWeight::ByLayer,
             linetype: String::new(),
+            linetype_handle: None,
             linetype_scale: 1.0,
             transparency: Transparency::OPAQUE,
+            color_name: None,
             invisible: false,
             extended_data: crate::xdata::ExtendedData::new(),
             graphic_data: None,
             reactors: Vec::new(),
             xdictionary_handle: None,
             owner_handle: Handle::NULL,
+            color_book_handle: None,
+            full_visual_style_handle: None,
+            face_visual_style_handle: None,
+            edge_visual_style_handle: None,
             material_flags: 0,
             material_handle: None,
             shadow_flags: 0,
@@ -455,6 +493,8 @@ pub enum EntityType {
     Light(Light),
     SectionSymbol(SectionSymbol),
     ViewBorder(ViewBorder),
+    /// Structured class-based and legacy entities.
+    Extended(ExtendedEntity),
     /// Unknown / unsupported entity type (common fields only)
     Unknown(UnknownEntity),
 }
@@ -509,6 +549,7 @@ impl EntityType {
             EntityType::Light(e) => e,
             EntityType::SectionSymbol(e) => e,
             EntityType::ViewBorder(e) => e,
+            EntityType::Extended(e) => e,
             EntityType::Unknown(e) => e,
         }
     }
@@ -562,6 +603,7 @@ impl EntityType {
             EntityType::Light(e) => e,
             EntityType::SectionSymbol(e) => e,
             EntityType::ViewBorder(e) => e,
+            EntityType::Extended(e) => e,
             EntityType::Unknown(e) => e,
         }
     }
@@ -615,6 +657,7 @@ impl EntityType {
             EntityType::Light(e) => &e.common,
             EntityType::SectionSymbol(e) => &e.common,
             EntityType::ViewBorder(e) => &e.common,
+            EntityType::Extended(e) => &e.common,
             EntityType::Unknown(e) => &e.common,
         }
     }
@@ -668,8 +711,8 @@ impl EntityType {
             EntityType::Light(e) => &mut e.common,
             EntityType::SectionSymbol(e) => &mut e.common,
             EntityType::ViewBorder(e) => &mut e.common,
+            EntityType::Extended(e) => &mut e.common,
             EntityType::Unknown(e) => &mut e.common,
         }
     }
 }
-

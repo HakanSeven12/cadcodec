@@ -8,6 +8,9 @@ use crate::types::{Color, Handle, Vector2, Vector3};
 pub trait DxfStreamWriter {
     /// Write a code/value pair with a string value
     fn write_string(&mut self, code: i32, value: &str) -> Result<()>;
+
+    /// Write an XRecord string without applying MTEXT-specific substitutions.
+    fn write_xrecord_string(&mut self, code: i32, value: &str) -> Result<()>;
     
     /// Write a code/value pair with a byte value (for codes 280-289)
     fn write_byte(&mut self, code: i32, value: u8) -> Result<()>;
@@ -65,6 +68,7 @@ pub trait DxfStreamWriterExt: DxfStreamWriter {
     fn write_color(&mut self, code: i32, color: Color) -> Result<()> {
         match color {
             Color::ByLayer => self.write_i16(code, 256),
+            Color::None => self.write_i16(code, 257),
             Color::ByBlock => self.write_i16(code, 0),
             Color::Index(index) => self.write_i16(code, index as i16),
             Color::Rgb { .. } => self.write_i16(code, color.approximate_index()),
@@ -113,4 +117,3 @@ pub fn value_type_for_code(code: i32) -> GroupCodeValueType {
     let dxf_code = DxfCode::from_i32(code);
     GroupCodeValueType::from_code(dxf_code)
 }
-

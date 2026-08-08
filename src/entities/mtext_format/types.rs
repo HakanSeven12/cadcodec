@@ -816,9 +816,7 @@ fn para_has_props(p: &ParagraphProperties) -> bool {
         || p.right_margin.is_some()
         || p.spacing_before.is_some()
         || p.spacing_after.is_some()
-        || p.line_spacing
-            .as_ref()
-            .map_or(false, |ls| !matches!(ls, MTextLineSpacing::Default))
+        || p.line_spacing.is_some()
         || !p.tab_stops.is_empty()
 }
 
@@ -896,11 +894,6 @@ impl MTextDocument {
 
         let mut result = String::from("{");
 
-        // Track span properties across the whole document so control codes
-        // are only emitted when they change (not repeated per paragraph).
-        let mut current_props = SpanProperties::default();
-        let mut current_stacking: Option<StackingData> = None;
-
         for (pi, paragraph) in self.paragraphs.iter().enumerate() {
             if pi > 0 {
                 // `\N` opens a column, `\P` only a line — writing `\P` for both
@@ -939,7 +932,7 @@ impl MTextDocument {
                 }
                 if let Some(ref ls) = para_props.line_spacing {
                     match ls {
-                        MTextLineSpacing::Default => {}
+                        MTextLineSpacing::Default => result.push_str(",s*"),
                         MTextLineSpacing::Exact(v) => {
                             write!(result, ",se{}", v).ok();
                         }
@@ -961,63 +954,34 @@ impl MTextDocument {
             }
 
             for span in &paragraph.spans {
-                let mut needs_reset = false;
-
-                if span.properties.color != current_props.color
-                    || span.properties.second_color != current_props.second_color
-                {
-                    needs_reset = true;
-                }
-                if span.properties.color_rgb != current_props.color_rgb {
-                    needs_reset = true;
-                }
-                if span.properties.font.as_ref() != current_props.font.as_ref() {
-                    needs_reset = true;
-                }
-                if span.properties.height != current_props.height {
-                    needs_reset = true;
-                }
-                if span.properties.stroke != current_props.stroke {
-                    needs_reset = true;
-                }
-                if span.properties.line_align != current_props.line_align {
-                    needs_reset = true;
-                }
-                if span.properties.tracking != current_props.tracking {
-                    needs_reset = true;
-                }
-                if span.properties.width_factor != current_props.width_factor {
-                    needs_reset = true;
-                }
-                if span.properties.oblique_angle != current_props.oblique_angle {
-                    needs_reset = true;
+                // Each styled span gets its own group. Closing the group restores
+                // every inherited MTEXT property at once; relying on stateful
+                // transitions cannot express resets for color, font, height,
+                // tracking, width, oblique angle, or line alignment and makes a
+                // preceding span's formatting leak into the following text.
+                let scoped = !span.properties.is_empty();
+                if scoped {
+                    result.push('{');
+                    Self::emit_properties(
+                        &mut result,
+                        &SpanProperties::default(),
+                        &span.properties,
+                    );
                 }
 
-                if needs_reset {
-                    Self::emit_properties(&mut result, &current_props, &span.properties);
-                    current_props = span.properties.clone();
-                }
-
-                // Emit stacking code when it changes
-                if span.stacking.as_ref() != current_stacking.as_ref() {
-                    if let Some(ref stack) = span.stacking {
-                        let sep = match stack.stacking_type {
-                            StackingType::Horizontal => '/',
-                            StackingType::Diagonal => '#',
-                            StackingType::Limit => '^',
-                        };
-                        write!(
-                            result,
-                            "\\S{}{}{};",
-                            stack.numerator, sep, stack.denominator
-                        )
-                        .ok();
-                    }
-                    current_stacking = span.stacking.clone();
-                }
-
-                // Emit text content (skip for stacking spans — the \S code IS the content)
-                if span.stacking.is_none() {
+                if let Some(ref stack) = span.stacking {
+                    let sep = match stack.stacking_type {
+                        StackingType::Horizontal => '/',
+                        StackingType::Diagonal => '#',
+                        StackingType::Limit => '^',
+                    };
+                    write!(
+                        result,
+                        "\\S{}{}{};",
+                        stack.numerator, sep, stack.denominator
+                    )
+                    .ok();
+                } else {
                     for ch in span.text.chars() {
                         match ch {
                             '\\' => result.push_str("\\\\"),
@@ -1026,6 +990,9 @@ impl MTextDocument {
                             _ => result.push(ch),
                         }
                     }
+                }
+                if scoped {
+                    result.push('}');
                 }
             }
         }
@@ -1419,8 +1386,7 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_no_duplicate_across_paragraphs() {
-        // When both paragraphs have the same color, only one \C1; is emitted
+    fn test_serialize_preserves_same_color_across_paragraphs() {
         let mut doc = MTextDocument::new();
         let mut props = SpanProperties::default();
         props.color = Some(MTextColor::Index(1));
@@ -1433,9 +1399,20 @@ mod tests {
         para2.push_span(MTextSpan::new("Second", props));
         doc.push_paragraph(para2);
 
-        let s = doc.to_mtext_string();
-        // Should be: {\C1;First\PSecond}  — color code NOT repeated
-        assert_eq!(s, "{\\C1;First\\PSecond}");
+        let serialized = doc.to_mtext_string();
+        let reparsed = crate::entities::mtext_format::parse_mtext(&serialized, false);
+
+        assert_eq!(reparsed.paragraphs.len(), 2);
+        assert_eq!(reparsed.paragraphs[0].to_plain_text(), "First");
+        assert_eq!(reparsed.paragraphs[1].to_plain_text(), "Second");
+        assert_eq!(
+            reparsed.paragraphs[0].spans[0].properties.color,
+            Some(MTextColor::Index(1))
+        );
+        assert_eq!(
+            reparsed.paragraphs[1].spans[0].properties.color,
+            Some(MTextColor::Index(1))
+        );
     }
 
     #[test]
@@ -1461,7 +1438,7 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_parse_serialize_color_across_paragraphs() {
+    fn test_roundtrip_preserves_inherited_color_across_paragraphs() {
         // Parse → serialize → parse should produce the same structure
         let input = "{\\C1;First\\PSecond}";
         let doc = crate::entities::mtext_format::parse_mtext(input, false);
@@ -1477,12 +1454,11 @@ mod tests {
         );
 
         let serialized = doc.to_mtext_string();
-        // Exact roundtrip: input == output
-        assert_eq!(serialized, "{\\C1;First\\PSecond}");
-
         let reparsed = crate::entities::mtext_format::parse_mtext(&serialized, false);
 
         assert_eq!(reparsed.paragraphs.len(), 2);
+        assert_eq!(reparsed.paragraphs[0].to_plain_text(), "First");
+        assert_eq!(reparsed.paragraphs[1].to_plain_text(), "Second");
         assert_eq!(
             reparsed.paragraphs[0].spans[0].properties.color,
             Some(MTextColor::Index(1))

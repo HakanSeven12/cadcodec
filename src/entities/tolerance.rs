@@ -78,6 +78,9 @@ pub struct Tolerance {
 
     /// Dimension gap (from dimension style).
     pub dimension_gap: f64,
+
+    /// Undocumented R13/R14 value preserved for DWG round-trip.
+    pub dwg_unknown_short: i16,
 }
 
 impl Tolerance {
@@ -102,6 +105,7 @@ impl Tolerance {
             dimension_style_handle: None,
             text_height: 0.18,
             dimension_gap: 0.09,
+            dwg_unknown_short: 0,
         }
     }
 
@@ -573,4 +577,3 @@ mod tests {
         assert!(total.contains("t"));
     }
 }
-

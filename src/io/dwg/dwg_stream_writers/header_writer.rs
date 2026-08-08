@@ -49,17 +49,20 @@ struct SectionWriter {
 }
 
 impl SectionWriter {
-    fn new(version: DxfVersion) -> Self {
+    fn with_encoding(
+        version: DxfVersion,
+        encoding: &'static encoding_rs::Encoding,
+    ) -> Self {
         let dwg = DwgVersion::from_dxf_version(version).unwrap_or(DwgVersion::AC15);
 
         let inner = if version >= DxfVersion::AC1021 {
             // R2007+: use three-stream merge
-            let mut writer = DwgMergedWriter::new(dwg, version);
+            let mut writer = DwgMergedWriter::with_encoding(dwg, version, encoding);
             writer.save_position_for_size(); // RL placeholder for total size in bits
             SectionWriterInner::MergedWriter(writer)
         } else {
             // Pre-R2007: single stream
-            let writer = DwgBitWriter::new(dwg, version);
+            let writer = DwgBitWriter::with_encoding(dwg, version, encoding);
             SectionWriterInner::BitWriter(writer)
         };
 
@@ -207,7 +210,21 @@ impl SectionWriter {
 /// # Returns
 /// Complete section bytes including sentinels and CRC.
 pub fn write_header(version: DxfVersion, header: &HeaderVariables, maintenance_version: u8) -> Vec<u8> {
-    let mut w = SectionWriter::new(version);
+    write_header_with_encoding(
+        version,
+        header,
+        maintenance_version,
+        encoding_rs::WINDOWS_1252,
+    )
+}
+
+pub fn write_header_with_encoding(
+    version: DxfVersion,
+    header: &HeaderVariables,
+    maintenance_version: u8,
+    encoding: &'static encoding_rs::Encoding,
+) -> Vec<u8> {
+    let mut w = SectionWriter::with_encoding(version, encoding);
     write_header_fields(&mut w, version, header);
     let section_data = w.finalize();
     wrap_with_sentinels_and_crc(version, maintenance_version, &section_data)
@@ -334,7 +351,7 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
 
     // Pre-2004: current viewport header handle
     if v < DxfVersion::AC1018 {
-        w.write_handle_ref(DwgReferenceType::HardPointer, Handle::NULL);
+        w.write_handle_ref(DwgReferenceType::HardPointer, h.current_vx_handle);
     }
 
     // ── Drawing mode flags (Common) ──

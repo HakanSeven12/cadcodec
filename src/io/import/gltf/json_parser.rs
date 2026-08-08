@@ -20,7 +20,7 @@ impl JsonValue {
     /// Parse a JSON string into a [`JsonValue`].
     pub fn parse(input: &str) -> Result<JsonValue> {
         let bytes = input.as_bytes();
-        let (val, _) = parse_value(bytes, skip_ws(bytes, 0))?;
+        let (val, _) = parse_value(bytes, skip_ws(bytes, 0), 0)?;
         Ok(val)
     }
 
@@ -96,6 +96,8 @@ impl JsonValue {
     }
 }
 
+const MAX_DEPTH: usize = 128;
+
 fn err(msg: &str, pos: usize) -> DxfError {
     DxfError::ImportError(format!("JSON parse error at byte {}: {}", pos, msg))
 }
@@ -107,14 +109,17 @@ fn skip_ws(b: &[u8], mut i: usize) -> usize {
     i
 }
 
-fn parse_value(b: &[u8], i: usize) -> Result<(JsonValue, usize)> {
+fn parse_value(b: &[u8], i: usize, depth: usize) -> Result<(JsonValue, usize)> {
     if i >= b.len() {
         return Err(err("unexpected end of input", i));
     }
+    if depth > MAX_DEPTH {
+        return Err(err("JSON depth limit exceeded", i));
+    }
     match b[i] {
         b'"' => parse_string(b, i),
-        b'{' => parse_object(b, i),
-        b'[' => parse_array(b, i),
+        b'{' => parse_object(b, i, depth + 1),
+        b'[' => parse_array(b, i, depth + 1),
         b't' | b'f' => parse_bool(b, i),
         b'n' => parse_null(b, i),
         _ => parse_number(b, i),
@@ -234,14 +239,14 @@ fn parse_null(b: &[u8], i: usize) -> Result<(JsonValue, usize)> {
     }
 }
 
-fn parse_array(b: &[u8], i: usize) -> Result<(JsonValue, usize)> {
+fn parse_array(b: &[u8], i: usize, depth: usize) -> Result<(JsonValue, usize)> {
     let mut j = skip_ws(b, i + 1);
     let mut arr = Vec::new();
     if j < b.len() && b[j] == b']' {
         return Ok((JsonValue::Array(arr), j + 1));
     }
     loop {
-        let (val, next) = parse_value(b, j)?;
+        let (val, next) = parse_value(b, j, depth)?;
         arr.push(val);
         j = skip_ws(b, next);
         if j >= b.len() {
@@ -257,7 +262,7 @@ fn parse_array(b: &[u8], i: usize) -> Result<(JsonValue, usize)> {
     }
 }
 
-fn parse_object(b: &[u8], i: usize) -> Result<(JsonValue, usize)> {
+fn parse_object(b: &[u8], i: usize, depth: usize) -> Result<(JsonValue, usize)> {
     let mut j = skip_ws(b, i + 1);
     let mut pairs = Vec::new();
     if j < b.len() && b[j] == b'}' {
@@ -270,7 +275,7 @@ fn parse_object(b: &[u8], i: usize) -> Result<(JsonValue, usize)> {
             return Err(err("expected ':' in object", j));
         }
         j = skip_ws(b, j + 1);
-        let (val, after_val) = parse_value(b, j)?;
+        let (val, after_val) = parse_value(b, j, depth)?;
         pairs.push((key, val));
         j = skip_ws(b, after_val);
         if j >= b.len() {
@@ -322,5 +327,20 @@ mod tests {
         let v = JsonValue::parse(r#"{"meshes": [{"name": "m", "primitives": []}]}"#).unwrap();
         let meshes = v.get("meshes").unwrap().as_array().unwrap();
         assert_eq!(meshes[0].get("name").unwrap().as_str(), Some("m"));
+    }
+
+    #[test]
+    fn test_parse_recursion_limit() {
+        let mut s = String::new();
+        for _ in 0..200 {
+            s.push('[');
+        }
+        for _ in 0..200 {
+            s.push(']');
+        }
+        let res = JsonValue::parse(&s);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("depth limit exceeded"), "Unexpected error: {}", err);
     }
 }

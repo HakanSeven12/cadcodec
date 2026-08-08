@@ -61,6 +61,11 @@ impl<W: Write> DxfStreamWriter for DxfBinaryWriter<W> {
         }
         Ok(())
     }
+
+    fn write_xrecord_string(&mut self, code: i32, value: &str) -> Result<()> {
+        self.write_code(code)?;
+        self.write_null_string(value)
+    }
     
     fn write_byte(&mut self, code: i32, value: u8) -> Result<()> {
         self.write_code(code)?;
@@ -206,4 +211,3 @@ mod tests {
         assert_eq!(written, "Hello\\PWorld\\PFoo\\PBar");
     }
 }
-

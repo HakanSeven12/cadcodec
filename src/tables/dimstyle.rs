@@ -1,7 +1,7 @@
 //! Dimension style table entry
 
 use super::TableEntry;
-use crate::types::Handle;
+use crate::types::{Color, Handle};
 
 /// A dimension style table entry — maps to ACadSharp's DimensionStyle
 #[derive(Debug, Clone, PartialEq)]
@@ -11,10 +11,21 @@ pub struct DimStyle {
     pub handle: Handle,
     /// Style name
     pub name: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_reference: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_resolved: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_dependent: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_handle: Handle,
 
     // ─── Dimension line ───
     /// Dimension line color (DIMCLRD, code 176)
     pub dimclrd: i16,
+    /// DWG true-color override for DIMCLRD; DXF exposes only the ACI field.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dimclrd_true_color: Option<Color>,
     /// Dimension line extension (DIMDLE, code 46)
     pub dimdle: f64,
     /// Dimension line increment for continuation (DIMDLI, code 43)
@@ -31,6 +42,9 @@ pub struct DimStyle {
     // ─── Extension line ───
     /// Extension line color (DIMCLRE, code 177)
     pub dimclre: i16,
+    /// DWG true-color override for DIMCLRE.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dimclre_true_color: Option<Color>,
     /// Extension line extension (DIMEXE, code 44)
     pub dimexe: f64,
     /// Extension line offset (DIMEXO, code 42)
@@ -57,6 +71,13 @@ pub struct DimStyle {
     pub dimblk2: Handle,
     /// Leader arrow block handle (DIMLDRBLK, code 341)
     pub dimldrblk: Handle,
+    /// R13/R14 arrow block names, before these references became handles.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dimblk_name: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dimblk1_name: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dimblk2_name: String,
     /// Separate arrow blocks (DIMSAH, code 173)
     pub dimsah: bool,
     /// Center mark size (DIMCEN, code 141)
@@ -67,6 +88,9 @@ pub struct DimStyle {
     // ─── Text ───
     /// Dimension text color (DIMCLRT, code 178)
     pub dimclrt: i16,
+    /// DWG true-color override for DIMCLRT.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dimclrt_true_color: Option<Color>,
     /// Text height (DIMTXT, code 140)
     pub dimtxt: f64,
     /// Text horizontal alignment / justification (DIMJUST, code 280)
@@ -87,10 +111,23 @@ pub struct DimStyle {
     pub dimtfill: i16,
     /// Text background fill color (DIMTFILLCLR, code 70)
     pub dimtfillclr: i16,
+    /// DWG true-color override for DIMTFILLCLR.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dimtfillclr_true_color: Option<Color>,
     /// Text movement (DIMTMOVE, code 279)
     pub dimtmove: i16,
     /// Text direction (DIMTXTDIRECTION, code 295)
     pub dimtxtdirection: bool,
+    /// R2010+ alternate measurement zero-factor and suffix.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dimaltmzf: f64,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dimaltmzs: String,
+    /// R2010+ primary measurement zero-factor and suffix.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dimmzf: f64,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dimmzs: String,
     /// Text style handle (DIMTXSTY, code 340)
     pub dimtxsty_handle: Handle,
     /// Text style name
@@ -200,8 +237,13 @@ impl DimStyle {
         DimStyle {
             handle: Handle::NULL,
             name: name.into(),
+            xref_reference: false,
+            xref_resolved: false,
+            xref_dependent: false,
+            xref_handle: Handle::NULL,
             // Dimension line
             dimclrd: 0,
+            dimclrd_true_color: None,
             dimdle: 0.0,
             dimdli: 3.75,
             dimgap: 0.625,
@@ -210,6 +252,7 @@ impl DimStyle {
             dimsd2: false,
             // Extension line
             dimclre: 0,
+            dimclre_true_color: None,
             dimexe: 1.25,
             dimexo: 0.625,
             dimlwe: -2, // ByBlock
@@ -223,11 +266,15 @@ impl DimStyle {
             dimblk1: Handle::NULL,
             dimblk2: Handle::NULL,
             dimldrblk: Handle::NULL,
+            dimblk_name: String::new(),
+            dimblk1_name: String::new(),
+            dimblk2_name: String::new(),
             dimsah: true,
             dimcen: 0.09,
             dimtsz: 0.0,
             // Text
             dimclrt: 0,
+            dimclrt_true_color: None,
             dimtxt: 0.18,
             dimjust: 0,
             dimtad: 1,    // Above
@@ -238,8 +285,13 @@ impl DimStyle {
             dimsoxd: false,
             dimtfill: 0,
             dimtfillclr: 0,
+            dimtfillclr_true_color: None,
             dimtmove: 0,
             dimtxtdirection: false,
+            dimaltmzf: 0.0,
+            dimaltmzs: String::new(),
+            dimmzf: 0.0,
+            dimmzs: String::new(),
             dimtxsty_handle: Handle::NULL,
             dimtxsty: "Standard".to_string(),
             // Scale/units
@@ -320,5 +372,3 @@ impl TableEntry for DimStyle {
         self.name == "Standard"
     }
 }
-
-

@@ -127,12 +127,15 @@
 #![warn(rustdoc::missing_crate_level_docs)]
 
 pub mod classes;
+pub mod compound_file;
+pub mod vba;
 pub mod entities;
 pub mod error;
 pub mod notification;
 pub mod types;
 pub mod tables;
 pub mod document;
+pub mod layer_state;
 pub mod io;
 pub mod xdata;
 pub mod objects;
@@ -147,22 +150,28 @@ pub use types::{
 
 // Re-export entity types
 pub use entities::{
-    Arc, Circle, Ellipse, Entity, EntityType, Line, LwPolyline, MText, Point, Polyline, Spline,
-    Text,
+    Arc, Circle, Ellipse, EmbeddedEntity, Entity, EntityType, Line, LwPolyline, MText, Point,
+    Polyline, ProxyGraphicRecord, ProxyGraphics, ProxyUnicodeText, Spline, Text,
 };
 
 // Re-export table types
 pub use tables::{
-    AppId, BlockRecord, DimStyle, Layer, LineType, Table, TableEntry, TextStyle, Ucs, VPort, View,
+    AppId, BlockRecord, DimStyle, Layer, LineType, Table, TableEntry, TextStyle, Ucs, VPort,
+    View, VxTableRecord,
 };
 
 // Re-export document
 pub use document::CadDocument;
 pub use document::{Preview, PreviewFormat};
+pub use layer_state::{LayerState, LayerStateLayer, LayerStateMask};
 
 // Re-export I/O types
 pub use io::dxf::{DxfReader, DxfReaderConfiguration, DxfWriter};
 pub use io::dwg::{DwgReader, DwgReadOptions, DwgWriter};
+pub use io::read::{
+    push_read_diagnostic, ReadDiagnostic, ReadOutcome, ReadStage, ReadStats, SourceFormat,
+    MAX_READ_DIAGNOSTICS,
+};
 
 // Re-export ACIS types
 pub use entities::acis::{SatDocument, SatHeader, SatVersion, SatRecord, SatPointer, SatToken};

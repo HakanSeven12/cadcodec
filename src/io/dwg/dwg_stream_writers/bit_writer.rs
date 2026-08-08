@@ -68,6 +68,12 @@ impl DwgBitWriter {
         w
     }
 
+    /// Encode text using the document's legacy text code page.
+    pub fn encode_legacy_text(&self, text: &str) -> Vec<u8> {
+        let (encoded, _, _) = self.encoding.encode(text);
+        encoded.into_owned()
+    }
+
     /// Get the DWG version.
     pub fn version(&self) -> DwgVersion {
         self.version
@@ -132,6 +138,14 @@ impl DwgBitWriter {
     pub fn to_bytes(&mut self) -> Vec<u8> {
         self.flush();
         self.buffer.clone()
+    }
+
+    /// Flush and move out the completed buffer without cloning it.
+    /// The writer remains valid and can be reset/reused by its owner.
+    pub fn take_bytes(&mut self) -> Vec<u8> {
+        self.flush();
+        self.write_pos = 0;
+        std::mem::take(&mut self.buffer)
     }
 
     /// Flush the partial byte (pad with zeros).
@@ -622,6 +636,32 @@ impl DwgBitWriter {
         }
     }
 
+    /// Write a handle reference using the compact offset form relative to the
+    /// current object's handle.
+    pub fn write_handle_relative(&mut self, reference_handle: u64, handle: u64) {
+        if handle == reference_handle.wrapping_add(1) {
+            self.write_byte(0x60);
+            return;
+        }
+        if handle == reference_handle.wrapping_sub(1) {
+            self.write_byte(0x80);
+            return;
+        }
+
+        let (code, offset) = if handle >= reference_handle {
+            (0xA0, handle - reference_handle)
+        } else {
+            (0xC0, reference_handle - handle)
+        };
+        let byte_count = handle_byte_count(offset);
+        self.write_byte(code | byte_count);
+        let bytes = offset.to_be_bytes();
+        let start = (8 - byte_count) as usize;
+        for i in start..8 {
+            self.write_byte(bytes[i]);
+        }
+    }
+
     /// Write a handle reference with `Undefined` type (absolute handle).
     pub fn write_handle_undefined(&mut self, handle: u64) {
         self.write_handle(DwgReferenceType::Undefined, handle);
@@ -637,37 +677,31 @@ impl DwgBitWriter {
     /// - R2004+ (AC18): BS(0) + BL(color bytes) + RC(0)
     pub fn write_cm_color(&mut self, color: &Color) {
         if self.version.r2004_plus() {
-            // R2004+ CMC format: BS(color_index) + BL(color_bytes) + RC(book_color)
-            // The BS color_index is legacy — the BL carries the full color data.
-            // AutoCAD/BricsCAD write 0 here; using the actual index wastes bits
-            // (BS(0) = 2 bits vs BS(n) = 10 bits) and produces byte-level diffs.
-            self.write_bit_short(0);
-
-            let color_long = match color {
-                Color::Rgb { r, g, b } => {
-                    // [B, G, R, 0xC2] — true color RGB flag
-                    (*b as u32) | ((*g as u32) << 8) | ((*r as u32) << 16) | (0xC2u32 << 24)
-                }
-                Color::ByLayer => {
-                    // [0, 0, 0, 0xC0] — by layer flag
-                    0xC0u32 << 24
-                }
-                Color::ByBlock => {
-                    // ByBlock method is 0xC1 (0xC3 is the ACI-index method).
-                    0xC1u32 << 24
-                }
-                Color::Index(idx) => {
-                    // [index, 0, 0, 0xC3] — ACI index flag
-                    (*idx as u32) | (0xC3u32 << 24)
-                }
-            };
-            self.write_bit_long(color_long as i32);
-            self.write_byte(0); // no color name/book
+            self.write_cm_true_color(color);
         } else {
             // R13–R2000: Write color index as BS
             let index = color.approximate_index();
             self.write_bit_short(index);
         }
+    }
+
+    /// Write the full R2004 CMC payload regardless of the file version.
+    ///
+    /// TABLESTYLE legacy row colors use this CMTC encoding in AC1015 too.
+    pub fn write_cm_true_color(&mut self, color: &Color) {
+        // The BS index is a legacy slot; the BL carries the full color data.
+        self.write_bit_short(0);
+        let color_long = match color {
+            Color::Rgb { r, g, b } => {
+                (*b as u32) | ((*g as u32) << 8) | ((*r as u32) << 16) | (0xC2u32 << 24)
+            }
+            Color::ByLayer => 0xC0u32 << 24,
+            Color::None => 0xC8u32 << 24,
+            Color::ByBlock => 0xC1u32 << 24,
+            Color::Index(idx) => (*idx as u32) | (0xC3u32 << 24),
+        };
+        self.write_bit_long(color_long as i32);
+        self.write_byte(0);
     }
 
     /// Write entity color with transparency (ENC type).
@@ -700,10 +734,14 @@ impl DwgBitWriter {
         let is_true_color = matches!(color, Color::Rgb { .. });
         let has_transparency = !transparency.is_opaque();
 
-        // A book color carries its rgb through the AcDbColor handle (0x4000);
-        // the true-color rgb value (0x8000) is only present otherwise.
+        // Autodesk writes book colors with both ENC color bits set.  The
+        // AcDbColor handle still supplies the RGB value, so no RGB BL follows.
         if is_book_color {
-            flags |= 0x4000; // AcDbColor reference (handle written separately)
+            flags |= 0xC000; // AcDbColor reference (handle written separately)
+            // ENC still carries the ACI fallback in the low 13 bits. Omitting
+            // it turns any indexed book color into ByBlock when the record is
+            // read before (or without) resolving the AcDbColor object.
+            flags |= color.approximate_index() as u16 & 0x1FFF;
         } else if is_true_color {
             flags |= 0x8000; // Complex/true color follows
         }
@@ -731,6 +769,7 @@ impl DwgBitWriter {
                     (*idx as u32) | (0xC3u32 << 24)
                 }
                 Color::ByLayer => 0xC0u32 << 24,
+                Color::None => 0xC8u32 << 24,
                 Color::ByBlock => 0xC3u32 << 24,
             };
             self.write_bit_long(color_long as i32);

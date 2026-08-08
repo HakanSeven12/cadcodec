@@ -33,9 +33,9 @@ pub enum OlePresentation {
 }
 
 impl crate::entities::Ole2Frame {
-    /// Extract the embedded picture from this frame's binary data.
+    /// Extract the embedded picture from this frame's structured storage.
     pub fn presentation(&self) -> Option<OlePresentation> {
-        extract_presentation(&self.binary_data)
+        extract_presentation(&self.encoded_payload())
     }
 }
 

@@ -1,7 +1,7 @@
 //! Layer table entry
 
 use super::TableEntry;
-use crate::types::{Color, Handle, LineWeight};
+use crate::types::{Color, Handle, LineWeight, Transparency};
 
 /// Layer flags
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +11,9 @@ pub struct LayerFlags {
     pub frozen: bool,
     /// Layer is locked
     pub locked: bool,
+    /// Layer is frozen by default in newly created viewports
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub frozen_in_new_viewport: bool,
     /// Layer is off (invisible)
     pub off: bool,
     /// Layer is xref-dependent (name contains `|`)
@@ -23,6 +26,7 @@ impl LayerFlags {
         LayerFlags {
             frozen: false,
             locked: false,
+            frozen_in_new_viewport: false,
             off: false,
             xref_dependent: false,
         }
@@ -60,6 +64,9 @@ pub struct Layer {
     pub plot_style: String,
     /// Is this layer plottable?
     pub is_plottable: bool,
+    /// Layer transparency
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub transparency: Transparency,
     /// Material handle
     pub material: Handle,
     /// Plot style handle (R2000+)
@@ -80,6 +87,7 @@ impl Layer {
             line_weight: LineWeight::Default,
             plot_style: String::new(),
             is_plottable: true,
+            transparency: Transparency::OPAQUE,
             material: Handle::NULL,
             plotstyle_handle: Handle::NULL,
             xref_block_record_handle: Handle::NULL,
@@ -97,6 +105,7 @@ impl Layer {
             line_weight: LineWeight::Default,
             plot_style: String::new(),
             is_plottable: true,
+            transparency: Transparency::OPAQUE,
             material: Handle::NULL,
             plotstyle_handle: Handle::NULL,
             xref_block_record_handle: Handle::NULL,
@@ -183,5 +192,3 @@ impl TableEntry for Layer {
         self.name == "0"
     }
 }
-
-

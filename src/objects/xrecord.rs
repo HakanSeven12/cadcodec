@@ -1,6 +1,12 @@
 //! XRecord object - Extended record storage for arbitrary data
 
-use crate::types::Handle;
+use crate::objects::{ProxyObjectReference, ProxyReferenceKind};
+use crate::types::{Handle, Vector3};
+
+#[cfg(feature = "serde")]
+fn xrecord_entries_complete() -> bool {
+    true
+}
 
 /// Dictionary cloning behavior flags
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -79,29 +85,32 @@ impl XRecordValueType {
     /// Determine value type from DXF group code
     pub fn from_code(code: i32) -> Self {
         match code {
-            // Handle references - check specific codes first
-            5 | 105 => XRecordValueType::Handle,
-            320..=329 | 480..=481 => XRecordValueType::Handle,
-            330..=369 => XRecordValueType::ObjectId,
-            // Strings (0-9 but not 5, plus 100-102, 300-309)
-            0..=4 | 6..=9 | 100..=102 | 300..=309 => XRecordValueType::String,
-            // 3D points
-            10..=39 => XRecordValueType::Point3D,
-            // Doubles
-            40..=59 | 110..=149 | 210..=239 | 460..=469 => XRecordValueType::Double,
-            // Bytes
+            code if code < 0 => XRecordValueType::Handle,
+            5 | 105 | 320..=329 | 480..=481 => {
+                XRecordValueType::Handle
+            }
+            330..=369 => {
+                XRecordValueType::ObjectId
+            }
+            390..=399 | 1005 => XRecordValueType::Handle,
+            0..=4 | 6..=9 | 100..=102 | 300..=309 | 410..=419
+            | 430..=439 | 470..=479 | 999 | 1000..=1003 => {
+                XRecordValueType::String
+            }
+            10..=37 | 110..=139 | 210..=269 | 1010..=1039
+            | 1043..=1069 => XRecordValueType::Point3D,
+            38..=59 | 140..=149 | 460..=469 | 1040..=1042 => {
+                XRecordValueType::Double
+            }
             280..=289 => XRecordValueType::Byte,
-            // 16-bit integers
-            60..=79 | 170..=179 | 270..=279 => XRecordValueType::Int16,
-            // 32-bit integers
-            90..=99 | 420..=459 => XRecordValueType::Int32,
-            // 64-bit integers
-            160..=169 => XRecordValueType::Int64,
-            // Booleans
+            60..=79 | 170..=179 | 270..=279 | 370..=389
+            | 400..=409 | 1070 => XRecordValueType::Int16,
+            80..=99 | 420..=429 | 440..=459 | 1071 => {
+                XRecordValueType::Int32
+            }
+            150..=169 => XRecordValueType::Int64,
             290..=299 => XRecordValueType::Bool,
-            // Binary chunks
-            310..=319 => XRecordValueType::Chunk,
-            // Unknown
+            310..=319 | 1004 => XRecordValueType::Chunk,
             _ => XRecordValueType::Unknown,
         }
     }
@@ -252,6 +261,109 @@ impl XRecordEntry {
     }
 }
 
+/// Well-known application schemas stored in an [`XRecord`].
+///
+/// The payload always remains available through [`XRecord::entries`].  This
+/// classification only adds a stable, typed access path for schemas used by
+/// AutoCAD and Autodesk vertical products; unknown/private schemas are kept
+/// losslessly as ordinary group-code/value pairs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum KnownXRecordKind {
+    LayerViewportAlphaOverride,
+    LayerViewportColorOverride,
+    LayerViewportLinetypeOverride,
+    LayerViewportLineweightOverride,
+    LayerReconciled,
+    LayerStateAnnotationScale,
+    AnnotationScale,
+    MeshTextureCoordinates,
+    XrecordRoundTrip,
+    MTextRoundTrip,
+    HeaderRoundTrip,
+    RecomposeData,
+    DynamicBlockHistory,
+    LayoutThumbnail,
+    ViewTransition,
+    PhotometricLight,
+    LastSavedVersion,
+    PreviousProductInfo,
+    DrawingProperties,
+    FingerprintGuid,
+    DimensionStyleData,
+    UcsData,
+    PlotData,
+    Hyperlink,
+    AdvancedMaterial,
+    MaterialAsset,
+    Metadata,
+    Unknown,
+}
+
+impl KnownXRecordKind {
+    /// Classify an XRecord dictionary key without changing its payload.
+    pub fn from_name(name: &str) -> Self {
+        match name.to_ascii_uppercase().as_str() {
+            "ADSK_XREC_LAYER_ALPHA_OVR" => Self::LayerViewportAlphaOverride,
+            "ADSK_XREC_LAYER_COLOR_OVR" => Self::LayerViewportColorOverride,
+            "ADSK_XREC_LAYER_LINETYPE_OVR" => Self::LayerViewportLinetypeOverride,
+            "ADSK_XREC_LAYER_LINEWT_OVR" => Self::LayerViewportLineweightOverride,
+            "ADSK_XREC_LAYER_RECONCILED" => Self::LayerReconciled,
+            "ACADLAYERSTATEANNOSCALE" => Self::LayerStateAnnotationScale,
+            "ASDK_XREC_ANNOTATION_SCALE_INFO" | "ASDK_XREC_ANNO_SCALE_INFO"
+            | "ADSK_XREC_VTR_ANNOSCALE_DATA" => Self::AnnotationScale,
+            "ADSK_XREC_SUBDVERTEXTEXCOORDS" => Self::MeshTextureCoordinates,
+            "ACAD_XREC_ROUNDTRIP" => Self::XrecordRoundTrip,
+            "ACAD_MTEXT_RT" | "ACAD_MTEXT_2008_RT" => Self::MTextRoundTrip,
+            "ACDBHEADERROUNDTRIPXREC" | "AUXHDRRNDTRIPDATA" => Self::HeaderRoundTrip,
+            "ACDB_RECOMPOSE_DATA" => Self::RecomposeData,
+            "ACAD_ENHANCEDBLOCKHISTORY" => Self::DynamicBlockHistory,
+            "ASEBLOCKHIERARCHYINDEXRECORD" => Self::DynamicBlockHistory,
+            "ADSK_XREC_LAYOUTTHUMBNAIL" => Self::LayoutThumbnail,
+            "ADSK_XREC_VTRANIMATIONINFO" | "ADSK_XREC_VTRTHUMBNAIL"
+            | "ADSK_XREC_VTRVIEWINFO" => Self::ViewTransition,
+            "ADSK_XREC_PHOTOMETRICLIGHTINFO" | "LIGHTINGQUALITY" => {
+                Self::PhotometricLight
+            }
+            "ACAD_LAST_SAVED_VERSION_INFO" => Self::LastSavedVersion,
+            "ACAD_CIP_PREVIOUS_PRODUCT_INFO" => Self::PreviousProductInfo,
+            "DWGPROPS" => Self::DrawingProperties,
+            "FINGERPRINTGUID" => Self::FingerprintGuid,
+            "ACADDIM" | "DIMSTYLEDATA" | "DIMLTEX1" | "DIMLTEX2" | "DIMLTYPE"
+            | "TSTACKALIGN" | "TSTACKSIZE" => {
+                Self::DimensionStyleData
+            }
+            "PUCSBASE" | "PUCSORGBACK" | "PUCSORGBOTTOM" | "PUCSORGFRONT"
+            | "PUCSORGLEFT" | "PUCSORGRIGHT" | "PUCSORGTOP" | "PUCSORTHOREF"
+            | "PUCSORTHOVIEW" | "UCSBASE" | "UCSORGBACK" | "UCSORGBOTTOM"
+            | "UCSORGFRONT" | "UCSORGLEFT" | "UCSORGRIGHT" | "UCSORGTOP"
+            | "UCSORTHOREF" | "UCSORTHOVIEW" => Self::UcsData,
+            "ACAD_LAYOUTSELFREF" | "LAYOUTDICT" | "PLOTSETDICT"
+            | "PLOTSTYLNAMDICT" | "PSVPSCALE" | "STYLESHEET" => Self::PlotData,
+            "HYPERLINKBASE" => Self::Hyperlink,
+            "ADVMATERIAL" => Self::AdvancedMaterial,
+            "FBXASSET" | "BUMPTILE" | "DIFFUSETILE" | "OPACITYTILE"
+            | "REFLECTIONTILE" | "REFRACTIONTILE" | "SPECULARTILE" | "BUMP"
+            | "DIFFUSE" | "MATERIALDICT" | "VIZ XML MATERIAL DEFINITION" => {
+                Self::MaterialAsset
+            }
+            "ACAD_MLATT" | "ACAD_VIEWS_VIEW_CUSTOM" | "AECDEPRECATIONHISTORY"
+            | "CEPSNID" | "CEPSNTYPE" | "COLORDICT" | "INSUNITS" | "LWETCUNION"
+            | "MCS_DOCUMENT_ID" | "MCS_PARAMS_DATA" | "MC_VERSION_DATA"
+            | "VERSIONGUID" => Self::Metadata,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// A code-102 delimited section embedded in an XRecord payload.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct XRecordSection {
+    pub name: String,
+    pub entries: Vec<XRecordEntry>,
+}
+
 /// XRecord object - stores arbitrary extended data
 ///
 /// XRecords can store any DXF group code/value pairs and are commonly
@@ -273,14 +385,43 @@ pub struct XRecord {
     pub handle: Handle,
     /// Owner handle
     pub owner: Handle,
+    /// Objects notified when this record changes.
+    pub reactors: Vec<Handle>,
+    /// Extension dictionary attached to this record.
+    pub xdictionary_handle: Option<Handle>,
     /// Record name (optional, for named XRecords)
     pub name: String,
     /// Cloning behavior flags
     pub cloning_flags: DictionaryCloningFlags,
     /// Collection of data entries
     pub entries: Vec<XRecordEntry>,
+    /// Object-id handle stream paired with 330-369 entries in DWG files.
+    ///
+    /// Reference kind is retained because ownership/pointer semantics are
+    /// encoded in the DWG handle header, not in the eight-byte XRecord value.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub object_references: Vec<ProxyObjectReference>,
+    /// Preserve the exact decoded DWG handle vector, including an intentionally
+    /// empty vector. Cleared by typed mutation helpers so references are then
+    /// regenerated from 330-369 entries.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub preserve_object_reference_stream: bool,
+    /// Whether every byte in `raw_data` was decoded into `entries`.
+    ///
+    /// An incomplete payload is emitted verbatim for same-version DWG saves,
+    /// which prevents a private or future group code from being truncated.
+    #[cfg_attr(feature = "serde", serde(default = "xrecord_entries_complete"))]
+    pub entries_complete: bool,
     /// Raw DWG data bytes (for roundtripping when entries are not parsed)
     pub raw_data: Vec<u8>,
+    /// Original merged DWG object record for exact-version round-trips.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_dwg_data: Option<Vec<u8>>,
+    /// Handle-stream bit count stored alongside `raw_dwg_data`.
+    pub raw_dwg_handle_bits: i64,
+    /// DWG version that produced `raw_dwg_data`.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_dwg_version: Option<crate::types::DxfVersion>,
 }
 
 impl XRecord {
@@ -292,10 +433,18 @@ impl XRecord {
         Self {
             handle: Handle::NULL,
             owner: Handle::NULL,
+            reactors: Vec::new(),
+            xdictionary_handle: None,
             name: String::new(),
             cloning_flags: DictionaryCloningFlags::NotApplicable,
             entries: Vec::new(),
+            object_references: Vec::new(),
+            preserve_object_reference_stream: false,
+            entries_complete: true,
             raw_data: Vec::new(),
+            raw_dwg_data: None,
+            raw_dwg_handle_bits: 0,
+            raw_dwg_version: None,
         }
     }
 
@@ -309,42 +458,57 @@ impl XRecord {
 
     /// Add an entry to the record
     pub fn add_entry(&mut self, entry: XRecordEntry) {
+        let is_object_id = (330..=369).contains(&entry.code);
         self.entries.push(entry);
+        if is_object_id {
+            self.synchronize_object_references();
+        }
+        self.entries_complete = true;
     }
 
     /// Create and add a string entry
     pub fn add_string(&mut self, code: i32, value: impl Into<String>) {
         self.entries.push(XRecordEntry::string(code, value));
+        self.entries_complete = true;
     }
 
     /// Create and add a double entry
     pub fn add_double(&mut self, code: i32, value: f64) {
         self.entries.push(XRecordEntry::double(code, value));
+        self.entries_complete = true;
     }
 
     /// Create and add an i16 entry
     pub fn add_int16(&mut self, code: i32, value: i16) {
         self.entries.push(XRecordEntry::int16(code, value));
+        self.entries_complete = true;
     }
 
     /// Create and add an i32 entry
     pub fn add_int32(&mut self, code: i32, value: i32) {
         self.entries.push(XRecordEntry::int32(code, value));
+        self.entries_complete = true;
     }
 
     /// Create and add a handle entry
     pub fn add_handle(&mut self, code: i32, value: Handle) {
         self.entries.push(XRecordEntry::handle(code, value));
+        if (330..=369).contains(&code) {
+            self.synchronize_object_references();
+        }
+        self.entries_complete = true;
     }
 
     /// Create and add a bool entry
     pub fn add_bool(&mut self, code: i32, value: bool) {
         self.entries.push(XRecordEntry::bool(code, value));
+        self.entries_complete = true;
     }
 
     /// Create and add a point entry
     pub fn add_point3d(&mut self, x_code: i32, x: f64, y: f64, z: f64) {
         self.entries.push(XRecordEntry::point3d(x_code, x, y, z));
+        self.entries_complete = true;
     }
 
     /// Get the number of entries
@@ -399,24 +563,292 @@ impl XRecord {
     /// Remove all entries with a specific code
     pub fn remove_by_code(&mut self, code: i32) {
         self.entries.retain(|e| e.code != code);
+        if (330..=369).contains(&code) {
+            self.synchronize_object_references();
+        }
+        self.entries_complete = true;
     }
 
     /// Clear all entries
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.object_references.clear();
+        self.preserve_object_reference_stream = false;
+        self.entries_complete = true;
     }
 
     /// Get all referenced handles
     pub fn get_references(&self) -> Vec<Handle> {
-        self.entries
+        let mut references: Vec<Handle> = self.entries
             .iter()
             .filter_map(|e| e.value.as_handle())
-            .collect()
+            .collect();
+        references.extend(self.object_references.iter().map(|value| value.handle));
+        references.sort_by_key(|handle| handle.value());
+        references.dedup();
+        references
     }
 
     /// Iterate over entries
     pub fn iter(&self) -> impl Iterator<Item = &XRecordEntry> {
         self.entries.iter()
+    }
+
+    /// Return the well-known schema associated with this record's dictionary
+    /// key. Unknown schemas remain fully editable through `entries`.
+    pub fn known_kind(&self) -> KnownXRecordKind {
+        KnownXRecordKind::from_name(&self.name)
+    }
+
+    /// Parse balanced code-102 `{NAME` / `}` groups while preserving entry
+    /// order. Nested groups are supported.
+    pub fn sections(&self) -> Vec<XRecordSection> {
+        let mut sections = Vec::new();
+        let mut stack: Vec<(String, Vec<XRecordEntry>)> = Vec::new();
+        for entry in &self.entries {
+            match (entry.code, &entry.value) {
+                (102, XRecordValue::String(value)) if value.starts_with('{') => {
+                    stack.push((
+                        value.trim_start_matches('{').to_string(),
+                        Vec::new(),
+                    ));
+                }
+                (102, XRecordValue::String(value))
+                    if stack.last().is_some_and(|(name, _)| {
+                        value == "}"
+                            || value
+                                .strip_suffix('}')
+                                .is_some_and(|closing| closing.eq_ignore_ascii_case(name))
+                    }) =>
+                {
+                    if let Some((name, entries)) = stack.pop() {
+                        let section = XRecordSection { name, entries };
+                        if let Some((_, parent)) = stack.last_mut() {
+                            parent.push(XRecordEntry::string(
+                                102,
+                                format!("{{{}", section.name),
+                            ));
+                            parent.extend(section.entries.clone());
+                            parent.push(XRecordEntry::string(102, "}"));
+                        }
+                        sections.push(section);
+                    }
+                }
+                _ => {
+                    if let Some((_, entries)) = stack.last_mut() {
+                        entries.push(entry.clone());
+                    }
+                }
+            }
+        }
+        sections
+    }
+
+    /// Get a code-102 section by name.
+    pub fn section(&self, name: &str) -> Option<XRecordSection> {
+        self.sections()
+            .into_iter()
+            .find(|section| section.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Replace or append a balanced code-102 section.
+    pub fn set_section(&mut self, name: &str, entries: Vec<XRecordEntry>) {
+        let start_text = format!("{{{name}");
+        let mut start = None;
+        let mut depth = 0usize;
+        let mut end = None;
+        for (index, entry) in self.entries.iter().enumerate() {
+            match (entry.code, &entry.value) {
+                (102, XRecordValue::String(value))
+                    if value.eq_ignore_ascii_case(&start_text) =>
+                {
+                    if start.is_none() {
+                        start = Some(index);
+                        depth = 1;
+                    } else if depth > 0 {
+                        depth += 1;
+                    }
+                }
+                (102, XRecordValue::String(value))
+                    if start.is_some() && value.starts_with('{') =>
+                {
+                    depth += 1;
+                }
+                (102, XRecordValue::String(value))
+                    if start.is_some()
+                        && (value == "}"
+                            || (!value.starts_with('{') && value.ends_with('}'))) =>
+                {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        end = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let replacement = std::iter::once(XRecordEntry::string(102, start_text))
+            .chain(entries)
+            .chain(std::iter::once(XRecordEntry::string(102, "}")));
+        if let (Some(start), Some(end)) = (start, end) {
+            self.entries.splice(start..=end, replacement);
+        } else {
+            self.entries.extend(replacement);
+        }
+        self.synchronize_object_references();
+        self.entries_complete = true;
+    }
+
+    /// Decode Autodesk mesh UVW triples (codes 43, 44, 45).
+    pub fn mesh_texture_coordinates(&self) -> Vec<Vector3> {
+        let mut result = Vec::new();
+        let mut values = self.entries.iter();
+        while let Some(entry) = values.next() {
+            if entry.code != 43 {
+                continue;
+            }
+            let Some(u) = entry.value.as_double() else {
+                continue;
+            };
+            let Some(v_entry) = values.next() else {
+                break;
+            };
+            let Some(w_entry) = values.next() else {
+                break;
+            };
+            if v_entry.code == 44 && w_entry.code == 45 {
+                if let (Some(v), Some(w)) =
+                    (v_entry.value.as_double(), w_entry.value.as_double())
+                {
+                    result.push(Vector3::new(u, v, w));
+                }
+            }
+        }
+        result
+    }
+
+    /// Replace Autodesk mesh UVW triples without disturbing unrelated entries.
+    pub fn set_mesh_texture_coordinates(&mut self, coordinates: &[Vector3]) {
+        self.entries
+            .retain(|entry| !matches!(entry.code, 43..=45));
+        for coordinate in coordinates {
+            self.entries.push(XRecordEntry::double(43, coordinate.x));
+            self.entries.push(XRecordEntry::double(44, coordinate.y));
+            self.entries.push(XRecordEntry::double(45, coordinate.z));
+        }
+        self.entries_complete = true;
+    }
+
+    /// Viewport annotation-scale object referenced by code 340.
+    pub fn annotation_scale_handle(&self) -> Option<Handle> {
+        self.entries
+            .iter()
+            .find(|entry| entry.code == 340)
+            .and_then(|entry| entry.value.as_handle())
+    }
+
+    /// Set the viewport annotation-scale reference while retaining all other
+    /// application data.
+    pub fn set_annotation_scale_handle(&mut self, handle: Handle) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.code == 340) {
+            entry.value = XRecordValue::Handle(handle);
+        } else {
+            self.entries.push(XRecordEntry::handle(340, handle));
+        }
+        self.synchronize_object_references();
+        self.entries_complete = true;
+    }
+
+    /// Decode viewport-specific layer override pairs. The viewport handle is
+    /// code 335; `value_code` is 440 (alpha), 420 (color), 343 (linetype) or
+    /// 91 (lineweight).
+    pub fn layer_viewport_overrides(
+        &self,
+        value_code: i32,
+    ) -> Vec<(Handle, XRecordValue)> {
+        let mut result = Vec::new();
+        let mut viewport = None;
+        for entry in &self.entries {
+            if entry.code == 335 {
+                viewport = entry.value.as_handle();
+            } else if entry.code == value_code {
+                if let Some(handle) = viewport.take() {
+                    result.push((handle, entry.value.clone()));
+                }
+            }
+        }
+        result
+    }
+
+    /// Set one viewport-specific layer override in its Autodesk section.
+    pub fn set_layer_viewport_override(
+        &mut self,
+        section_name: &str,
+        value_code: i32,
+        viewport: Handle,
+        value: XRecordValue,
+    ) {
+        let mut updated = false;
+        let mut index = 0usize;
+        while index < self.entries.len() {
+            if self.entries[index].code == 335
+                && self.entries[index].value.as_handle() == Some(viewport)
+            {
+                if let Some(value_entry) = self.entries[index + 1..]
+                    .iter_mut()
+                    .take_while(|entry| {
+                        entry.code != 335
+                            && !matches!(
+                                &entry.value,
+                                XRecordValue::String(value)
+                                    if entry.code == 102 && value.ends_with('}')
+                            )
+                    })
+                    .find(|entry| entry.code == value_code)
+                {
+                    value_entry.value = value.clone();
+                    updated = true;
+                    break;
+                }
+            }
+            index += 1;
+        }
+        if !updated {
+            self.entries
+                .push(XRecordEntry::string(102, format!("{{{section_name}")));
+            self.entries.push(XRecordEntry::handle(335, viewport));
+            self.entries.push(XRecordEntry::new(value_code, value));
+            self.entries.push(XRecordEntry::string(102, "}"));
+        }
+        self.entries_complete = true;
+        self.synchronize_object_references();
+    }
+
+    /// Rebuild the DWG object-id handle vector from 330-369 entries while
+    /// retaining decoded reference kinds where they still line up.
+    pub fn synchronize_object_references(&mut self) {
+        let previous = self.object_references.clone();
+        self.object_references = self
+            .entries
+            .iter()
+            .filter(|entry| (330..=369).contains(&entry.code))
+            .filter_map(|entry| entry.value.as_handle().map(|handle| (entry.code, handle)))
+            .enumerate()
+            .map(|(index, (code, handle))| ProxyObjectReference {
+                handle,
+                kind: previous.get(index).map(|reference| reference.kind).unwrap_or(
+                    match code {
+                        330..=339 => ProxyReferenceKind::SoftPointer,
+                        340..=349 => ProxyReferenceKind::HardPointer,
+                        350..=359 => ProxyReferenceKind::SoftOwnership,
+                        360..=369 => ProxyReferenceKind::HardOwnership,
+                        _ => ProxyReferenceKind::Undefined,
+                    },
+                ),
+            })
+            .collect();
+        self.preserve_object_reference_stream = false;
     }
 }
 
@@ -549,4 +981,3 @@ mod tests {
         assert_eq!(XRecordValueType::from_code(330), XRecordValueType::ObjectId);
     }
 }
-

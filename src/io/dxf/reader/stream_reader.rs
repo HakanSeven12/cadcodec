@@ -35,11 +35,22 @@ pub struct DxfCodePair {
     typed_value: CodePairValue,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DxfStreamContext {
+    pub source_offset: Option<u64>,
+    pub source_line: Option<usize>,
+    pub record_type: Option<String>,
+    pub record_handle: Option<u64>,
+}
+
 impl DxfCodePair {
     /// Create a new code/value pair
     pub fn new(code: i32, value_string: String) -> Self {
         let dxf_code = DxfCode::from_i32(code);
-        let value_type = GroupCodeValueType::from_code(dxf_code);
+        // Use the raw group code here: DxfCode intentionally has only named
+        // variants for a subset of the legal ranges, so routing through the
+        // enum turns valid values such as XRecord code 290 into `Invalid`.
+        let value_type = GroupCodeValueType::from_raw_code(code);
         
         // Parse value based on type
         let typed_value = match value_type {
@@ -162,6 +173,10 @@ pub trait DxfStreamReader {
     fn set_encoding(&mut self, _encoding: &'static encoding_rs::Encoding) {
         // Default: no-op
     }
+
+    fn diagnostic_context(&self) -> DxfStreamContext {
+        DxfStreamContext::default()
+    }
 }
 
 /// Helper for reading 3D points from consecutive code pairs
@@ -238,5 +253,3 @@ impl Default for PointReader {
         Self::new()
     }
 }
-
-
