@@ -568,7 +568,8 @@ impl Sense {
         match s {
             // Keyword form (ACIS 4.0+) and the numeric form pre-4.0 SAT uses
             // (0 = forward, 1 = reversed).
-            "reversed" | "REVERSED" | "1" => Self::Reversed,
+            "reversed" | "REVERSED" | "reversed_v" | "REVERSED_V" | "reverse_v"
+            | "REVERSE_V" | "1" => Self::Reversed,
             _ => Self::Forward,
         }
     }
@@ -1262,7 +1263,74 @@ impl<'a> SatIntCurve<'a> {
 
     /// Parse the embedded spline block into homogeneous control points.
     pub fn bspline(&self) -> Option<(usize, Vec<f64>, Vec<[f64; 4]>)> {
-        let t = &self.record.tokens;
+        decode_bspline_curve(&self.record.tokens)
+    }
+
+    /// Parse an inline or shared spline definition.
+    pub fn bspline_in(&self, document: &SatDocument) -> Option<(usize, Vec<f64>, Vec<[f64; 4]>)> {
+        self.bspline().or_else(|| {
+            let reference = subtype_reference(&self.record.tokens)?;
+            decode_bspline_curve(document.subtype_tokens(reference)?)
+        })
+    }
+
+    /// Whether the spline definition is periodic or closed.
+    pub fn is_closed_in(&self, document: &SatDocument) -> bool {
+        let tokens = if let Some(reference) = subtype_reference(&self.record.tokens) {
+            match document.subtype_tokens(reference) {
+                Some(tokens) => tokens,
+                None => return false,
+            }
+        } else {
+            &self.record.tokens
+        };
+        let Some(start) = tokens
+            .iter()
+            .position(|token| matches!(token.as_ident(), Some("nubs" | "nurbs")))
+        else {
+            return false;
+        };
+        tokens.get(start + 2).is_some_and(|token| {
+            matches!(token.as_ident(), Some("closed" | "periodic"))
+                || token.as_integer().is_some_and(|value| value != 0)
+        })
+    }
+
+    /// Sample `segs + 1` points evenly along the curve's full valid parameter
+    /// range. Empty when the record has no decodable nubs geometry.
+    pub fn sample(&self, segs: usize) -> Vec<(f64, f64, f64)> {
+        let Some((degree, knots, _)) = self.bspline() else {
+            return Vec::new();
+        };
+        self.sample_range(knots[degree], knots[knots.len() - degree - 1], segs)
+    }
+
+    /// Sample `segs + 1` points evenly along `[t0, t1]` — an edge's own
+    /// parameter span, so only the used arc of the curve is emitted. The range
+    /// is clamped to the curve's valid parameter interval. Empty when the record
+    /// has no decodable nubs geometry or the span is degenerate.
+    pub fn sample_range(&self, t0: f64, t1: f64, segs: usize) -> Vec<(f64, f64, f64)> {
+        let Some((degree, knots, ctrl)) = self.bspline() else {
+            return Vec::new();
+        };
+        let segs = segs.max(1);
+        let (lo, hi) = (knots[degree], knots[knots.len() - degree - 1]);
+        let (a, b) = (t0.min(t1).max(lo), t0.max(t1).min(hi));
+        if !(b > a) {
+            return Vec::new();
+        }
+        (0..=segs)
+            .map(|s| {
+                let t = a + (b - a) * (s as f64 / segs as f64);
+                let p = de_boor_homogeneous(degree, &knots, &ctrl, t);
+                let w = if p[3].abs() > 1e-12 { p[3] } else { 1.0 };
+                (p[0] / w, p[1] / w, p[2] / w)
+            })
+            .collect()
+    }
+}
+
+fn decode_bspline_curve(t: &[SatToken]) -> Option<(usize, Vec<f64>, Vec<[f64; 4]>)> {
         let ni = t
             .iter()
             .position(|x| matches!(x.as_ident(), Some("nubs" | "nurbs")))?;
@@ -1317,40 +1385,6 @@ impl<'a> SatIntCurve<'a> {
             }
         }
         Some((degree, knots, ctrl))
-    }
-
-    /// Sample `segs + 1` points evenly along the curve's full valid parameter
-    /// range. Empty when the record has no decodable nubs geometry.
-    pub fn sample(&self, segs: usize) -> Vec<(f64, f64, f64)> {
-        let Some((degree, knots, _)) = self.bspline() else {
-            return Vec::new();
-        };
-        self.sample_range(knots[degree], knots[knots.len() - degree - 1], segs)
-    }
-
-    /// Sample `segs + 1` points evenly along `[t0, t1]` — an edge's own
-    /// parameter span, so only the used arc of the curve is emitted. The range
-    /// is clamped to the curve's valid parameter interval. Empty when the record
-    /// has no decodable nubs geometry or the span is degenerate.
-    pub fn sample_range(&self, t0: f64, t1: f64, segs: usize) -> Vec<(f64, f64, f64)> {
-        let Some((degree, knots, ctrl)) = self.bspline() else {
-            return Vec::new();
-        };
-        let segs = segs.max(1);
-        let (lo, hi) = (knots[degree], knots[knots.len() - degree - 1]);
-        let (a, b) = (t0.min(t1).max(lo), t0.max(t1).min(hi));
-        if !(b > a) {
-            return Vec::new();
-        }
-        (0..=segs)
-            .map(|s| {
-                let t = a + (b - a) * (s as f64 / segs as f64);
-                let p = de_boor_homogeneous(degree, &knots, &ctrl, t);
-                let w = if p[3].abs() > 1e-12 { p[3] } else { 1.0 };
-                (p[0] / w, p[1] / w, p[2] / w)
-            })
-            .collect()
-    }
 }
 
 /// Accessor for a `pcurve` entity: a 2-D B-spline in surface UV space.
@@ -1449,6 +1483,16 @@ impl<'a> SatPCurve<'a> {
     }
 
     fn apply_offsets(&self, points: &mut [(f64, f64)]) {
+        let Some((u_offset, v_offset)) = self.offsets() else {
+            return;
+        };
+        for point in points {
+            point.0 += u_offset;
+            point.1 += v_offset;
+        }
+    }
+
+    fn offsets(&self) -> Option<(f64, f64)> {
         let offsets: Vec<f64> = self
             .record
             .tokens
@@ -1457,14 +1501,65 @@ impl<'a> SatPCurve<'a> {
             .filter_map(SatToken::as_float)
             .take(2)
             .collect();
-        if offsets.len() != 2 {
-            return;
+        (offsets.len() == 2).then_some((offsets[1], offsets[0]))
+    }
+
+    /// Decode this UV curve into homogeneous `[uw, vw, w]` controls.
+    pub fn bspline_in(&self, document: &SatDocument) -> Option<(usize, Vec<f64>, Vec<[f64; 3]>)> {
+        let mut reversed = false;
+        let direct = self
+            .record
+            .tokens
+            .iter()
+            .position(|token| matches!(token.as_ident(), Some("nubs" | "nurbs")))
+            .and_then(|start| Self::bspline_at(&self.record.tokens, start));
+        let spline = match direct {
+            Some(spline) => spline,
+            None => {
+                let selector = self
+                    .record
+                    .tokens
+                    .iter()
+                    .find_map(SatToken::as_integer)
+                    .unwrap_or(1);
+                reversed = selector < 0;
+                let target = self
+                    .record
+                    .nth_pointer(1)
+                    .and_then(|pointer| document.resolve(pointer))?;
+                let mut tokens = target.tokens.as_slice();
+                if let Some(reference) = subtype_reference(tokens) {
+                    tokens = document.subtype_tokens(reference)?;
+                }
+                let blocks: Vec<usize> = tokens
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, token)| {
+                        matches!(token.as_ident(), Some("nubs" | "nurbs")).then_some(index)
+                    })
+                    .collect();
+                let support = selector.unsigned_abs().max(1) as usize;
+                Self::bspline_at(tokens, *blocks.get(support)?)?
+            }
+        };
+        let (degree, mut knots, controls) = spline;
+        let (u_offset, v_offset) = self.offsets().unwrap_or((0.0, 0.0));
+        let mut controls: Vec<[f64; 3]> = controls
+            .into_iter()
+            .map(|point| {
+                [
+                    point[0] + u_offset * point[3],
+                    point[1] + v_offset * point[3],
+                    point[3],
+                ]
+            })
+            .collect();
+        if reversed {
+            controls.reverse();
+            let sum = knots.first()? + knots.last()?;
+            knots = knots.into_iter().rev().map(|knot| sum - knot).collect();
         }
-        let (u_offset, v_offset) = (offsets[1], offsets[0]);
-        for point in points {
-            point.0 += u_offset;
-            point.1 += v_offset;
-        }
+        Some((degree, knots, controls))
     }
 
     /// Sample the complete UV curve.
@@ -1535,6 +1630,9 @@ impl<'a> SatPCurve<'a> {
             return Vec::new();
         };
         let mut points = Self::sample_bspline(spline, segments);
+        if selector < 0 {
+            points.reverse();
+        }
         self.apply_offsets(&mut points);
         points
     }
@@ -1864,6 +1962,10 @@ impl<'a> SatPlaneSurface<'a> {
         let z = self.record.token_float(9).unwrap_or(0.0);
         (x, y, z)
     }
+
+    pub fn sense(&self) -> Sense {
+        self.record.token_sense(10)
+    }
 }
 
 /// Accessor for a `cone-surface` entity record.
@@ -1933,6 +2035,10 @@ impl<'a> SatConeSurface<'a> {
     pub fn radius(&self) -> f64 {
         self.record.token_float(15).unwrap_or(1.0)
     }
+
+    pub fn sense(&self) -> Sense {
+        self.record.token_sense(16)
+    }
 }
 
 /// Accessor for a `sphere-surface` entity record.
@@ -1980,6 +2086,10 @@ impl<'a> SatSphereSurface<'a> {
         let y = self.record.token_float(9).unwrap_or(0.0);
         let z = self.record.token_float(10).unwrap_or(1.0);
         (x, y, z)
+    }
+
+    pub fn sense(&self) -> Sense {
+        self.record.token_sense(11)
     }
 }
 
@@ -2033,6 +2143,10 @@ impl<'a> SatTorusSurface<'a> {
         let y = self.record.token_float(10).unwrap_or(0.0);
         let z = self.record.token_float(11).unwrap_or(0.0);
         (x, y, z)
+    }
+
+    pub fn sense(&self) -> Sense {
+        self.record.token_sense(12)
     }
 }
 
