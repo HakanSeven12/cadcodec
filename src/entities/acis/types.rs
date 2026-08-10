@@ -668,7 +668,7 @@ impl<'a> SatBody<'a> {
 
 /// Accessor for a `lump` entity record.
 ///
-/// Lump record layout: `lump $<attrib> <id> $<next_lump> $<unknown> $<shell> $<body>`
+/// Lump record layout: `lump $<attrib> $<next_lump> $<shell> $<body>`
 #[derive(Debug, Clone)]
 pub struct SatLump<'a> {
     record: &'a SatRecord,
@@ -686,7 +686,7 @@ impl<'a> SatLump<'a> {
 
     /// Pointer to the next lump.
     pub fn next_lump(&self) -> SatPointer {
-        self.record.token_pointer(0).unwrap_or(SatPointer::NULL)
+        self.record.token_pointer(1).unwrap_or(SatPointer::NULL)
     }
 
     /// Pointer to the shell.
@@ -702,7 +702,7 @@ impl<'a> SatLump<'a> {
 
 /// Accessor for a `shell` entity record.
 ///
-/// Shell record layout: `shell $<attrib> <id> $<next_shell> $<subshell> $<unknown> $<face> $<wire> $<lump>`
+/// Shell record layout: `shell $<attrib> $<next_shell> $<subshell> $<face> $<wire> $<lump>`
 #[derive(Debug, Clone)]
 pub struct SatShell<'a> {
     record: &'a SatRecord,
@@ -720,12 +720,12 @@ impl<'a> SatShell<'a> {
 
     /// Pointer to the next shell.
     pub fn next_shell(&self) -> SatPointer {
-        self.record.token_pointer(0).unwrap_or(SatPointer::NULL)
+        self.record.token_pointer(1).unwrap_or(SatPointer::NULL)
     }
 
     /// Pointer to the subshell.
     pub fn subshell(&self) -> SatPointer {
-        self.record.token_pointer(1).unwrap_or(SatPointer::NULL)
+        self.record.token_pointer(2).unwrap_or(SatPointer::NULL)
     }
 
     /// Pointer to the first face.
