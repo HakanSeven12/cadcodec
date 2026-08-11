@@ -20,7 +20,10 @@
 use crate::classes::DxfClassCollection;
 use crate::entities::{EntityCommon, EntityType};
 use std::sync::{Arc, Mutex};
-use crate::objects::{DataObjectData, ObjectType};
+use crate::objects::{
+    DataObjectData, DynamicBlockData, DynamicBlockObject, ObjectType,
+    SolidHistory, SolidHistoryOperation,
+};
 use crate::tables::*;
 use crate::types::{DxfVersion, Color, Handle, Vector2, Vector3};
 use crate::Result;
@@ -65,6 +68,13 @@ thread_local! {
     static ENTITY_CHANGE_RECORDERS:
         std::cell::RefCell<HashMap<usize, Arc<EntityChangeRecorder>>> =
         std::cell::RefCell::new(HashMap::new());
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SolidHistoryGraph {
+    pub root: Handle,
+    pub nodes: Vec<Handle>,
 }
 
 /// DWG header variables containing drawing settings
@@ -1849,6 +1859,314 @@ impl CadDocument {
     /// Get the next handle value (without allocating)
     pub fn next_handle(&self) -> u64 {
         self.next_handle
+    }
+
+    fn entity_history_handle(&self, handle: Handle) -> Option<Handle> {
+        match self.get_entity(handle)? {
+            EntityType::Solid3D(value) => value.history_handle,
+            EntityType::Region(value) => value.history_handle,
+            EntityType::Body(value) => value.history_handle,
+            EntityType::Surface(value) => value.history_handle,
+            _ => None,
+        }
+        .filter(|value| value.is_valid())
+    }
+
+    fn set_entity_history_handle(
+        &mut self,
+        handle: Handle,
+        history: Option<Handle>,
+    ) -> bool {
+        match self.get_entity_mut(handle) {
+            Some(EntityType::Solid3D(value)) => value.history_handle = history,
+            Some(EntityType::Region(value)) => value.history_handle = history,
+            Some(EntityType::Body(value)) => value.history_handle = history,
+            Some(EntityType::Surface(value)) => value.history_handle = history,
+            _ => return false,
+        }
+        true
+    }
+
+    pub fn solid_history_graph(&self, entity: Handle) -> Option<SolidHistoryGraph> {
+        let root = self.entity_history_handle(entity)?;
+        let ObjectType::DynamicBlock(root_object) = self.objects.get(&root)? else {
+            return None;
+        };
+        if !matches!(root_object.data, DynamicBlockData::SolidHistory(_)) {
+            return None;
+        }
+        let mut nodes = self
+            .objects
+            .iter()
+            .filter_map(|(handle, object)| match object {
+                ObjectType::DynamicBlock(value)
+                    if matches!(value.data, DynamicBlockData::SolidHistoryNode(_))
+                        && self.owner_chain_reaches(value.owner, root) =>
+                {
+                    Some(*handle)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        nodes.sort_by_key(|handle| {
+            let step = match self.objects.get(handle) {
+                Some(ObjectType::DynamicBlock(value)) => match &value.data {
+                    DynamicBlockData::SolidHistoryNode(operation) => {
+                        operation.base().map(|base| base.step_id).unwrap_or(i32::MAX)
+                    }
+                    _ => i32::MAX,
+                },
+                _ => i32::MAX,
+            };
+            (step, handle.value())
+        });
+        Some(SolidHistoryGraph { root, nodes })
+    }
+
+    pub fn solid_history_operation(
+        &self,
+        entity: Handle,
+    ) -> Option<&SolidHistoryOperation> {
+        let graph = self.solid_history_graph(entity)?;
+        let history_node_id = match self.objects.get(&graph.root)? {
+            ObjectType::DynamicBlock(value) => match &value.data {
+                DynamicBlockData::SolidHistory(history) => history.history_node_id,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        graph
+            .nodes
+            .iter()
+            .filter_map(|handle| match self.objects.get(handle) {
+                Some(ObjectType::DynamicBlock(value)) => match &value.data {
+                    DynamicBlockData::SolidHistoryNode(operation) => Some(operation),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .find(|operation| {
+                operation
+                    .base()
+                    .is_some_and(|base| base.step_id == history_node_id)
+            })
+            .or_else(|| {
+                graph.nodes.last().and_then(|handle| match self.objects.get(handle) {
+                    Some(ObjectType::DynamicBlock(value)) => match &value.data {
+                        DynamicBlockData::SolidHistoryNode(operation) => Some(operation),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+            })
+    }
+
+    pub fn create_solid_history(
+        &mut self,
+        entity: Handle,
+        mut operation: SolidHistoryOperation,
+    ) -> Option<SolidHistoryGraph> {
+        self.get_entity(entity)?;
+        let (dxf_name, cpp_class_name) = operation.class_names()?;
+        let base = operation.base_mut()?;
+        if base.step_id <= 0 {
+            base.step_id = 1;
+        }
+        if base.eval.node_id <= 0 {
+            base.eval.node_id = base.step_id;
+        }
+        let step_id = base.step_id;
+
+        self.delete_solid_history(entity);
+        let root = self.allocate_handle();
+        let node = self.allocate_handle();
+
+        if !self.classes.contains("ACSH_HISTORY_CLASS") {
+            self.classes.add_or_update(crate::classes::DxfClass::new(
+                "ACSH_HISTORY_CLASS",
+                "AcDbShHistory",
+            ));
+        }
+        if !self.classes.contains(dxf_name) {
+            self.classes.add_or_update(crate::classes::DxfClass::new(
+                dxf_name,
+                cpp_class_name,
+            ));
+        }
+
+        let mut root_object =
+            DynamicBlockObject::new("ACSH_HISTORY_CLASS", "AcDbShHistory");
+        root_object.handle = root;
+        root_object.owner = entity;
+        root_object.data = DynamicBlockData::SolidHistory(SolidHistory {
+            major: 1,
+            owner: entity,
+            history_node_id: step_id,
+            record_history: true,
+            ..SolidHistory::default()
+        });
+
+        let mut node_object = DynamicBlockObject::new(dxf_name, cpp_class_name);
+        node_object.handle = node;
+        node_object.owner = root;
+        node_object.data = DynamicBlockData::SolidHistoryNode(operation);
+        self.objects.insert(root, ObjectType::DynamicBlock(root_object));
+        self.objects.insert(node, ObjectType::DynamicBlock(node_object));
+        if !self.set_entity_history_handle(entity, Some(root)) {
+            self.objects.remove(&root);
+            self.objects.remove(&node);
+            return None;
+        }
+        Some(SolidHistoryGraph {
+            root,
+            nodes: vec![node],
+        })
+    }
+
+    pub fn update_solid_history(
+        &mut self,
+        entity: Handle,
+        mut operation: SolidHistoryOperation,
+    ) -> Option<SolidHistoryOperation> {
+        let (dxf_name, cpp_class_name) = operation.class_names()?;
+        let graph = self.solid_history_graph(entity)?;
+        let current_id = match self.objects.get(&graph.root)? {
+            ObjectType::DynamicBlock(value) => match &value.data {
+                DynamicBlockData::SolidHistory(history) => history.history_node_id,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let node = graph
+            .nodes
+            .iter()
+            .copied()
+            .find(|handle| match self.objects.get(handle) {
+                Some(ObjectType::DynamicBlock(value)) => match &value.data {
+                    DynamicBlockData::SolidHistoryNode(current) => current
+                        .base()
+                        .is_some_and(|base| base.step_id == current_id),
+                    _ => false,
+                },
+                _ => false,
+            })
+            .or_else(|| graph.nodes.last().copied())?;
+
+        let old_step = match self.objects.get(&node)? {
+            ObjectType::DynamicBlock(value) => match &value.data {
+                DynamicBlockData::SolidHistoryNode(current) => current.base()?.step_id,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let base = operation.base_mut()?;
+        if base.step_id <= 0 {
+            base.step_id = old_step;
+        }
+        if base.eval.node_id <= 0 {
+            base.eval.node_id = base.step_id;
+        }
+        let step_id = base.step_id;
+
+        if !self.classes.contains(dxf_name) {
+            self.classes.add_or_update(crate::classes::DxfClass::new(
+                dxf_name,
+                cpp_class_name,
+            ));
+        }
+        if let Some(ObjectType::DynamicBlock(value)) = self.objects.get_mut(&graph.root) {
+            if let DynamicBlockData::SolidHistory(history) = &mut value.data {
+                history.history_node_id = step_id;
+            }
+        }
+        let ObjectType::DynamicBlock(value) = self.objects.get_mut(&node)? else {
+            return None;
+        };
+        value.dxf_name = dxf_name.to_string();
+        value.cpp_class_name = cpp_class_name.to_string();
+        let DynamicBlockData::SolidHistoryNode(current) = &mut value.data else {
+            return None;
+        };
+        Some(std::mem::replace(current, operation))
+    }
+
+    pub fn copy_solid_history(
+        &mut self,
+        source: Handle,
+        target: Handle,
+    ) -> Option<SolidHistoryGraph> {
+        self.get_entity(target)?;
+        let graph = self.solid_history_graph(source)?;
+        let mut source_handles = Vec::with_capacity(graph.nodes.len() + 1);
+        source_handles.push(graph.root);
+        source_handles.extend(graph.nodes.iter().copied());
+        let source_objects = source_handles
+            .iter()
+            .map(|handle| Some((*handle, self.objects.get(handle)?.clone())))
+            .collect::<Option<Vec<_>>>()?;
+
+        self.delete_solid_history(target);
+        let mut remap = HashMap::new();
+        for (handle, _) in &source_objects {
+            remap.insert(*handle, self.allocate_handle());
+        }
+        let new_root = remap[&graph.root];
+        let mut new_nodes = Vec::with_capacity(graph.nodes.len());
+        for (old_handle, mut object) in source_objects {
+            let new_handle = remap[&old_handle];
+            let ObjectType::DynamicBlock(value) = &mut object else {
+                return None;
+            };
+            value.handle = new_handle;
+            if old_handle == graph.root {
+                value.owner = target;
+                if let DynamicBlockData::SolidHistory(history) = &mut value.data {
+                    history.owner = target;
+                }
+            } else {
+                value.owner = remap.get(&value.owner).copied().unwrap_or(value.owner);
+                new_nodes.push(new_handle);
+            }
+            value.visit_handles_mut(&mut |handle| {
+                if let Some(mapped) = remap.get(handle) {
+                    *handle = *mapped;
+                }
+            });
+            self.objects.insert(new_handle, object);
+        }
+        if !self.set_entity_history_handle(target, Some(new_root)) {
+            self.objects.remove(&new_root);
+            for handle in &new_nodes {
+                self.objects.remove(handle);
+            }
+            return None;
+        }
+        Some(SolidHistoryGraph {
+            root: new_root,
+            nodes: new_nodes,
+        })
+    }
+
+    pub fn delete_solid_history(
+        &mut self,
+        entity: Handle,
+    ) -> Vec<(Handle, ObjectType)> {
+        let Some(root) = self.entity_history_handle(entity) else {
+            return Vec::new();
+        };
+        let mut handles = self
+            .objects
+            .keys()
+            .copied()
+            .filter(|handle| self.owner_chain_reaches(*handle, root))
+            .collect::<Vec<_>>();
+        handles.sort_by_key(|handle| handle.value());
+        let removed = handles
+            .into_iter()
+            .filter_map(|handle| self.objects.remove(&handle).map(|value| (handle, value)))
+            .collect();
+        self.set_entity_history_handle(entity, None);
+        removed
     }
 
     /// Add an entity to the document (model space).

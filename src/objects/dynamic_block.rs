@@ -899,6 +899,27 @@ pub struct SolidHistoryNodeBase {
     pub material: Handle,
 }
 
+impl SolidHistoryNodeBase {
+    pub fn new(step_id: i32) -> Self {
+        Self {
+            eval: BlockEvalExpression {
+                major: 1,
+                node_id: step_id,
+                ..BlockEvalExpression::default()
+            },
+            major: 1,
+            transform: [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+            step_id,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SolidHistoryOperation {
@@ -919,6 +940,65 @@ pub enum SolidHistoryOperation {
     Extrusion(SolidHistorySweep),
     Loft(SolidHistoryLoft),
     Revolve(SolidHistoryRevolve),
+}
+
+impl SolidHistoryOperation {
+    pub fn base(&self) -> Option<&SolidHistoryNodeBase> {
+        match self {
+            Self::Unknown => None,
+            Self::Box(value) | Self::Wedge(value) => Some(&value.base),
+            Self::Sphere(value) => Some(&value.base),
+            Self::Cylinder(value) | Self::Cone(value) => Some(&value.base),
+            Self::Pyramid(value) => Some(&value.base),
+            Self::Torus(value) => Some(&value.base),
+            Self::Boolean(value) => Some(&value.base),
+            Self::Brep(value) => Some(&value.base),
+            Self::Fillet(value) => Some(&value.base),
+            Self::Chamfer(value) => Some(&value.base),
+            Self::Sweep(value) | Self::Extrusion(value) => Some(&value.base),
+            Self::Loft(value) => Some(&value.base),
+            Self::Revolve(value) => Some(&value.base),
+        }
+    }
+
+    pub fn base_mut(&mut self) -> Option<&mut SolidHistoryNodeBase> {
+        match self {
+            Self::Unknown => None,
+            Self::Box(value) | Self::Wedge(value) => Some(&mut value.base),
+            Self::Sphere(value) => Some(&mut value.base),
+            Self::Cylinder(value) | Self::Cone(value) => Some(&mut value.base),
+            Self::Pyramid(value) => Some(&mut value.base),
+            Self::Torus(value) => Some(&mut value.base),
+            Self::Boolean(value) => Some(&mut value.base),
+            Self::Brep(value) => Some(&mut value.base),
+            Self::Fillet(value) => Some(&mut value.base),
+            Self::Chamfer(value) => Some(&mut value.base),
+            Self::Sweep(value) | Self::Extrusion(value) => Some(&mut value.base),
+            Self::Loft(value) => Some(&mut value.base),
+            Self::Revolve(value) => Some(&mut value.base),
+        }
+    }
+
+    pub fn class_names(&self) -> Option<(&'static str, &'static str)> {
+        Some(match self {
+            Self::Unknown => return None,
+            Self::Box(_) => ("ACSH_BOX_CLASS", "AcDbShBox"),
+            Self::Wedge(_) => ("ACSH_WEDGE_CLASS", "AcDbShWedge"),
+            Self::Sphere(_) => ("ACSH_SPHERE_CLASS", "AcDbShSphere"),
+            Self::Cylinder(_) => ("ACSH_CYLINDER_CLASS", "AcDbShCylinder"),
+            Self::Cone(_) => ("ACSH_CONE_CLASS", "AcDbShCone"),
+            Self::Pyramid(_) => ("ACSH_PYRAMID_CLASS", "AcDbShPyramid"),
+            Self::Torus(_) => ("ACSH_TORUS_CLASS", "AcDbShTorus"),
+            Self::Boolean(_) => ("ACSH_BOOLEAN_CLASS", "AcDbShBoolean"),
+            Self::Brep(_) => ("ACSH_BREP_CLASS", "AcDbShBrep"),
+            Self::Fillet(_) => ("ACSH_FILLET_CLASS", "AcDbShFillet"),
+            Self::Chamfer(_) => ("ACSH_CHAMFER_CLASS", "AcDbShChamfer"),
+            Self::Sweep(_) => ("ACSH_SWEEP_CLASS", "AcDbShSweep"),
+            Self::Extrusion(_) => ("ACSH_EXTRUSION_CLASS", "AcDbShExtrusion"),
+            Self::Loft(_) => ("ACSH_LOFT_CLASS", "AcDbShLoft"),
+            Self::Revolve(_) => ("ACSH_REVOLVE_CLASS", "AcDbShRevolve"),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

@@ -161,8 +161,7 @@ pub use tables::{
 };
 
 // Re-export document
-pub use document::CadDocument;
-pub use document::{Preview, PreviewFormat};
+pub use document::{CadDocument, Preview, PreviewFormat, SolidHistoryGraph};
 pub use layer_state::{LayerState, LayerStateLayer, LayerStateMask};
 
 // Re-export I/O types
