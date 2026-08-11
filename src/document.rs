@@ -645,7 +645,7 @@ impl Default for HeaderVariables {
             user_timer: true,
             world_view: true,
             retain_xref_visibility: true,
-            display_silhouette: false,
+            display_silhouette: true,
             spline_frame: false,
             delete_objects: true,
             drag_mode: 2,
