@@ -2095,6 +2095,9 @@ impl CadDocument {
         source: Handle,
         target: Handle,
     ) -> Option<SolidHistoryGraph> {
+        if source == target {
+            return self.solid_history_graph(source);
+        }
         self.get_entity(target)?;
         let graph = self.solid_history_graph(source)?;
         let mut source_handles = Vec::with_capacity(graph.nodes.len() + 1);
@@ -2105,7 +2108,11 @@ impl CadDocument {
             .map(|handle| Some((*handle, self.objects.get(handle)?.clone())))
             .collect::<Option<Vec<_>>>()?;
 
-        self.delete_solid_history(target);
+        if self.entity_history_handle(target) == Some(graph.root) {
+            self.set_entity_history_handle(target, None);
+        } else {
+            self.delete_solid_history(target);
+        }
         let mut remap = HashMap::new();
         for (handle, _) in &source_objects {
             remap.insert(*handle, self.allocate_handle());
