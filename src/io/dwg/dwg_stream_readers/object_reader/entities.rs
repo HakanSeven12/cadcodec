@@ -4,7 +4,7 @@
 //! `dwg_stream_writers/object_writer/entities.rs`. They read entity-specific
 //! fields after common entity data has already been parsed.
 
-use super::safe_count;
+use super::{safe_count, MAX_MESH_FACES, MAX_MESH_FACE_INDICES};
 use crate::entities::multileader::*;
 use crate::entities::solid3d::{AcisMaterial, AcisRevision, Silhouette, Wire, WireType};
 use crate::entities::{
@@ -3076,18 +3076,58 @@ pub fn read_mesh(reader: &mut DwgMergedReader) -> MeshData {
         vertices.push(reader.read_3bit_double());
     }
 
-    let total_face_data = safe_count(reader.read_bit_long());
+    let declared_face_data = reader.read_bit_long();
+    let available_face_data = reader.main_remaining_bits().saturating_sub(6) / 2;
+    let total_face_data = usize::try_from(declared_face_data)
+        .unwrap_or(0)
+        .min(usize::try_from(available_face_data).unwrap_or(0));
     let mut faces = Vec::new();
-    let mut i = 0;
-    while i < total_face_data {
-        let n = safe_count(reader.read_bit_long());
-        i += 1;
-        let mut face = Vec::new();
-        for _ in 0..n {
-            face.push(reader.read_bit_long());
-            i += 1;
+    let mut consumed = 0usize;
+    let mut stored_indices = 0usize;
+    while consumed < total_face_data {
+        let declared_vertices = reader.read_bit_long();
+        consumed = match consumed.checked_add(1) {
+            Some(value) => value,
+            None => break,
+        };
+
+        let remaining = total_face_data - consumed;
+        let face_vertex_count = match usize::try_from(declared_vertices) {
+            Ok(value) if value <= remaining => value,
+            _ => {
+                for _ in 0..remaining {
+                    reader.read_bit_long();
+                }
+                break;
+            }
+        };
+
+        let store_face = (3..=num_verts as usize).contains(&face_vertex_count)
+            && faces.len() < MAX_MESH_FACES
+            && stored_indices
+                .checked_add(face_vertex_count)
+                .is_some_and(|count| count <= MAX_MESH_FACE_INDICES);
+        let mut valid_face = store_face;
+        let mut face = Vec::with_capacity(if valid_face { face_vertex_count } else { 0 });
+        for _ in 0..face_vertex_count {
+            let vertex = reader.read_bit_long();
+            if store_face {
+                if valid_face && vertex >= 0 && vertex < num_verts {
+                    face.push(vertex);
+                } else {
+                    valid_face = false;
+                    face.clear();
+                }
+            }
         }
-        faces.push(face);
+        consumed = match consumed.checked_add(face_vertex_count) {
+            Some(value) => value,
+            None => break,
+        };
+        if valid_face {
+            stored_indices += face_vertex_count;
+            faces.push(face);
+        }
     }
 
     let num_edges = safe_count(reader.read_bit_long());

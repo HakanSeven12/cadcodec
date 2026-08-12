@@ -33,6 +33,8 @@ use std::sync::Arc;
 /// Maximum number of items in any array read from the stream.
 /// Prevents infinite loops when reading corrupt data.
 const MAX_ARRAY_COUNT: i32 = 100_000;
+const MAX_MESH_FACES: usize = 250_000;
+const MAX_MESH_FACE_INDICES: usize = 1_000_000;
 
 /// Cap a loop count read from the stream to a safe maximum.
 #[inline]
