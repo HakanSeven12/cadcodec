@@ -85,6 +85,8 @@ pub const OBJ_VPENT_HDR: i16 = 71;
 pub const OBJ_GROUP: i16 = 72;
 pub const OBJ_MLINESTYLE: i16 = 73;
 pub const OBJ_OLE2FRAME: i16 = 74;
+pub const OBJ_DUMMY: i16 = 75;
+pub const OBJ_LONG_TRANSACTION: i16 = 76;
 
 // ── Standard fixed entity/object types (75+) ────────────────────────
 //
@@ -96,6 +98,7 @@ pub const OBJ_LWPOLYLINE: i16 = 77;         // 0x4D — fixed entity
 pub const OBJ_HATCH: i16 = 78;              // 0x4E — fixed entity
 pub const OBJ_XRECORD: i16 = 79;            // 0x4F — fixed non-entity
 pub const OBJ_PLACEHOLDER: i16 = 80;        // 0x50 — fixed non-entity
+pub const OBJ_VBA_PROJECT: i16 = 81;         // 0x51 — fixed non-entity
 pub const OBJ_LAYOUT: i16 = 82;             // 0x52 — fixed non-entity
 
 // Class-based (UNLISTED) entity types — always use class number (500+)
@@ -126,6 +129,19 @@ pub const OBJ_TABLE: i16 = -16;
 // parsed for its glyph geometry only; the record is preserved verbatim for
 // write-back, so no native encoder is needed.
 pub const OBJ_LIGHT: i16 = -17;
+pub const OBJ_ARC_DIMENSION: i16 = -18;
+pub const OBJ_LARGE_RADIAL_DIMENSION: i16 = -19;
+pub const OBJ_CAMERA: i16 = -20;
+pub const OBJ_SECTIONOBJECT: i16 = -21;
+pub const OBJ_ARCALIGNEDTEXT: i16 = -22;
+pub const OBJ_RTEXT: i16 = -23;
+pub const OBJ_GEOPOSITIONMARKER: i16 = -24;
+pub const OBJ_NAVISWORKSMODEL: i16 = -25;
+pub const OBJ_POINTCLOUD: i16 = -26;
+pub const OBJ_POINTCLOUDEX: i16 = -27;
+pub const OBJ_MPOLYGON: i16 = -28;
+pub const OBJ_PROXY_ENTITY: i16 = 498;
+pub const OBJ_PROXY_OBJECT: i16 = 499;
 
 // Class-based non-entity objects — also resolved via class mapping for
 // portable type codes.  The values here match ACadSharp's ObjectType.
@@ -160,10 +176,13 @@ pub const OBJ_SPATIALFILTER: i16 = 0x86; // 134
 pub const OBJ_PDFDEFINITION: i16 = 0x87; // 135
 pub const OBJ_DWFDEFINITION: i16 = 0x88; // 136
 pub const OBJ_DGNDEFINITION: i16 = 0x89; // 137
-// AcDbField (dynamic text field) is always class-based; 0x8A is a free internal
-// sentinel. Decoded into a side map (document.fields); the object itself stays
-// verbatim as Unknown for round-trip.
+// AcDbField and AcDbFieldList are always class-based; 0x8A..0x8B are free
+// internal sentinels used by the builder dispatch.
 pub const OBJ_FIELD: i16 = 0x8A; // 138
+pub const OBJ_FIELDLIST: i16 = 0x8B; // 139
+pub const OBJ_VISUALSTYLE: i16 = 0x8C; // 140
+pub const OBJ_MATERIAL: i16 = 0x8D; // 141
+pub const OBJ_OBJECT_PTR: i16 = 0x8E; // 142
 
 /// Returns true if the type code is a graphical entity (not a table / object).
 pub fn is_entity_type(type_code: i16) -> bool {
@@ -195,6 +214,7 @@ pub fn dxf_name_to_type_code(dxf_name: &str) -> Option<i16> {
         "MESH" => Some(OBJ_MESH),
         "MULTILEADER" => Some(OBJ_MULTILEADER),
         "OLE2FRAME" => Some(OBJ_OLE2FRAME),
+        "LONG_TRANSACTION" => Some(OBJ_LONG_TRANSACTION),
         // AcDbViewRepBlockReference (Model Documentation drawing views, R2013+)
         // is a subclass of AcDbBlockReference, so its record begins with the
         // INSERT fields. Decode it as an INSERT to place the baked view
@@ -215,6 +235,19 @@ pub fn dxf_name_to_type_code(dxf_name: &str) -> Option<i16> {
         "HELIX" => Some(OBJ_HELIX),
         "ACAD_TABLE" => Some(OBJ_TABLE),
         "LIGHT" => Some(OBJ_LIGHT),
+        "ARC_DIMENSION" => Some(OBJ_ARC_DIMENSION),
+        "LARGE_RADIAL_DIMENSION" => Some(OBJ_LARGE_RADIAL_DIMENSION),
+        "CAMERA" => Some(OBJ_CAMERA),
+        "SECTIONOBJECT" => Some(OBJ_SECTIONOBJECT),
+        "ARCALIGNEDTEXT" => Some(OBJ_ARCALIGNEDTEXT),
+        "RTEXT" => Some(OBJ_RTEXT),
+        "POSITIONMARKER" | "GEOPOSITIONMARKER" => Some(OBJ_GEOPOSITIONMARKER),
+        "COORDINATION_MODEL" | "NAVISWORKSMODEL" => Some(OBJ_NAVISWORKSMODEL),
+        "ACDBPOINTCLOUD" | "POINTCLOUD" => Some(OBJ_POINTCLOUD),
+        "ACDBPOINTCLOUDEX" | "POINTCLOUDEX" => Some(OBJ_POINTCLOUDEX),
+        "MPOLYGON" => Some(OBJ_MPOLYGON),
+        "ACAD_PROXY_ENTITY" => Some(OBJ_PROXY_ENTITY),
+        "ACAD_PROXY_OBJECT" => Some(OBJ_PROXY_OBJECT),
         // Non-entity objects
         "ACDBDICTIONARYWDFLT" => Some(OBJ_DICTIONARYWDFLT),
         "DICTIONARYVAR" => Some(OBJ_DICTIONARYVAR),
@@ -235,13 +268,17 @@ pub fn dxf_name_to_type_code(dxf_name: &str) -> Option<i16> {
         "WIPEOUTVARIABLES" => Some(OBJ_WIPEOUTVARIABLES),
         "TABLECONTENT" => Some(OBJ_TABLECONTENT),
         "TABLESTYLE" => Some(OBJ_TABLESTYLE),
+        "VISUALSTYLE" => Some(OBJ_VISUALSTYLE),
+        "MATERIAL" => Some(OBJ_MATERIAL),
         "GEODATA" | "ACDBGEODATA" => Some(OBJ_GEODATA),
         "FIELD" | "ACDBFIELD" => Some(OBJ_FIELD),
+        "FIELDLIST" | "ACDBFIELDLIST" => Some(OBJ_FIELDLIST),
         "SPATIAL_FILTER" | "SPATIALFILTER" => Some(OBJ_SPATIALFILTER),
         "BLOCKVISIBILITYPARAMETER" => Some(OBJ_BLOCKVISIBILITYPARAMETER),
         "ACDB_BLOCKREPRESENTATION_DATA" | "BLOCKREPRESENTATION" => {
             Some(OBJ_BLOCKREPRESENTATIONDATA)
         }
+        "OBJECT_PTR" => Some(OBJ_OBJECT_PTR),
         _ => None,
     }
 }

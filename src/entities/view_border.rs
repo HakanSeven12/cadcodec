@@ -2,11 +2,7 @@
 //!
 //! The border of a Model-Documentation drawing view. Its paper-space rectangle,
 //! view scale and the reference to the view's *active* viewport (the entity
-//! carrying the real camera) are decoded; the rest of the record is **not**
-//! re-encoded natively — the original DWG record bytes are preserved in
-//! [`raw_dwg_data`](ViewBorder::raw_dwg_data) and re-emitted verbatim on
-//! write-back, exactly like [`Light`](super::light::Light) and
-//! [`UnknownEntity`](super::unknown_entity::UnknownEntity).
+//! carrying the real camera) are decoded and encoded as native semantic fields.
 //!
 //! The border itself is a non-plotting aid — it is not drawn — but its
 //! rectangle gives each view's true paper placement, and its viewport link is
@@ -14,7 +10,7 @@
 
 use super::{Entity, EntityCommon};
 use crate::types::{
-    BoundingBox3D, Color, DxfVersion, Handle, LineWeight, Transform, Transparency, Vector3,
+    BoundingBox3D, Color, Handle, LineWeight, Transform, Transparency, Vector3,
 };
 
 /// A Model-Documentation drawing-view border (`AcDbViewBorder`).
@@ -28,27 +24,23 @@ use crate::types::{
 pub struct ViewBorder {
     /// Common entity data (handle, layer, color, …).
     pub common: EntityCommon,
+    /// `AcDbViewBorder` version (group 70).
+    pub version: i16,
     /// Border rectangle minimum corner.
     pub min: [f64; 2],
     /// Border rectangle maximum corner.
     pub max: [f64; 2],
     /// View centre point (the rectangle midpoint).
     pub center: [f64; 2],
-    /// View scale denominator (e.g. `10` for a 1:10 view).
+    /// View scale value (group 40).
     pub scale: f64,
+    /// View rotation angle in radians (second group 40).
+    pub rotation_angle: f64,
     /// The view's *active* viewport entity (the border's first object-specific
     /// handle reference) — carries the real camera (`view_direction`, twist).
     pub active_viewport: Handle,
-    /// DWG object type code (round-trip).
-    pub dwg_type_code: i16,
-    /// Handle-stream bit count for R2010+ records (round-trip framing).
-    pub dwg_handle_bits: i64,
-    /// Raw DWG record bytes, re-emitted verbatim on write-back.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub raw_dwg_data: Option<Vec<u8>>,
-    /// Source DWG version — dropped on an incompatible cross-version save.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub dwg_source_version: Option<DxfVersion>,
+    /// Associated `SCALE` object (group 340).
+    pub scale_handle: Handle,
 }
 
 impl ViewBorder {
@@ -56,15 +48,14 @@ impl ViewBorder {
     pub fn new() -> Self {
         ViewBorder {
             common: EntityCommon::new(),
+            version: 0,
             min: [0.0; 2],
             max: [0.0; 2],
             center: [0.0; 2],
             scale: 1.0,
+            rotation_angle: 0.0,
             active_viewport: Handle::NULL,
-            dwg_type_code: 0,
-            dwg_handle_bits: 0,
-            raw_dwg_data: None,
-            dwg_source_version: None,
+            scale_handle: Handle::NULL,
         }
     }
 }
@@ -118,14 +109,37 @@ impl Entity for ViewBorder {
             max: Vector3::new(self.max[0], self.max[1], 0.0),
         }
     }
-    fn translate(&mut self, _offset: Vector3) {
-        // Anchored to its drawing view; the preserved raw record is re-emitted
-        // verbatim, so a display-only move would silently revert on save.
+    fn translate(&mut self, offset: Vector3) {
+        self.min[0] += offset.x;
+        self.min[1] += offset.y;
+        self.max[0] += offset.x;
+        self.max[1] += offset.y;
+        self.center[0] += offset.x;
+        self.center[1] += offset.y;
     }
     fn entity_type(&self) -> &'static str {
         "DRAWINGVIEW"
     }
-    fn apply_transform(&mut self, _transform: &Transform) {
-        // See `translate`.
+    fn apply_transform(&mut self, transform: &Transform) {
+        let corners = [
+            Vector3::new(self.min[0], self.min[1], 0.0),
+            Vector3::new(self.max[0], self.min[1], 0.0),
+            Vector3::new(self.max[0], self.max[1], 0.0),
+            Vector3::new(self.min[0], self.max[1], 0.0),
+        ]
+        .map(|point| transform.apply(point));
+        let mut min = [f64::INFINITY; 2];
+        let mut max = [f64::NEG_INFINITY; 2];
+        for point in corners {
+            min[0] = min[0].min(point.x);
+            min[1] = min[1].min(point.y);
+            max[0] = max[0].max(point.x);
+            max[1] = max[1].max(point.y);
+        }
+        let center =
+            transform.apply(Vector3::new(self.center[0], self.center[1], 0.0));
+        self.min = min;
+        self.max = max;
+        self.center = [center.x, center.y];
     }
 }

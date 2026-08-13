@@ -69,6 +69,11 @@ pub struct AttributeEntity {
     pub is_multiline: bool,
     /// Line count for multiline
     pub line_count: i16,
+    /// Embedded MTEXT payload used by R2018+ multiline attributes.
+    ///
+    /// The plain attribute text only carries the first line. Keeping the
+    /// embedded object preserves its layout, style, background and full value.
+    pub embedded_mtext: Option<Box<crate::entities::MText>>,
     /// Handle of the attribute definition this was created from
     pub attdef_handle: Handle,
     /// Lock position in block
@@ -88,7 +93,7 @@ impl AttributeEntity {
             rotation: 0.0,
             width_factor: 1.0,
             oblique_angle: 0.0,
-            text_style: "STANDARD".to_string(),
+            text_style: "Standard".to_string(),
             text_generation_flags: 0,
             horizontal_alignment: HorizontalAlignment::Left,
             vertical_alignment: VerticalAlignment::Baseline,
@@ -98,6 +103,7 @@ impl AttributeEntity {
             mtext_flag: MTextFlag::SingleLine,
             is_multiline: false,
             line_count: 1,
+            embedded_mtext: None,
             attdef_handle: Handle::NULL,
             lock_position: false,
         }
@@ -117,6 +123,7 @@ impl AttributeEntity {
             common: EntityCommon {
                 layer: attdef.common.layer.clone(),
                 color: attdef.common.color,
+                color_name: attdef.common.color_name.clone(),
                 ..Default::default()
             },
             tag: attdef.tag.clone(),
@@ -137,6 +144,7 @@ impl AttributeEntity {
             mtext_flag: attdef.mtext_flag,
             is_multiline: attdef.is_multiline,
             line_count: attdef.line_count,
+            embedded_mtext: attdef.embedded_mtext.clone(),
             attdef_handle: attdef.common.handle,
             lock_position: attdef.lock_position,
         }
@@ -512,4 +520,3 @@ mod tests {
         assert!((width - 7.5).abs() < 1e-10);
     }
 }
-

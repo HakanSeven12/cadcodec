@@ -210,7 +210,8 @@ pub struct LineTypeComplexData {
     pub style_handle: Handle,
     /// Shape/text scale factor.
     pub scale: f64,
-    /// Rotation angle in degrees.
+    /// Rotation angle in radians (DXF code 50 is degrees on disk; converted on
+    /// read/write). Relative to the line tangent unless `rotation_absolute`.
     pub rotation: f64,
     /// Rotation is world-absolute rather than relative to the line tangent.
     pub absolute_rotation: bool,

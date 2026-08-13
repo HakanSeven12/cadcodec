@@ -8,9 +8,14 @@
 //!
 //! | Tag  | Meaning           | Data               |
 //! |------|-------------------|---------------------|
+//! | 0x02 | Character value   | 1 byte signed       |
+//! | 0x03 | Short value       | 2 bytes LE i16      |
 //! | 0x04 | Integer value     | 4 bytes LE i32      |
+//! | 0x05 | Float value       | 4 bytes IEEE        |
 //! | 0x06 | Double value      | 8 bytes LE f64      |
 //! | 0x07 | String literal    | 1-byte len + bytes  |
+//! | 0x08 | String literal    | 2-byte len + bytes  |
+//! | 0x09 | String literal    | 4-byte len + bytes  |
 //! | 0x0A | False / Reversed  | (no data)           |
 //! | 0x0B | True / Forward    | (no data)           |
 //! | 0x0C | Entity pointer    | 4 bytes LE i32      |
@@ -19,17 +24,30 @@
 //! | 0x11 | End of record     | (no data)           |
 //! | 0x13 | Position (x,y,z)  | 24 bytes (3×f64 LE) |
 //! | 0x14 | Direction (x,y,z) | 24 bytes (3×f64 LE) |
+//! | 0x15 | Enum value        | 4 bytes LE i32      |
+//! | 0x16 | U-V vector        | 16 bytes (2×f64 LE) |
+//! | 0x17 | 64-bit integer    | 8 bytes LE i64      |
 
 use super::types::*;
 
 /// SAB binary tag constants.
 pub mod tags {
+    /// Signed character value.
+    pub const CHARACTER: u8 = 0x02;
+    /// Signed short value.
+    pub const SHORT: u8 = 0x03;
     /// Integer value (plain int, not entity pointer).
     pub const INTEGER: u8 = 0x04;
+    /// Single-precision float.
+    pub const FLOAT: u8 = 0x05;
     /// Double-precision float.
     pub const DOUBLE: u8 = 0x06;
     /// String literal with length prefix.
     pub const STRING: u8 = 0x07;
+    /// String literal with a 2-byte length prefix.
+    pub const SHORT_STRING: u8 = 0x08;
+    /// String literal with a 4-byte length prefix.
+    pub const LONG_STRING: u8 = 0x09;
     /// Boolean false / reversed / double-sided.
     pub const FALSE: u8 = 0x0A;
     /// Boolean true / forward / single-sided.
@@ -47,16 +65,19 @@ pub mod tags {
     pub const SUBTYPE_END: u8 = 0x10;
     /// End of record marker.
     pub const END_OF_RECORD: u8 = 0x11;
-    /// Long string literal (4-byte u32 length prefix + bytes).
-    /// Used for transform matrices and other long text blobs.
-    pub const LONG_STRING: u8 = 0x12;
+    /// Newer ASM long string literal (4-byte u32 length prefix + bytes).
+    pub const ASM_LONG_STRING: u8 = 0x12;
     /// Position (3 doubles: x, y, z).
     pub const POSITION: u8 = 0x13;
     /// Direction (3 doubles: x, y, z).
     pub const DIRECTION: u8 = 0x14;
     /// Enumerated value (4-byte int). Emitted by ASM / ShapeManager records
-    /// (AutoCAD 2013+); read like an integer.
+    /// (AutoCAD 2013+).
     pub const ENUM: u8 = 0x15;
+    /// U-V vector (2 doubles).
+    pub const UV: u8 = 0x16;
+    /// Signed 64-bit integer used by newer ASM / ShapeManager records.
+    pub const INTEGER64: u8 = 0x17;
 }
 
 /// SAB header magic string.
@@ -180,6 +201,32 @@ impl SabWriter {
         let geom_start = tokens.iter().position(|t| Self::is_numeric(t));
 
         while i < tokens.len() {
+            // A token decoded from SAB already carries its original tag and
+            // payload. Re-emit it byte-for-byte instead of applying SAT
+            // coordinate grouping or numeric coercion.
+            if matches!(&tokens[i], SatToken::Sab { .. }) {
+                if matches!(
+                    &tokens[i],
+                    SatToken::Sab {
+                        tag: tags::POSITION | tags::DIRECTION,
+                        ..
+                    }
+                ) {
+                    step_index += 1;
+                }
+                Self::write_token(buf, &tokens[i], ints_as_doubles);
+                i += 1;
+                continue;
+            }
+
+            // Explicit semantic positions are already grouped.
+            if matches!(&tokens[i], SatToken::Position(_, _, _)) {
+                Self::write_token(buf, &tokens[i], ints_as_doubles);
+                step_index += 1;
+                i += 1;
+                continue;
+            }
+
             // Are we in the geometry section of the token stream?
             let in_geom = geom_start.map(|gs| i >= gs).unwrap_or(false);
 
@@ -225,7 +272,7 @@ impl SabWriter {
 
     /// Check if a token is a numeric value (Float or Integer).
     fn is_numeric(token: &SatToken) -> bool {
-        matches!(token, SatToken::Float(_) | SatToken::Integer(_) | SatToken::Position(_, _, _))
+        matches!(token, SatToken::Float(_) | SatToken::Integer(_))
     }
 
     /// Extract numeric value from a Float or Integer token.
@@ -267,6 +314,10 @@ impl SabWriter {
             SatToken::Terminator => buf.push(tags::END_OF_RECORD),
             SatToken::Ident(s) => Self::write_ident_token(buf, s),
             SatToken::Enum(s) => Self::write_enum_token(buf, s),
+            SatToken::Sab { tag, data } => {
+                buf.push(*tag);
+                buf.extend_from_slice(data);
+            }
         }
     }
 
@@ -281,11 +332,17 @@ impl SabWriter {
     }
 
     fn write_ident_token(buf: &mut Vec<u8>, ident: &str) {
-        // Map known boolean identifiers to True/False tags
-        if let Some(val) = Self::string_to_boolean(ident) {
-            buf.push(if val { tags::TRUE } else { tags::FALSE });
-        } else {
-            Self::write_string(buf, ident);
+        match ident {
+            "{" => buf.push(tags::SUBTYPE_START),
+            "}" => buf.push(tags::SUBTYPE_END),
+            _ => {
+                // Map known boolean identifiers to True/False tags
+                if let Some(val) = Self::string_to_boolean(ident) {
+                    buf.push(if val { tags::TRUE } else { tags::FALSE });
+                } else {
+                    Self::write_string(buf, ident);
+                }
+            }
         }
     }
 
@@ -341,10 +398,12 @@ impl SabWriter {
     }
 
     fn write_string(buf: &mut Vec<u8>, s: &str) {
-        if s.len() > 255 {
-            // Use LONG_STRING tag for strings exceeding 1-byte length
+        if s.len() > u16::MAX as usize {
             buf.push(tags::LONG_STRING);
             buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        } else if s.len() > u8::MAX as usize {
+            buf.push(tags::SHORT_STRING);
+            buf.extend_from_slice(&(s.len() as u16).to_le_bytes());
         } else {
             buf.push(tags::STRING);
             buf.push(s.len() as u8);
@@ -493,6 +552,14 @@ pub struct SabReader;
 impl SabReader {
     /// Parse SAB binary data into a SAT document.
     pub fn read(data: &[u8]) -> Result<SatDocument, SabError> {
+        Self::read_with_consumed(data).map(|(doc, _)| doc)
+    }
+
+    /// Like [`read`](Self::read), also returning how many input bytes the
+    /// payload occupied (through the End-of-ACIS-data record). R2004–R2006
+    /// DWGs embed the SAB with no length prefix, so the caller measures the
+    /// blob by parsing it.
+    pub fn read_with_consumed(data: &[u8]) -> Result<(SatDocument, usize), SabError> {
         // Two header magics: classic ACIS ("ACIS BinaryFile", 15 bytes) and the
         // newer Autodesk ShapeManager ("ASM BinaryFile", 14 bytes) emitted by
         // AutoCAD 2013+ and carried in the AcDs data store. In both the version
@@ -556,8 +623,13 @@ impl SabReader {
             if tag == tags::ENTITY_TYPE || tag == tags::SUBTYPE {
                 let (record, new_pos) = Self::read_record(data, pos, record_index)?;
 
-                // Check for End-of-ACIS-data marker
-                if record.entity_type == "End-of-ACIS-data" {
+                // Check for ACIS/ASM end marker — consume it so the
+                // reported length covers the full payload.
+                if matches!(
+                    record.entity_type.as_str(),
+                    "End-of-ACIS-data" | "End-of-ASM-data"
+                ) {
+                    pos = new_pos;
                     break;
                 }
 
@@ -594,10 +666,13 @@ impl SabReader {
             convert_sab_booleans(&record.entity_type, &mut record.tokens);
         }
 
-        Ok(SatDocument {
-            header,
-            records,
-        })
+        Ok((
+            SatDocument {
+                header,
+                records,
+            },
+            pos,
+        ))
     }
 
     fn read_record(
@@ -646,8 +721,11 @@ impl SabReader {
             None
         };
 
-        // Check for End-of-ACIS-data (no record body)
-        if entity_type == "End-of-ACIS-data" {
+        // Check for ACIS/ASM end marker (no record body)
+        if matches!(
+            entity_type.as_str(),
+            "End-of-ACIS-data" | "End-of-ASM-data"
+        ) {
             return Ok((
                 SatRecord {
                     index,
@@ -687,37 +765,9 @@ impl SabReader {
                 pos += 1;
                 break;
             }
-            // LONG_STRING (tag 0x12): expand the embedded text into
-            // individual sub-tokens instead of storing as one String.
-            // SAB uses LONG_STRING for transform matrices, intcurve data,
-            // etc.  The content is space-separated SAT-style tokens
-            // (floats, keywords like no_rotate/no_reflect/no_shear).
-            if tag == tags::LONG_STRING {
-                pos += 1;
-                let len = read_u32(data, &mut pos)? as usize;
-                if pos + len > data.len() {
-                    return Err(SabError::UnexpectedEof);
-                }
-                let s = std::str::from_utf8(&data[pos..pos + len])
-                    .map_err(|_| SabError::InvalidString)?;
-                pos += len;
-                // Parse space-separated tokens from the embedded text
-                for part in s.split_whitespace() {
-                    if let Ok(v) = part.parse::<f64>() {
-                        tokens.push(SatToken::Float(v));
-                    } else if part.starts_with('$') {
-                        // Embedded pointer reference (rare but possible)
-                        let idx: i32 = part[1..].parse().unwrap_or(-1);
-                        tokens.push(SatToken::Pointer(SatPointer::new(idx)));
-                    } else {
-                        tokens.push(SatToken::Ident(part.to_string()));
-                    }
-                }
-            } else {
-                let (token, new_pos) = Self::read_token(data, pos)?;
-                tokens.push(token);
-                pos = new_pos;
-            }
+            let (token, new_pos) = Self::read_token(data, pos)?;
+            tokens.push(token);
+            pos = new_pos;
         }
 
         Ok((
@@ -747,61 +797,90 @@ impl SabReader {
                 let val = read_i32(data, &mut pos)?;
                 Ok((SatToken::Pointer(SatPointer::new(val)), pos))
             }
-            tags::INTEGER | tags::ENUM => {
-                let val = read_i32(data, &mut pos)?;
-                Ok((SatToken::Integer(val as i64), pos))
-            }
-            tags::DOUBLE => {
-                let val = read_f64(data, &mut pos)?;
-                Ok((SatToken::Float(val), pos))
-            }
-            tags::STRING => {
-                let (s, new_pos) = read_length_string(data, pos)?;
-                Ok((SatToken::String(s), new_pos))
-            }
             tags::TRUE => Ok((SatToken::True, pos)),
             tags::FALSE => Ok((SatToken::False, pos)),
-            tags::POSITION => {
-                let x = read_f64(data, &mut pos)?;
-                let y = read_f64(data, &mut pos)?;
-                let z = read_f64(data, &mut pos)?;
-                Ok((SatToken::Position(x, y, z), pos))
-            }
-            tags::DIRECTION => {
-                // Direction is treated the same as position in our SatToken model;
-                // the semantic distinction is determined by position in the record.
-                let x = read_f64(data, &mut pos)?;
-                let y = read_f64(data, &mut pos)?;
-                let z = read_f64(data, &mut pos)?;
-                Ok((SatToken::Position(x, y, z), pos))
-            }
-            tags::LONG_STRING => {
-                // 4-byte u32 length prefix + raw text bytes
-                let len = read_u32(data, &mut pos)? as usize;
-                if pos + len > data.len() {
-                    return Err(SabError::UnexpectedEof);
-                }
-                let s = std::str::from_utf8(&data[pos..pos + len])
-                    .map_err(|_| SabError::InvalidString)?
-                    .to_string();
-                pos += len;
-                Ok((SatToken::String(s), pos))
-            }
             tags::END_OF_RECORD => Ok((SatToken::Terminator, pos)),
-            // Nested subtype block delimiters (`{` / `}`) and the type-name
-            // tags that appear inside them. Lofted/swept spline surfaces embed
-            // a subrecord (e.g. `skin_spl_sur`) between SUBTYPE_START and
-            // SUBTYPE_END. Emit the braces and nested type names as idents so
-            // the flat token stream stays balanced and downstream readers can
-            // locate the block by name.
-            tags::SUBTYPE_START => Ok((SatToken::Ident("{".to_string()), pos)),
-            tags::SUBTYPE_END => Ok((SatToken::Ident("}".to_string()), pos)),
-            tags::ENTITY_TYPE | tags::SUBTYPE => {
-                let (s, new_pos) = read_length_string(data, pos)?;
-                Ok((SatToken::Ident(s), new_pos))
+            tags::CHARACTER => Self::read_raw_fixed(data, tag, pos, 1),
+            tags::SHORT => Self::read_raw_fixed(data, tag, pos, 2),
+            tags::INTEGER | tags::FLOAT | tags::ENUM => {
+                Self::read_raw_fixed(data, tag, pos, 4)
             }
+            tags::DOUBLE | tags::INTEGER64 => Self::read_raw_fixed(data, tag, pos, 8),
+            tags::POSITION | tags::DIRECTION => Self::read_raw_fixed(data, tag, pos, 24),
+            tags::UV => Self::read_raw_fixed(data, tag, pos, 16),
+            tags::STRING | tags::ENTITY_TYPE | tags::SUBTYPE => {
+                Self::read_raw_string(data, tag, pos, 1)
+            }
+            tags::SHORT_STRING => Self::read_raw_string(data, tag, pos, 2),
+            tags::LONG_STRING | tags::ASM_LONG_STRING => {
+                Self::read_raw_string(data, tag, pos, 4)
+            }
+            // Keep nested subtype delimiters as their original zero-payload
+            // SAB tags. `SatToken::as_ident` exposes them as `{` and `}` to
+            // geometry consumers without losing binary identity.
+            tags::SUBTYPE_START | tags::SUBTYPE_END => Ok((
+                SatToken::Sab {
+                    tag,
+                    data: Vec::new(),
+                },
+                pos,
+            )),
             _ => Err(SabError::UnknownTag(tag, pos - 1)),
         }
+    }
+
+    fn read_raw_fixed(
+        data: &[u8],
+        tag: u8,
+        pos: usize,
+        len: usize,
+    ) -> Result<(SatToken, usize), SabError> {
+        let end = pos.checked_add(len).ok_or(SabError::UnexpectedEof)?;
+        if end > data.len() {
+            return Err(SabError::UnexpectedEof);
+        }
+        Ok((
+            SatToken::Sab {
+                tag,
+                data: data[pos..end].to_vec(),
+            },
+            end,
+        ))
+    }
+
+    fn read_raw_string(
+        data: &[u8],
+        tag: u8,
+        pos: usize,
+        prefix_len: usize,
+    ) -> Result<(SatToken, usize), SabError> {
+        let prefix_end = pos
+            .checked_add(prefix_len)
+            .ok_or(SabError::UnexpectedEof)?;
+        if prefix_end > data.len() {
+            return Err(SabError::UnexpectedEof);
+        }
+        let len = match prefix_len {
+            1 => data[pos] as usize,
+            2 => u16::from_le_bytes([data[pos], data[pos + 1]]) as usize,
+            4 => u32::from_le_bytes([
+                data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
+            ]) as usize,
+            _ => return Err(SabError::UnexpectedEof),
+        };
+        let end = prefix_end
+            .checked_add(len)
+            .ok_or(SabError::UnexpectedEof)?;
+        if end > data.len() {
+            return Err(SabError::UnexpectedEof);
+        }
+        Ok((
+            SatToken::Sab {
+                tag,
+                data: data[pos..end].to_vec(),
+            },
+            end,
+        ))
     }
 }
 
@@ -820,7 +899,7 @@ impl SabReader {
 ///   - surface sense: `forward_v` / `reversed_v`
 ///   - surface bounds: `I` (infinite) / `F` (finite)
 fn convert_sab_booleans(entity_type: &str, tokens: &mut Vec<SatToken>) {
-    match entity_type {
+    match base_entity_type(entity_type) {
         "face" => {
             // face: ... sense side #
             // After v700 normalization: tok[0]=sentinel, tok[1..N-2]=ptrs,
@@ -869,7 +948,7 @@ fn convert_sab_booleans(entity_type: &str, tokens: &mut Vec<SatToken>) {
                 }
             }
         }
-        "cone-surface" => {
+        _ if entity_type == "cone-surface" => {
             // cone-surface in v400: bool layout is position-dependent.
             // SAB stores booleans at the same structural positions as SAT, but
             // v600 and v400 interpret them differently:
@@ -1002,16 +1081,45 @@ fn read_length_string(data: &[u8], pos: usize) -> Result<(String, usize), SabErr
 }
 
 fn read_tagged_string(data: &[u8], pos: &mut usize) -> Result<String, SabError> {
-    if *pos >= data.len() || data[*pos] != tags::STRING {
+    if *pos >= data.len() {
         return Err(SabError::UnknownTag(
-            if *pos < data.len() { data[*pos] } else { 0 },
+            0,
             *pos,
         ));
     }
+    let tag = data[*pos];
     *pos += 1;
-    let (s, new_pos) = read_length_string(data, *pos)?;
-    *pos = new_pos;
-    Ok(s)
+    let prefix_len = match tag {
+        tags::STRING => 1,
+        tags::SHORT_STRING => 2,
+        tags::LONG_STRING | tags::ASM_LONG_STRING => 4,
+        _ => return Err(SabError::UnknownTag(tag, *pos - 1)),
+    };
+    let prefix_end = (*pos)
+        .checked_add(prefix_len)
+        .ok_or(SabError::UnexpectedEof)?;
+    if prefix_end > data.len() {
+        return Err(SabError::UnexpectedEof);
+    }
+    let len = match prefix_len {
+        1 => data[*pos] as usize,
+        2 => u16::from_le_bytes([data[*pos], data[*pos + 1]]) as usize,
+        4 => u32::from_le_bytes([
+            data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3],
+        ]) as usize,
+        _ => return Err(SabError::UnexpectedEof),
+    };
+    let end = prefix_end
+        .checked_add(len)
+        .ok_or(SabError::UnexpectedEof)?;
+    if end > data.len() {
+        return Err(SabError::UnexpectedEof);
+    }
+    let value = std::str::from_utf8(&data[prefix_end..end])
+        .map_err(|_| SabError::InvalidString)?
+        .to_string();
+    *pos = end;
+    Ok(value)
 }
 
 fn read_tagged_double(data: &[u8], pos: &mut usize) -> Result<f64, SabError> {

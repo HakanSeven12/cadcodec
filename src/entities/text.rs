@@ -82,7 +82,7 @@ impl Text {
             rotation: 0.0,
             width_factor: 1.0,
             oblique_angle: 0.0,
-            style: "STANDARD".to_string(),
+            style: "Standard".to_string(),
             horizontal_alignment: TextHorizontalAlignment::Left,
             vertical_alignment: TextVerticalAlignment::Baseline,
             normal: Vector3::UNIT_Z,

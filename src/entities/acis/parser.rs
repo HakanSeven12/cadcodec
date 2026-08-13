@@ -24,18 +24,32 @@ impl SatParser {
         let header_line = lines.next_line().ok_or(SatParseError::EmptyInput)?;
         let header = Self::parse_header_line(header_line)?;
 
-        // Parse product info (line 2)
-        let product_line = lines
-            .next_line()
-            .ok_or(SatParseError::InvalidProductInfo("missing".to_string()))?;
-        let (product_id, product_version, date) =
-            Self::parse_product_line(product_line, &header.version)?;
-
-        // Parse tolerances (line 3)
-        let tol_line = lines
-            .next_line()
-            .ok_or(SatParseError::InvalidTolerances("missing".to_string()))?;
-        let (spatial_res, normal_tol, resfit_tol) = Self::parse_tolerance_line(tol_line)?;
+        // The product-id and tolerance header lines only exist from ACIS 2.0
+        // on. Pre-2.0 SAT (e.g. AutoCAD R14's ACIS 1.6, version 106) writes
+        // the version line then jumps straight to the records — consuming two
+        // phantom header lines there ate the `body` and `lump` records, so
+        // every pointer resolved two records off and the solid never meshed.
+        // A record line always carries `$` pointers; the header lines never
+        // do, so peek: `$` in the next line means the extras are absent.
+        let has_header_extras = lines
+            .peek_line()
+            .map(|l| !l.contains('$'))
+            .unwrap_or(false);
+        let (product_id, product_version, date, spatial_res, normal_tol, resfit_tol) =
+            if has_header_extras {
+                let product_line = lines
+                    .next_line()
+                    .ok_or(SatParseError::InvalidProductInfo("missing".to_string()))?;
+                let (pid, pver, date) =
+                    Self::parse_product_line(product_line, &header.version)?;
+                let tol_line = lines
+                    .next_line()
+                    .ok_or(SatParseError::InvalidTolerances("missing".to_string()))?;
+                let (sr, nt, rt) = Self::parse_tolerance_line(tol_line)?;
+                (pid, pver, date, sr, nt, rt)
+            } else {
+                (String::new(), String::new(), String::new(), 1e-6, 1e-10, None)
+            };
 
         let sat_header = SatHeader {
             version: header.version,
@@ -180,8 +194,26 @@ impl SatParser {
         // purely DXF line-boundary artifacts and can be safely removed.
         let remaining = remaining.replace('\n', "").replace('\r', "");
 
-        // Split by '#' to get individual records
-        let record_texts: Vec<&str> = remaining.split('#').collect();
+        // Split by '#' to get individual records, then heal splits that landed
+        // inside a string.
+        //
+        // Only 7.0+ delimits strings with `@`; before that they are written as
+        // `<len> <chars>`, so the text may legally contain the record
+        // terminator. ODA's builder emits exactly that: `dxid-attrib $-1 $-1 $1
+        // $0 8 STEP Id# 99 <guid> #`. Cutting at the inner `#` invents a record,
+        // which shifts every later record's implied index, so faces end up
+        // pointing at whatever record now sits at their number and the body
+        // meshes to nothing.
+        let mut record_texts: Vec<String> = Vec::new();
+        for piece in remaining.split('#') {
+            if starts_record(piece) || record_texts.is_empty() {
+                record_texts.push(piece.to_string());
+            } else {
+                let previous = record_texts.last_mut().expect("non-empty");
+                previous.push('#');
+                previous.push_str(piece);
+            }
+        }
 
         for record_text in record_texts {
             let trimmed = record_text.trim();
@@ -362,6 +394,16 @@ impl<'a> SatLines<'a> {
         Self { text, pos: 0 }
     }
 
+    /// Peek the next line without consuming it.
+    fn peek_line(&self) -> Option<&'a str> {
+        if self.pos >= self.text.len() {
+            return None;
+        }
+        let remaining = &self.text[self.pos..];
+        let end = remaining.find('\n').unwrap_or(remaining.len());
+        Some(remaining[..end].trim_end_matches('\r'))
+    }
+
     /// Read the next line (up to the next newline).
     fn next_line(&mut self) -> Option<&'a str> {
         if self.pos >= self.text.len() {
@@ -540,6 +582,45 @@ impl<'a> SatTokenizer<'a> {
 // Helper functions
 // ============================================================================
 
+/// Whether a `#`-delimited fragment opens a new entity record.
+///
+/// Used to tell a real record boundary from a `#` that occurred inside a
+/// pre-7.0 counted string. A record opens with its save identifier — always
+/// alphabetic, e.g. `body`, `plane-surface`, `rgb_color-st-attrib` — optionally
+/// behind a `-<n>` sequence number in 7.0+ files, and the identifier is
+/// followed by the entity's attribute slot, written either as a `$` pointer or
+/// as a bare integer. A string tail matches none of that.
+fn starts_record(fragment: &str) -> bool {
+    let head = fragment.trim_start();
+    // Nothing to glue onto, and the end marker carries no attribute slot.
+    if head.is_empty() || head.starts_with("End-of-") {
+        return true;
+    }
+    let mut rest = head;
+    if let Some(after_sign) = head.strip_prefix('-') {
+        let tail = after_sign.trim_start_matches(|c: char| c.is_ascii_digit());
+        if tail.len() == after_sign.len() || !tail.starts_with(char::is_whitespace) {
+            return false;
+        }
+        rest = tail.trim_start();
+    }
+    let mut tokens = rest.split_whitespace();
+    let Some(identifier) = tokens.next() else {
+        return false;
+    };
+    if !identifier.starts_with(|c: char| c.is_ascii_alphabetic())
+        || !identifier
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return false;
+    }
+    match tokens.next() {
+        Some(slot) => slot.starts_with('$') || slot.parse::<i64>().is_ok(),
+        None => false,
+    }
+}
+
 /// Check if a token looks like a negative index (e.g. "-0", "-1", "-42").
 fn looks_like_negative_index(s: &str) -> bool {
     if !s.starts_with('-') {
@@ -555,7 +636,8 @@ fn looks_like_negative_index(s: &str) -> bool {
 ///
 /// | Entity types                                       | Sentinel position |
 /// |----------------------------------------------------|-------------------|
-/// | body, face, loop, coedge, edge, vertex,            | 0                 |
+/// | body, subshell, wire, face, loop, coedge, edge,    | 0                 |
+/// | vertex,                                            |                   |
 /// | point, transform, *-surface, *-curve               |                   |
 /// | lump                                               | 1                 |
 /// | shell                                              | 2                 |
@@ -563,29 +645,31 @@ fn looks_like_negative_index(s: &str) -> bool {
 /// By inserting a synthetic `$-1` here the rest of the codebase can use
 /// a single set of token indices regardless of the source ACIS version.
 pub(crate) fn normalize_v400_tokens(entity_type: &str, tokens: &mut Vec<SatToken>) {
+    let base = base_entity_type(entity_type);
+    let position = match base {
+        "lump" => 1.min(tokens.len()),
+        "shell" => 2.min(tokens.len()),
+        "body" | "subshell" | "wire" | "face" | "loop" | "vertex" | "coedge"
+        | "edge" | "point" | "transform" | "surface" | "curve" | "pcurve" => 0,
+        // Unknown entity types (attributes, etc.): leave unchanged.
+        _ => return,
+    };
     let sentinel = SatToken::Pointer(SatPointer::NULL);
-    match entity_type {
-        // Sentinel at position 0
-        "body" | "face" | "loop" | "vertex" | "coedge" | "edge"
-        | "point" | "transform"
-        | "plane-surface" | "cone-surface" | "sphere-surface" | "torus-surface"
-        | "spline-surface" | "meshsurf-surface" | "bs3-surface"
-        | "straight-curve" | "ellipse-curve" | "intcurve-curve" | "bs2-curve"
-        | "bs3-curve" | "exactcur-curve" => {
-            tokens.insert(0, sentinel);
+    tokens.insert(position, sentinel);
+
+    // v400 edge is `$sv $ev $coedge $curve sense` — it omits the
+    // start_param / end_param doubles that v700 carries between the
+    // vertices (`$sv sp $ev ep $coedge $curve sense`). Insert zero
+    // placeholders so the fixed-index accessors read derived edge classes too.
+    if base == "edge"
+        && tokens.len() >= 3
+        && matches!(tokens.get(1), Some(SatToken::Pointer(_)))
+        && matches!(tokens.get(2), Some(SatToken::Pointer(_)))
+    {
+        tokens.insert(2, SatToken::Float(0.0));
+        if tokens.len() >= 5 {
+            tokens.insert(4, SatToken::Float(0.0));
         }
-        // Sentinel at position 1
-        "lump" => {
-            let pos = 1.min(tokens.len());
-            tokens.insert(pos, sentinel);
-        }
-        // Sentinel at position 2
-        "shell" => {
-            let pos = 2.min(tokens.len());
-            tokens.insert(pos, sentinel);
-        }
-        // Unknown entity types (attributes, etc.): leave unchanged
-        _ => {}
     }
 }
 

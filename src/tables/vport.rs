@@ -1,8 +1,8 @@
 //! Viewport table entry
 
 use super::TableEntry;
-use crate::entities::ViewportRenderMode;
-use crate::types::{Handle, Vector2, Vector3};
+use crate::entities::{GridFlags, ViewportRenderMode};
+use crate::types::{Color, Handle, Vector2, Vector3};
 
 /// A viewport table entry
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +58,64 @@ pub struct VPort {
     pub snap_rotation: f64,
     /// Visual style / render mode (DXF code 281)
     pub render_mode: ViewportRenderMode,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub perspective: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub front_clipping: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub back_clipping: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub front_clip_at_eye: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucsicon_lower: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucsicon_origin: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub use_default_lights: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub default_lighting_type: i16,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub brightness: f64,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub contrast: f64,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ambient_color: Color,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucs_at_origin: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucs_per_viewport: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucs_origin: Vector3,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucs_x_axis: Vector3,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucs_y_axis: Vector3,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucs_elevation: f64,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ucs_ortho_type: i16,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub grid_flags: GridFlags,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub grid_major: i16,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_reference: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_resolved: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_dependent: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xref_handle: Handle,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub background_handle: Handle,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub visual_style_handle: Handle,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub sun_handle: Handle,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub named_ucs_handle: Handle,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub base_ucs_handle: Handle,
 }
 
 impl VPort {
@@ -89,6 +147,35 @@ impl VPort {
             snap_isopair: 0,
             snap_rotation: 0.0,
             render_mode: ViewportRenderMode::Wireframe2D,
+            perspective: false,
+            front_clipping: false,
+            back_clipping: false,
+            front_clip_at_eye: false,
+            ucsicon_lower: true,
+            ucsicon_origin: true,
+            use_default_lights: true,
+            default_lighting_type: 1,
+            brightness: 0.0,
+            contrast: 0.0,
+            ambient_color: Color::from_index(250),
+            ucs_at_origin: false,
+            ucs_per_viewport: true,
+            ucs_origin: Vector3::ZERO,
+            ucs_x_axis: Vector3::UNIT_X,
+            ucs_y_axis: Vector3::UNIT_Y,
+            ucs_elevation: 0.0,
+            ucs_ortho_type: 0,
+            grid_flags: GridFlags::from_bits(2),
+            grid_major: 5,
+            xref_reference: false,
+            xref_resolved: false,
+            xref_dependent: false,
+            xref_handle: Handle::NULL,
+            background_handle: Handle::NULL,
+            visual_style_handle: Handle::NULL,
+            sun_handle: Handle::NULL,
+            named_ucs_handle: Handle::NULL,
+            base_ucs_handle: Handle::NULL,
         }
     }
 
@@ -119,5 +206,4 @@ impl TableEntry for VPort {
         self.name == "*Active"
     }
 }
-
 

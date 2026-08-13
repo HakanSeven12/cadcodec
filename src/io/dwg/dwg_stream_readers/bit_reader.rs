@@ -10,6 +10,7 @@
 use crate::types::{Color, DxfVersion, Transparency, Vector2, Vector3};
 use crate::io::dwg::dwg_version::DwgVersion;
 use crate::io::dwg::dwg_reference_type::DwgReferenceType;
+use std::sync::Arc;
 
 
 /// Bit-level reader for the DWG binary format.
@@ -24,7 +25,7 @@ use crate::io::dwg::dwg_reference_type::DwgReferenceType;
 /// - `last_byte`: The most recently read byte from the stream
 pub struct DwgBitReader {
     /// Source data buffer.
-    data: Vec<u8>,
+    data: Arc<[u8]>,
     /// Current stream byte position (points past the last byte read via advance_byte).
     position: usize,
     /// Current bit offset within `last_byte` (0 = no bits consumed yet from last_byte)
@@ -42,11 +43,24 @@ pub struct DwgBitReader {
     /// Text stream bit position for R2007+ three-stream merge.
     /// -1 = no separate text stream (read inline).
     text_stream_pos: i64,
+    /// One-past-the-end bit position of the R2007+ text stream.
+    text_stream_end_pos: i64,
 }
 
 impl DwgBitReader {
     /// Create a new bit reader over the given data buffer.
     pub fn new(data: Vec<u8>, version: DwgVersion, dxf_version: DxfVersion) -> Self {
+        Self::from_shared(data.into(), version, dxf_version)
+    }
+
+    /// Create a reader sharing immutable bytes with sibling stream readers.
+    /// Object records have main/text/handle cursors over identical storage;
+    /// sharing avoids three full record copies per cursor set.
+    pub fn from_shared(
+        data: Arc<[u8]>,
+        version: DwgVersion,
+        dxf_version: DxfVersion,
+    ) -> Self {
         Self {
             data,
             position: 0,
@@ -57,7 +71,19 @@ impl DwgBitReader {
             encoding: encoding_rs::WINDOWS_1252,
             is_empty: false,
             text_stream_pos: -1,
+            text_stream_end_pos: -1,
         }
+    }
+
+    pub fn from_shared_with_encoding(
+        data: Arc<[u8]>,
+        version: DwgVersion,
+        dxf_version: DxfVersion,
+        encoding: &'static encoding_rs::Encoding,
+    ) -> Self {
+        let mut reader = Self::from_shared(data, version, dxf_version);
+        reader.encoding = encoding;
+        reader
     }
 
     /// Create a new bit reader with a specific encoding.
@@ -70,6 +96,12 @@ impl DwgBitReader {
         let mut r = Self::new(data, version, dxf_version);
         r.encoding = encoding;
         r
+    }
+
+    /// Decode bytes using the document's legacy text code page.
+    pub fn decode_legacy_text(&self, bytes: &[u8]) -> String {
+        let (decoded, _, _) = self.encoding.decode(bytes);
+        decoded.into_owned()
     }
 
     /// Get the DWG version.
@@ -114,7 +146,7 @@ impl DwgBitReader {
     /// Used to extract the raw merged-stream record bytes for
     /// round-trip preservation of unknown entities.
     pub fn data_bytes(&self) -> Vec<u8> {
-        self.data.clone()
+        self.data.as_ref().to_vec()
     }
 
     /// Set the stream position (byte-level) and reset bit shift.
@@ -596,8 +628,7 @@ impl DwgBitReader {
         let code = form >> 4;
         let counter = (form & 0x0F) as usize;
 
-        // Reference type from last 2 bits of code
-        *ref_type = match code & 0x03 {
+        *ref_type = match code {
             0 => DwgReferenceType::Undefined,
             2 => DwgReferenceType::SoftOwnership,
             3 => DwgReferenceType::HardOwnership,
@@ -754,6 +785,8 @@ impl DwgBitReader {
 
             let color = if rgb == 0xC000_0000 {
                 Color::ByLayer
+            } else if rgb == 0xC800_0000 {
+                Color::None
             } else if (rgb & 0x0100_0000) != 0 {
                 // Indexed color
                 Color::from_index(arr[0] as i16)
@@ -925,16 +958,40 @@ impl DwgBitReader {
             let (length, size) = self.apply_flag_to_position(position);
             let start_pos = length - size;
             self.text_stream_pos = start_pos;
+            self.text_stream_end_pos = length;
             self.set_position_in_bits(start_pos);
             start_pos
         } else {
             // No string stream — mark as empty and go to end
             self.is_empty = true;
             self.text_stream_pos = -1;
+            self.text_stream_end_pos = position;
             self.position = self.data.len();
             self.bit_shift = 0;
             position
         }
+    }
+
+    /// Bits remaining in the separate R2007+ text stream.
+    pub fn text_stream_remaining_bits(&self) -> i64 {
+        if self.text_stream_pos < 0 || self.text_stream_end_pos < 0 {
+            0
+        } else {
+            (self.text_stream_end_pos - self.text_stream_pos).max(0)
+        }
+    }
+
+    /// Read one opaque bit from the current text-stream cursor.
+    pub fn read_text_stream_bit(&mut self) -> bool {
+        if self.text_stream_pos < 0 {
+            return false;
+        }
+        let saved_pos = self.position_in_bits();
+        self.set_position_in_bits(self.text_stream_pos);
+        let value = self.read_bit();
+        self.text_stream_pos = self.position_in_bits();
+        self.set_position_in_bits(saved_pos);
+        value
     }
 
     /// Reset the bit shift and read a CRC (2 bytes, little-endian).

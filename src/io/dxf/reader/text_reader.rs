@@ -1,6 +1,6 @@
 //! DXF ASCII text reader
 
-use super::stream_reader::{DxfCodePair, DxfStreamReader};
+use super::stream_reader::{DxfCodePair, DxfStreamContext, DxfStreamReader};
 use crate::error::{DxfError, Result};
 use encoding_rs::Encoding;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -9,11 +9,13 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 pub struct DxfTextReader<R: Read + Seek> {
     reader: BufReader<R>,
     line_number: usize,
+    stream_offset: u64,
     peeked_pair: Option<DxfCodePair>,
     /// Non-UTF8 fallback encoding.  `None` means use Latin-1 (byte-to-char).
     encoding: Option<&'static Encoding>,
     /// Reusable buffer for line reading to avoid per-line allocation.
     line_buf: Vec<u8>,
+    context: DxfStreamContext,
 }
 
 impl<R: Read + Seek> DxfTextReader<R> {
@@ -22,9 +24,11 @@ impl<R: Read + Seek> DxfTextReader<R> {
         Ok(Self {
             reader,
             line_number: 0,
+            stream_offset: 0,
             peeked_pair: None,
             encoding: None,
             line_buf: Vec::with_capacity(256),
+            context: DxfStreamContext::default(),
         })
     }
     
@@ -43,6 +47,7 @@ impl<R: Read + Seek> DxfTextReader<R> {
         }
 
         self.line_number += 1;
+        self.stream_offset = self.stream_offset.saturating_add(bytes_read as u64);
 
         // Strip trailing \n and \r in-place
         if buf.last() == Some(&b'\n') { buf.pop(); }
@@ -85,6 +90,7 @@ impl<R: Read + Seek> DxfTextReader<R> {
             return Ok(false);
         }
         self.line_number += 1;
+        self.stream_offset = self.stream_offset.saturating_add(bytes_read as u64);
         if self.line_buf.last() == Some(&b'\n') { self.line_buf.pop(); }
         if self.line_buf.last() == Some(&b'\r') { self.line_buf.pop(); }
         Ok(true)
@@ -92,6 +98,10 @@ impl<R: Read + Seek> DxfTextReader<R> {
 
     /// Read a code/value pair from the stream
     fn read_pair_internal(&mut self) -> Result<Option<DxfCodePair>> {
+        let pair_offset = Some(self.stream_offset);
+        self.context.source_offset = pair_offset;
+        self.context.source_line = Some(self.line_number.saturating_add(1));
+
         // Read code line into reusable buffer (no String allocation needed)
         if !self.read_line_raw()? {
             return Ok(None);
@@ -112,7 +122,22 @@ impl<R: Read + Seek> DxfTextReader<R> {
         // Process special character sequences in strings
         let value = self.process_string_value(&value_line);
         
-        Ok(Some(DxfCodePair::new(code, value)))
+        let pair = DxfCodePair::new(code, value);
+        self.observe_pair(&pair, pair_offset);
+        Ok(Some(pair))
+    }
+
+    fn observe_pair(&mut self, pair: &DxfCodePair, pair_offset: Option<u64>) {
+        self.context.source_offset = pair_offset;
+        self.context.source_line = Some(self.line_number.saturating_sub(1));
+        if pair.code == 0 {
+            self.context.record_type = Some(pair.value_string.clone());
+            self.context.record_handle = None;
+        } else if pair.code == 105
+            || (pair.code == 5 && self.context.record_type.as_deref() != Some("DIMSTYLE"))
+        {
+            self.context.record_handle = pair.as_handle();
+        }
     }
     
     /// Process special character sequences in DXF strings
@@ -162,12 +187,18 @@ impl<R: Read + Seek> DxfStreamReader for DxfTextReader<R> {
     fn reset(&mut self) -> Result<()> {
         self.reader.seek(SeekFrom::Start(0))?;
         self.line_number = 0;
+        self.stream_offset = 0;
         self.peeked_pair = None;
+        self.context = DxfStreamContext::default();
         Ok(())
     }
 
     fn set_encoding(&mut self, encoding: &'static Encoding) {
         self.encoding = Some(encoding);
+    }
+
+    fn diagnostic_context(&self) -> DxfStreamContext {
+        self.context.clone()
     }
 }
 

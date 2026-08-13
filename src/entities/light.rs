@@ -1,19 +1,61 @@
 //! Light entity (point / spot / distant light source).
 //!
-//! The light is parsed for its display glyph — the source position and, for
-//! spot/distant lights, the aim point. The full photometric body (attenuation,
-//! shadows, web/IES data) is **not** re-encoded natively: the original DWG
-//! record bytes are preserved in [`raw_dwg_data`](Light::raw_dwg_data) and
-//! re-emitted verbatim on write-back, exactly like
-//! [`Surface`](super::solid3d::Surface) and
-//! [`UnknownEntity`](super::unknown_entity::UnknownEntity). This keeps the file
-//! lossless while still surfacing the geometry a renderer needs to draw the
-//! nonprint light glyph.
+//! Includes attenuation, shadow and optional photometric/IES data.
 
 use super::{Entity, EntityCommon};
 use crate::types::{
-    BoundingBox3D, Color, DxfVersion, Handle, LineWeight, Transform, Transparency, Vector3,
+    BoundingBox3D, Color, Handle, LineWeight, Transform, Transparency, Vector3,
 };
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LightPhotometricData {
+    pub has_web_file: bool,
+    pub web_file: String,
+    pub physical_intensity_method: i16,
+    pub physical_intensity: f64,
+    pub illuminance_distance: f64,
+    pub lamp_color_type: i16,
+    pub lamp_color_temperature: f64,
+    pub lamp_color_preset: i16,
+    pub web_rotation: Vector3,
+    pub extended_light_shape: i16,
+    pub extended_light_length: f64,
+    pub extended_light_width: f64,
+    pub extended_light_radius: f64,
+    pub web_file_type: i16,
+    pub web_symmetry: i16,
+    pub has_target_grip: i16,
+    pub web_flux: f64,
+    pub web_angles: [f64; 5],
+    pub glyph_display_type: i16,
+}
+
+impl Default for LightPhotometricData {
+    fn default() -> Self {
+        Self {
+            has_web_file: false,
+            web_file: String::new(),
+            physical_intensity_method: 0,
+            physical_intensity: 0.0,
+            illuminance_distance: 0.0,
+            lamp_color_type: 0,
+            lamp_color_temperature: 0.0,
+            lamp_color_preset: 0,
+            web_rotation: Vector3::new(1.0, 1.0, 1.0),
+            extended_light_shape: 0,
+            extended_light_length: 0.0,
+            extended_light_width: 0.0,
+            extended_light_radius: 0.0,
+            web_file_type: 0,
+            web_symmetry: 0,
+            has_target_grip: 0,
+            web_flux: 0.0,
+            web_angles: [0.0; 5],
+            glyph_display_type: 0,
+        }
+    }
+}
 
 /// A light source entity (`AcDbLight`).
 #[derive(Debug, Clone, PartialEq)]
@@ -23,22 +65,31 @@ pub struct Light {
     pub common: EntityCommon,
     /// Light name (DXF 1), e.g. `"Spotlight1"`.
     pub name: String,
+    pub class_version: i32,
     /// Light type (DXF 70): 1 = distant, 2 = point, 3 = spot.
     pub light_type: i32,
     /// Light source position (DXF 10).
     pub position: Vector3,
     /// Aim / target point (DXF 11) — meaningful for spot and distant lights.
     pub target: Vector3,
-    /// DWG object type code (round-trip).
-    pub dwg_type_code: i16,
-    /// Handle-stream bit count for R2010+ records (round-trip framing).
-    pub dwg_handle_bits: i64,
-    /// Raw DWG record bytes, re-emitted verbatim on write-back.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub raw_dwg_data: Option<Vec<u8>>,
-    /// Source DWG version — dropped on an incompatible cross-version save.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub dwg_source_version: Option<DxfVersion>,
+    pub status: bool,
+    pub light_color: Color,
+    pub plot_glyph: bool,
+    pub intensity: f64,
+    pub attenuation_type: i32,
+    pub use_attenuation_limits: bool,
+    pub attenuation_start_limit: f64,
+    pub attenuation_end_limit: f64,
+    pub hotspot_angle: f64,
+    pub falloff_angle: f64,
+    pub cast_shadows: bool,
+    pub shadow_type: i32,
+    pub shadow_map_size: i16,
+    pub shadow_map_softness: u8,
+    /// True when the file's LIGHTINGUNITS enables the photometric tail.
+    pub photometric_mode: bool,
+    /// Present when the photometric tail's has-data bit is set.
+    pub photometric_data: Option<LightPhotometricData>,
 }
 
 impl Light {
@@ -47,13 +98,26 @@ impl Light {
         Light {
             common: EntityCommon::new(),
             name: String::new(),
+            class_version: 1,
             light_type: 2,
             position: Vector3::ZERO,
             target: Vector3::ZERO,
-            dwg_type_code: 0,
-            dwg_handle_bits: 0,
-            raw_dwg_data: None,
-            dwg_source_version: None,
+            status: true,
+            light_color: Color::WHITE,
+            plot_glyph: false,
+            intensity: 1.0,
+            attenuation_type: 0,
+            use_attenuation_limits: false,
+            attenuation_start_limit: 0.0,
+            attenuation_end_limit: 0.0,
+            hotspot_angle: 0.0,
+            falloff_angle: 0.0,
+            cast_shadows: false,
+            shadow_type: 0,
+            shadow_map_size: 0,
+            shadow_map_softness: 0,
+            photometric_mode: false,
+            photometric_data: None,
         }
     }
 
@@ -129,9 +193,8 @@ impl Entity for Light {
     fn entity_type(&self) -> &'static str {
         "LIGHT"
     }
-    fn apply_transform(&mut self, _transform: &Transform) {
-        // Lights are glyph-only in this library; a full transform of the
-        // photometric frame is not modelled. Position/target stay put so the
-        // preserved raw record continues to round-trip unchanged.
+    fn apply_transform(&mut self, transform: &Transform) {
+        self.position = transform.apply(self.position);
+        self.target = transform.apply(self.target);
     }
 }

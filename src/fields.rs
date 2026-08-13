@@ -54,6 +54,21 @@ pub fn resolve(doc: &CadDocument, host: Handle, ctx: &dyn FieldContext) -> Optio
     eval_field(doc, container, ctx, host)
 }
 
+/// Re-evaluate one specific field object for a known host.
+///
+/// Table cells reference their FIELD directly rather than through the single
+/// `_text` container used by MTEXT. Exposing this narrow entry point lets a
+/// host render those cells without guessing which field belongs to them.
+pub fn resolve_handle(
+    doc: &CadDocument,
+    field_handle: Handle,
+    host: Handle,
+    ctx: &dyn FieldContext,
+) -> Option<String> {
+    let field = doc.fields.get(&field_handle)?;
+    eval_field(doc, field, ctx, host)
+}
+
 // ── linkage ────────────────────────────────────────────────────────────────
 
 /// Owner of an *object* handle (field / dictionary / other object). `None` when
@@ -187,6 +202,9 @@ fn eval_acexpr(doc: &CadDocument, code: &str, host: Handle) -> Option<String> {
 /// table's block-record), falling back to the sole table when a drawing has
 /// exactly one.
 fn table_for_host(doc: &CadDocument, host: Handle) -> Option<&Table> {
+    if let Some(EntityType::Table(table)) = doc.get_entity(host) {
+        return Some(table);
+    }
     let owner = doc
         .entities()
         .find(|e| e.common().handle == host)

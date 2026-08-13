@@ -49,7 +49,9 @@ pub mod dwg_stream_writers;
 pub mod dwg_version;
 pub mod dwg_writer;
 pub mod eed_codec;
+pub(crate) mod embedded_entity;
 pub mod file_headers;
+mod parallel;
 pub mod preview;
 pub mod reed_solomon;
 
@@ -58,4 +60,19 @@ pub use dwg_reader::DwgReadOptions;
 pub use dwg_reference_type::DwgReferenceType;
 pub use dwg_version::DwgVersion;
 pub use dwg_writer::DwgWriter;
+
+pub(crate) fn sab_fingerprint<'a>(
+    entries: impl IntoIterator<Item = (crate::Handle, &'a [u8])>,
+) -> Vec<(u64, usize, u64)> {
+    use std::hash::{Hash, Hasher};
+
+    let mut fingerprint = Vec::new();
+    for (handle, bytes) in entries {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        fingerprint.push((handle.value(), bytes.len(), hasher.finish()));
+    }
+    fingerprint.sort_unstable_by_key(|entry| entry.0);
+    fingerprint
+}
 pub use file_headers::{DwgFileHeaderWriterAC15, DwgFileHeaderWriterAC18};

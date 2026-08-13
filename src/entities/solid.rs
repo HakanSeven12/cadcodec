@@ -23,6 +23,9 @@ pub struct Solid {
     pub normal: Vector3,
     /// Thickness (extrusion distance)
     pub thickness: f64,
+    /// Preserve the legacy TRACE entity identity. TRACE and SOLID share the
+    /// same geometry but use different DWG/DXF type codes.
+    pub is_trace: bool,
 }
 
 impl Solid {
@@ -41,6 +44,7 @@ impl Solid {
             fourth_corner: fourth,
             normal: Vector3::new(0.0, 0.0, 1.0),
             thickness: 0.0,
+            is_trace: false,
         }
     }
 
@@ -173,4 +177,3 @@ impl Entity for Solid {
         super::mirror::mirror_solid(self, transform);
     }
 }
-

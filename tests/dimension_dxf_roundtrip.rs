@@ -43,6 +43,31 @@ fn linear_rotation_survives_dxf_roundtrip() {
 }
 
 #[test]
+fn block_name_survives_dxf_roundtrip() {
+    // The anonymous block holding the baked dimension picture (group code 2)
+    // must round-trip. The reader previously ignored code 2, so every DXF
+    // dimension came back with an empty block_name and lost its geometry link —
+    // consumers then recomputed the picture and the text drifted.
+    let mut doc = CadDocument::new();
+    let mut d = DimensionLinear::vertical(Vector3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 10.0, 0.0));
+    d.base.block_name = "*D42".to_string();
+    doc.add_entity(EntityType::Dimension(Dimension::Linear(d)))
+        .unwrap();
+    let loaded = roundtrip(&doc, "blk");
+    let dim = loaded
+        .entities()
+        .find_map(|e| match e {
+            EntityType::Dimension(Dimension::Linear(d)) => Some(d),
+            _ => None,
+        })
+        .expect("linear dim");
+    assert_eq!(
+        dim.base.block_name, "*D42",
+        "dimension block_name (DXF code 2) must survive the round-trip"
+    );
+}
+
+#[test]
 fn radius_points_survive_dxf_roundtrip() {
     let mut doc = CadDocument::new();
     let center = Vector3::new(3.0, 4.0, 0.0);

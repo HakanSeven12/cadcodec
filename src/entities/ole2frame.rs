@@ -3,6 +3,20 @@
 use super::{Entity, EntityCommon};
 use crate::types::{BoundingBox3D, Color, Handle, LineWeight, Transform, Transparency, Vector3};
 
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum OleFrameEnvelope {
+    #[default]
+    None,
+    Geometry {
+        marker: u16,
+        extension_records: Vec<crate::compound_file::BinaryRecord>,
+    },
+    Legacy {
+        records: Vec<crate::compound_file::BinaryRecord>,
+    },
+}
+
 /// OLE object type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -29,7 +43,7 @@ impl OleObjectType {
 
 /// An embedded OLE2 object entity.
 ///
-/// Stores the binary OLE data and bounding rectangle.
+/// Stores the decoded OLE compound storage and bounding rectangle.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ole2Frame {
@@ -47,12 +61,14 @@ pub struct Ole2Frame {
     pub ole_object_type: OleObjectType,
     /// Whether the object is in paper space
     pub is_paper_space: bool,
-    /// Raw OLE binary data (code 310 chunks concatenated)
-    pub binary_data: Vec<u8>,
+    /// OLE wrapper records and decoded compound-file storage.
+    pub storage: crate::compound_file::StructuredStoragePayload,
+    /// Typed DWG wrapper preceding the compound file.
+    pub envelope: OleFrameEnvelope,
     /// DWG tile mode descriptor (0=model, 1=paper, 2=model in layout)
     pub dwg_mode: i16,
-    /// DWG trailing byte (OLE type indicator)
-    pub dwg_trailing_byte: u8,
+    /// Preserve the OLE object's aspect ratio while resizing.
+    pub lock_aspect: u8,
 }
 
 impl Ole2Frame {
@@ -66,10 +82,151 @@ impl Ole2Frame {
             lower_right_corner: Vector3::ZERO,
             ole_object_type: OleObjectType::Embedded,
             is_paper_space: false,
-            binary_data: Vec::new(),
+            storage: crate::compound_file::StructuredStoragePayload::default(),
+            envelope: OleFrameEnvelope::None,
             dwg_mode: 0,
-            dwg_trailing_byte: 3,
+            lock_aspect: 0,
         }
+    }
+
+    pub(crate) fn decode_payload(
+        data: &[u8],
+    ) -> (
+        crate::compound_file::StructuredStoragePayload,
+        OleFrameEnvelope,
+        Vector3,
+        Vector3,
+    ) {
+        let mut storage =
+            crate::compound_file::StructuredStoragePayload::decode(data);
+        let leading =
+            crate::compound_file::BinaryRecord::join(&storage.leading_records);
+        let default = (
+            Vector3::new(1.0, 1.0, 0.0),
+            Vector3::new(0.0, 0.0, 0.0),
+        );
+        if leading.len() < 98 {
+            return (
+                storage,
+                OleFrameEnvelope::None,
+                default.0,
+                default.1,
+            );
+        }
+        let read_f64 = |offset: usize| {
+            leading
+                .get(offset..offset + 8)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(f64::from_le_bytes)
+        };
+        let values = [
+            read_f64(2),
+            read_f64(10),
+            read_f64(18),
+            read_f64(26),
+            read_f64(34),
+            read_f64(42),
+            read_f64(50),
+            read_f64(58),
+            read_f64(66),
+            read_f64(74),
+            read_f64(82),
+            read_f64(90),
+        ];
+        let Some(values) = values
+            .into_iter()
+            .collect::<Option<Vec<f64>>>()
+        else {
+            let records =
+                std::mem::take(&mut storage.leading_records);
+            return (
+                storage,
+                OleFrameEnvelope::Legacy {
+                    records,
+                },
+                default.0,
+                default.1,
+            );
+        };
+        let finite = values
+            .iter()
+            .all(|value| value.is_finite() && value.abs() < 1e15);
+        let close = |left: f64, right: f64| {
+            (left - right).abs()
+                <= 1e-6 * (1.0 + left.abs().max(right.abs()))
+        };
+        let rectangle = close(values[1], values[4])
+            && close(values[7], values[10])
+            && close(values[0], values[9])
+            && close(values[3], values[6]);
+        if !finite || !rectangle {
+            let records =
+                std::mem::take(&mut storage.leading_records);
+            return (
+                storage,
+                OleFrameEnvelope::Legacy {
+                    records,
+                },
+                default.0,
+                default.1,
+            );
+        }
+        storage.leading_records.clear();
+        (
+            storage,
+            OleFrameEnvelope::Geometry {
+                marker: u16::from_le_bytes([leading[0], leading[1]]),
+                extension_records: crate::compound_file::BinaryRecord::split(
+                    &leading[98..],
+                    4096,
+                ),
+            },
+            Vector3::new(values[0], values[1], values[2]),
+            Vector3::new(values[6], values[7], values[8]),
+        )
+    }
+
+    pub fn encoded_payload(&self) -> Vec<u8> {
+        let mut output = match &self.envelope {
+            OleFrameEnvelope::None => Vec::new(),
+            OleFrameEnvelope::Legacy { records } => {
+                crate::compound_file::BinaryRecord::join(records)
+            }
+            OleFrameEnvelope::Geometry {
+                marker,
+                extension_records,
+            } => {
+                let upper_right = Vector3::new(
+                    self.lower_right_corner.x,
+                    self.upper_left_corner.y,
+                    self.upper_left_corner.z,
+                );
+                let lower_left = Vector3::new(
+                    self.upper_left_corner.x,
+                    self.lower_right_corner.y,
+                    self.lower_right_corner.z,
+                );
+                let mut bytes = marker.to_le_bytes().to_vec();
+                for point in [
+                    self.upper_left_corner,
+                    upper_right,
+                    self.lower_right_corner,
+                    lower_left,
+                ] {
+                    bytes.extend_from_slice(&point.x.to_le_bytes());
+                    bytes.extend_from_slice(&point.y.to_le_bytes());
+                    bytes.extend_from_slice(&point.z.to_le_bytes());
+                }
+                bytes.extend_from_slice(
+                    &crate::compound_file::BinaryRecord::join(
+                        extension_records,
+                    ),
+                );
+                bytes
+            }
+        };
+        output.extend_from_slice(&self.storage.encode());
+        output
     }
 }
 

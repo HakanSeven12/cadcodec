@@ -421,6 +421,8 @@ impl Default for HatchGradientPattern {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Hatch {
     pub common: EntityCommon,
+    /// True when this record is the class-based AcDbMPolygon variant.
+    pub is_mpolygon: bool,
     /// Elevation of the hatch
     pub elevation: f64,
     /// Normal vector (extrusion direction)
@@ -449,6 +451,12 @@ pub struct Hatch {
     pub pixel_size: f64,
     /// Gradient color pattern
     pub gradient_color: HatchGradientPattern,
+    /// MPOLYGON-only fill colour.
+    pub mpolygon_hatch_color: Color,
+    /// MPOLYGON-only hatch X direction.
+    pub mpolygon_x_direction: Vector2,
+    /// MPOLYGON trailer count retained independently from per-path handles.
+    pub mpolygon_boundary_handle_count: i32,
 }
 
 impl Hatch {
@@ -456,6 +464,7 @@ impl Hatch {
     pub fn new() -> Self {
         Self {
             common: EntityCommon::default(),
+            is_mpolygon: false,
             elevation: 0.0,
             normal: Vector3::new(0.0, 0.0, 1.0),
             pattern: HatchPattern::solid(),
@@ -470,6 +479,9 @@ impl Hatch {
             seed_points: Vec::new(),
             pixel_size: 0.0,
             gradient_color: HatchGradientPattern::new(),
+            mpolygon_hatch_color: Color::ByLayer,
+            mpolygon_x_direction: Vector2::new(1.0, 0.0),
+            mpolygon_boundary_handle_count: 0,
         }
     }
 

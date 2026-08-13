@@ -87,6 +87,14 @@ pub struct SortEntitiesTable {
 
     /// Lookup map for fast entity handle searches.
     entry_map: HashMap<u64, usize>,
+
+    /// Original DXF group codes for exact-version round-trips.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_dxf_codes: Option<Vec<(i32, String)>>,
+
+    /// DXF version that produced `raw_dxf_codes`.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_dxf_version: Option<crate::types::DxfVersion>,
 }
 
 impl SortEntitiesTable {
@@ -107,6 +115,8 @@ impl SortEntitiesTable {
             block_owner_handle: Handle::NULL,
             entries: Vec::new(),
             entry_map: HashMap::new(),
+            raw_dxf_codes: None,
+            raw_dxf_version: None,
         }
     }
 
@@ -548,4 +558,3 @@ mod tests {
         assert_eq!(SortEntitiesTable::DICTIONARY_KEY, "ACAD_SORTENTS");
     }
 }
-

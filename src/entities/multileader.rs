@@ -409,6 +409,16 @@ impl Default for StartEndPointPair {
     }
 }
 
+/// Break data attached to one leader-line segment.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LeaderLineBreakInfo {
+    /// Segment index this break data belongs to.
+    pub segment_index: i32,
+    /// Start/end pairs cut out of the segment.
+    pub break_points: Vec<StartEndPointPair>,
+}
+
 /// A single leader line with vertices.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -423,6 +433,10 @@ pub struct LeaderLine {
     pub break_points: Vec<StartEndPointPair>,
     /// Number of break info entries.
     pub break_info_count: i32,
+    /// Complete per-segment break data. The legacy `segment_index` and
+    /// `break_points` fields mirror the first entry for source compatibility.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub break_infos: Vec<LeaderLineBreakInfo>,
     /// Path type (straight, spline, invisible).
     pub path_type: MultiLeaderPathType,
     /// Line color override.
@@ -448,6 +462,7 @@ impl LeaderLine {
             points: Vec::new(),
             break_points: Vec::new(),
             break_info_count: 0,
+            break_infos: Vec::new(),
             path_type: MultiLeaderPathType::StraightLineSegments,
             line_color: Color::ByBlock,
             line_type_handle: None,
@@ -600,6 +615,16 @@ impl Default for BlockAttribute {
     }
 }
 
+/// Pre-R2007 per-leader arrowhead override.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MultiLeaderArrowheadOverride {
+    /// Leader index this override applies to.
+    pub index: i32,
+    pub is_default: bool,
+    pub arrowhead_handle: Option<Handle>,
+}
+
 // ============================================================================
 // MultiLeader Context Data
 // ============================================================================
@@ -610,6 +635,12 @@ impl Default for BlockAttribute {
 pub struct MultiLeaderAnnotContext {
     /// Leader roots (each can have multiple leader lines).
     pub leader_roots: Vec<LeaderRoot>,
+    /// Undocumented low five flags in the standalone object-context leader
+    /// root header. Root-count bits are derived from `leader_roots`.
+    pub standalone_flags: u8,
+    /// Whether standalone DWG context stores a zero root count followed by
+    /// the seven-bit compatibility header instead of a direct BL count.
+    pub standalone_uses_root_flags: bool,
 
     // Scale and positioning
     /// Overall scale factor.
@@ -660,6 +691,8 @@ pub struct MultiLeaderAnnotContext {
     pub text_height_automatic: bool,
     /// Word break enabled.
     pub word_break: bool,
+    /// Undocumented text-context bit following the word-break flag.
+    pub dwg_unknown_text_bit: bool,
     /// Text style handle.
     pub text_style_handle: Option<Handle>,
 
@@ -741,6 +774,8 @@ impl MultiLeaderAnnotContext {
 
         Self {
             leader_roots: Vec::new(),
+            standalone_flags: 0,
+            standalone_uses_root_flags: false,
             scale_factor: 1.0,
             content_base_point: Vector3::ZERO,
             has_text_contents: false,
@@ -764,6 +799,7 @@ impl MultiLeaderAnnotContext {
             text_bottom_attachment: TextAttachmentType::CenterOfText,
             text_height_automatic: false,
             word_break: true,
+            dwg_unknown_text_bit: false,
             text_style_handle: None,
             has_block_contents: false,
             block_content_handle: None,
@@ -860,6 +896,8 @@ impl Default for MultiLeaderAnnotContext {
 pub struct MultiLeader {
     /// Common entity data.
     pub common: EntityCommon,
+    /// Native DWG MLEADER version (expected value is 2 on R2010+).
+    pub dwg_version: i16,
 
     // Style reference
     /// Handle to MultiLeader style.
@@ -872,6 +910,8 @@ pub struct MultiLeader {
     pub context: MultiLeaderAnnotContext,
     /// Block attributes (for block content).
     pub block_attributes: Vec<BlockAttribute>,
+    /// Pre-R2007 arrowhead overrides.
+    pub arrowhead_overrides: Vec<MultiLeaderArrowheadOverride>,
 
     // Leader line settings
     /// Path type (straight, spline, invisible).
@@ -944,17 +984,6 @@ pub struct MultiLeader {
     pub enable_annotation_scale: bool,
     /// Extend leader to text.
     pub extend_leader_to_text: bool,
-    /// Raw DWG record bytes, preserved verbatim for lossless round-trip.
-    /// The MLEADER context is a large, intricate structure; until the native
-    /// encoder is byte-exact, the DWG reader captures the original record so
-    /// the writer can re-emit it verbatim (same encoding family only).
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub raw_dwg_data: Option<Vec<u8>>,
-    /// Handle-stream bit count captured alongside `raw_dwg_data`.
-    pub dwg_handle_bits: i64,
-    /// DWG version `raw_dwg_data` was read from (drop on incompatible save).
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub dwg_source_version: Option<crate::types::DxfVersion>,
 }
 
 impl MultiLeader {
@@ -962,10 +991,12 @@ impl MultiLeader {
     pub fn new() -> Self {
         Self {
             common: EntityCommon::default(),
+            dwg_version: 2,
             style_handle: None,
             content_type: LeaderContentType::MText,
             context: MultiLeaderAnnotContext::new(),
             block_attributes: Vec::new(),
+            arrowhead_overrides: Vec::new(),
             path_type: MultiLeaderPathType::StraightLineSegments,
             line_color: Color::ByBlock,
             line_type_handle: None,
@@ -1002,9 +1033,6 @@ impl MultiLeader {
             // or a reader that missed the flag would over-scale every instance.
             enable_annotation_scale: false,
             extend_leader_to_text: false,
-            raw_dwg_data: None,
-            dwg_handle_bits: 0,
-            dwg_source_version: None,
         }
     }
 
@@ -1523,4 +1551,3 @@ mod tests {
         assert_eq!(ctx.leader_roots.len(), 0);
     }
 }
-

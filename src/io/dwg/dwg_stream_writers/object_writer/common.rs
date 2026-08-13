@@ -43,6 +43,7 @@ pub const OBJ_POLYLINE_PFACE: i16 = 29;
 pub const OBJ_POLYLINE_MESH: i16 = 30;
 pub const OBJ_SOLID: i16 = 31;
 pub const OBJ_TRACE: i16 = 32;
+pub const OBJ_TABLECONTENT: i16 = 105;
 pub const OBJ_SHAPE: i16 = 33;
 pub const OBJ_VIEWPORT: i16 = 34;
 pub const OBJ_ELLIPSE: i16 = 35;
@@ -81,6 +82,8 @@ pub const OBJ_VPENT_HDR: i16 = 71;
 pub const OBJ_GROUP: i16 = 72;
 pub const OBJ_MLINESTYLE: i16 = 73;
 pub const OBJ_OLE2FRAME: i16 = 74;
+pub const OBJ_DUMMY: i16 = 75;
+pub const OBJ_LONG_TRANSACTION: i16 = 76;
 
 // Standard table-type fixed codes (77+)
 pub const OBJ_LWPOLYLINE: i16 = 77;    // standard fixed type in R14+
@@ -92,11 +95,27 @@ pub const OBJ_HATCH: i16 = 78;         // standard fixed type
 pub const OBJ_IMAGE: i16 = -1;         // UNLISTED: always use class number
 pub const OBJ_MESH: i16 = -2;          // UNLISTED: always use class number
 pub const OBJ_MULTILEADER: i16 = -3;   // UNLISTED: always use class number
+pub const OBJ_SURFACE: i16 = -5;       // UNLISTED: ACAD_SURFACE family
 pub const OBJ_PDFUNDERLAY: i16 = -12;  // UNLISTED: always use class number
 pub const OBJ_DWFUNDERLAY: i16 = -13;  // UNLISTED: always use class number
 pub const OBJ_DGNUNDERLAY: i16 = -14;  // UNLISTED: always use class number
 pub const OBJ_HELIX: i16 = -15;        // UNLISTED: always use class number
 pub const OBJ_TABLE: i16 = -16;        // UNLISTED: always use class number
+pub const OBJ_LIGHT: i16 = -17;        // UNLISTED: always use class number
+pub const OBJ_ARC_DIMENSION: i16 = -18;
+pub const OBJ_LARGE_RADIAL_DIMENSION: i16 = -19;
+pub const OBJ_CAMERA: i16 = -20;
+pub const OBJ_SECTIONOBJECT: i16 = -21;
+pub const OBJ_ARCALIGNEDTEXT: i16 = -22;
+pub const OBJ_RTEXT: i16 = -23;
+pub const OBJ_GEOPOSITIONMARKER: i16 = -24;
+pub const OBJ_NAVISWORKSMODEL: i16 = -25;
+pub const OBJ_POINTCLOUD: i16 = -26;
+pub const OBJ_POINTCLOUDEX: i16 = -27;
+pub const OBJ_MPOLYGON: i16 = -28;
+pub const OBJ_PROXY_ENTITY: i16 = 498;
+pub const OBJ_PROXY_OBJECT: i16 = 499;
+pub const OBJ_BLOCKVISIBILITYPARAMETER: i16 = 0x84;
 
 // Fixed-type non-graphical objects (standard type codes from ODA spec)
 pub const OBJ_XRECORD: i16 = 79;        // 0x4F
@@ -118,6 +137,7 @@ pub const OBJ_SORTENTSTABLE: i16 = 0x7F;    // 127
 pub const OBJ_RASTERVARIABLES: i16 = 0x80;  // 128
 pub const OBJ_DBCOLOR: i16 = 0x81;          // 129
 pub const OBJ_WIPEOUTVARIABLES: i16 = 0x82; // 130
+pub const OBJ_GEODATA: i16 = 0x83;          // 131 (class-based; sentinel fallback)
 pub const OBJ_SPATIALFILTER: i16 = 0x86;    // 134 (class-based; sentinel fallback)
 pub const OBJ_PDFDEFINITION: i16 = 0x87;    // 135 (class-based; sentinel fallback)
 pub const OBJ_DWFDEFINITION: i16 = 0x88;    // 136 (class-based; sentinel fallback)
@@ -297,6 +317,7 @@ impl<'a> DwgObjectWriter<'a> {
         invisible: bool,
         linetype_scale: f64,
         linetype: &str,
+        linetype_handle: &Option<Handle>,
         xdata: &crate::xdata::ExtendedData,
         reactors: &[Handle],
         xdictionary_handle: &Option<Handle>,
@@ -308,6 +329,10 @@ impl<'a> DwgObjectWriter<'a> {
         shadow_flags: u8,
         plotstyle_flags: u8,
         plotstyle_handle: &Option<Handle>,
+        color_book_handle: &Option<Handle>,
+        full_visual_style_handle: &Option<Handle>,
+        face_visual_style_handle: &Option<Handle>,
+        edge_visual_style_handle: &Option<Handle>,
     ) {
         // ── MAIN + HANDLE: shared preamble (type + handle + xdata) ──
         self.write_common_data(type_code, handle, xdata);
@@ -418,9 +443,26 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer
                 .write_handle(DwgReferenceType::HardPointer, layer_h.value());
 
-            // Isbylayerlt flag (MAIN)
-            self.writer.write_bit(true); // simplified: always by-layer
-            // If not by-layer, would write linetype handle here
+            let lt_lower = linetype.to_ascii_lowercase();
+            let resolved_linetype = self
+                .document
+                .line_types
+                .get(linetype)
+                .map(|lt| lt.handle)
+                .or(*linetype_handle)
+                .filter(|handle| !handle.is_null());
+            let has_preserved_handle = linetype_handle
+                .filter(|handle| !handle.is_null())
+                .is_some();
+            let is_bylayer =
+                (lt_lower == "bylayer" || lt_lower.is_empty()) && !has_preserved_handle;
+            self.writer.write_bit(is_bylayer);
+            if !is_bylayer {
+                self.writer.write_handle(
+                    DwgReferenceType::HardPointer,
+                    resolved_linetype.unwrap_or(Handle::NULL).value(),
+                );
+            }
         }
 
         // ── R13-R2000 (pre-R2004): Nolinks + prev/next entity chain ──
@@ -450,7 +492,19 @@ impl<'a> DwgObjectWriter<'a> {
 
         // ── MAIN: Color (EnColor) ──
         if self.version.r2000_plus() {
-            self.writer.write_en_color(color, transparency);
+            let color_book_handle = if self.version.r2004_plus() {
+                color_book_handle
+                    .filter(|handle| !handle.is_null() && self.is_writable_object(handle))
+            } else {
+                None
+            };
+            self.writer
+                .write_en_color_with_book(color, transparency, color_book_handle.is_some());
+            if let Some(handle) = color_book_handle {
+                self.writer
+                    .write_handle(DwgReferenceType::HardPointer, handle.value());
+                self.object_queue.push_back(handle);
+            }
         } else {
             // R13-R14: colour as CMC
             self.writer.write_cm_color(color);
@@ -479,7 +533,27 @@ impl<'a> DwgObjectWriter<'a> {
         // ── MAIN: Linetype flags ──
         // 00 = bylayer, 01 = byblock, 10 = continuous, 11 = handle present
         let lt_lower = linetype.to_ascii_lowercase();
-        if lt_lower == "bylayer" || lt_lower.is_empty() {
+        let resolved_linetype = self
+            .document
+            .line_types
+            .get(linetype)
+            .map(|lt| lt.handle)
+            .or(*linetype_handle)
+            .filter(|handle| !handle.is_null());
+        let has_preserved_handle = linetype_handle
+            .filter(|handle| !handle.is_null())
+            .is_some();
+        let is_builtin = lt_lower == "bylayer"
+            || lt_lower.is_empty()
+            || lt_lower == "byblock"
+            || lt_lower == "continuous";
+        if resolved_linetype.is_some() && (has_preserved_handle || !is_builtin) {
+            self.writer.write_2bits(0b11);
+            self.writer.write_handle(
+                DwgReferenceType::HardPointer,
+                resolved_linetype.unwrap().value(),
+            );
+        } else if lt_lower == "bylayer" || lt_lower.is_empty() {
             self.writer.write_2bits(0b00);
         } else if lt_lower == "byblock" {
             self.writer.write_2bits(0b01);
@@ -488,18 +562,20 @@ impl<'a> DwgObjectWriter<'a> {
         } else {
             // Named linetype — write handle
             self.writer.write_2bits(0b11);
-            let lt_handle = self
-                .document
-                .line_types
-                .get(linetype)
-                .map(|lt| lt.handle)
-                .unwrap_or(Handle::NULL);
+            let lt_handle = resolved_linetype.unwrap_or(Handle::NULL);
             self.writer
                 .write_handle(DwgReferenceType::HardPointer, lt_handle.value());
         }
 
         // ── R2007+: material flags + shadow flags ──
         if self.version.r2007_plus() {
+            let material_handle = material_handle
+                .filter(|handle| self.is_writable_object(handle));
+            let material_flags = if material_flags == 0b11 && material_handle.is_none() {
+                0b00
+            } else {
+                material_flags
+            };
             // Material flags BB
             self.writer.write_2bits(material_flags);
             if material_flags == 0b11 {
@@ -523,11 +599,22 @@ impl<'a> DwgObjectWriter<'a> {
             }
         }
 
-        // ── R2007+ (>AC1021): visual style bits ──
+        // ── R2010+: visual-style override handles ──
         if self.version.r2010_plus() {
-            self.writer.write_bit(false); // has full visual style
-            self.writer.write_bit(false); // has face visual style
-            self.writer.write_bit(false); // has edge visual style
+            let full = full_visual_style_handle
+                .filter(|handle| !handle.is_null() && self.is_writable_object(handle));
+            let face = face_visual_style_handle
+                .filter(|handle| !handle.is_null() && self.is_writable_object(handle));
+            let edge = edge_visual_style_handle
+                .filter(|handle| !handle.is_null() && self.is_writable_object(handle));
+            for handle in [full, face, edge] {
+                self.writer.write_bit(handle.is_some());
+                if let Some(handle) = handle {
+                    self.writer
+                        .write_handle(DwgReferenceType::HardPointer, handle.value());
+                    self.object_queue.push_back(handle);
+                }
+            }
         }
 
         // ── MAIN: Invisibility ──
@@ -585,6 +672,46 @@ impl<'a> DwgObjectWriter<'a> {
         xdictionary_handle: &Option<Handle>,
         extra_eed: Option<(u64, Vec<u8>)>,
     ) {
+        self.write_common_non_entity_data_eed_internal(
+            type_code,
+            handle,
+            owner_handle,
+            reactors,
+            xdictionary_handle,
+            extra_eed,
+            false,
+        );
+    }
+
+    pub(super) fn write_common_non_entity_data_relative_owner(
+        &mut self,
+        type_code: i16,
+        handle: Handle,
+        owner_handle: Handle,
+        reactors: &[Handle],
+        xdictionary_handle: &Option<Handle>,
+    ) {
+        self.write_common_non_entity_data_eed_internal(
+            type_code,
+            handle,
+            owner_handle,
+            reactors,
+            xdictionary_handle,
+            None,
+            true,
+        );
+    }
+
+    fn write_common_non_entity_data_eed_internal(
+        &mut self,
+        type_code: i16,
+        handle: Handle,
+        owner_handle: Handle,
+        reactors: &[Handle],
+        xdictionary_handle: &Option<Handle>,
+        extra_eed: Option<(u64, Vec<u8>)>,
+        relative_owner: bool,
+    ) {
         // ── writeCommonData portion ──
 
         // Object type
@@ -623,8 +750,13 @@ impl<'a> DwgObjectWriter<'a> {
             .get(&handle)
             .copied()
             .unwrap_or(owner_handle);
-        self.writer
-            .write_handle(DwgReferenceType::SoftPointer, effective_owner.value());
+        if relative_owner && !effective_owner.is_null() {
+            self.writer
+                .write_handle_relative(handle.value(), effective_owner.value());
+        } else {
+            self.writer
+                .write_handle(DwgReferenceType::SoftPointer, effective_owner.value());
+        }
 
         // ── writeReactorsAndDictionaryHandle portion ──
 
@@ -654,7 +786,8 @@ impl<'a> DwgObjectWriter<'a> {
         // Only use it if the xdictionary object actually exists in document.objects,
         // otherwise BricsCAD reports "Object was erased" for the dangling reference.
         let effective_xdic = if xdictionary_handle.is_none() {
-            self.document.xdic_by_handle.get(&handle).copied()
+            self.document
+                .extension_dictionary_handle(handle)
                 .filter(|xdic| self.document.objects.contains_key(xdic))
         } else {
             *xdictionary_handle
@@ -701,18 +834,27 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// 64-group "xref dependant" flag with explicit value.
     pub fn write_xref_dependant_bit_value(&mut self, xref_dep: bool) {
+        self.write_xref_table_flags(false, false, xref_dep);
+    }
+
+    pub fn write_xref_table_flags(
+        &mut self,
+        xref_reference: bool,
+        xref_resolved: bool,
+        xref_dependent: bool,
+    ) {
         if self.version.r2007_plus() {
             // R2007+: is_xref_resolved BS — only 0 (not xref-dependent) or
             // 256 (0x100, xref-resolved) are valid; the reader derives
             // is_xref_dep from `== 256`. Writing 0x10 makes AutoCAD reject the
             // record (eDwgObjectImproperlyRead) on xref-dependent table entries.
-            let combined: i16 = if xref_dep { 0x100 } else { 0 };
+            let combined: i16 = if xref_resolved || xref_dependent { 0x100 } else { 0 };
             self.writer.write_bit_short(combined);
         } else {
             // Pre-R2007: 64-flag B (Referenced), xrefindex+1 BS, Xdep B (XrefDependent)
-            self.writer.write_bit(false); // referenced flag
-            self.writer.write_bit_short(0); // xrefindex+1
-            self.writer.write_bit(xref_dep); // xref dependent flag
+            self.writer.write_bit(xref_reference);
+            self.writer.write_bit_short(if xref_resolved { 0x100 } else { 0 });
+            self.writer.write_bit(xref_dependent);
         }
     }
 
@@ -763,13 +905,24 @@ impl<'a> DwgObjectWriter<'a> {
             if raw_blocks.iter().any(|(a, _)| *a == app_handle) {
                 continue;
             }
-            let bytes = crate::io::dwg::eed_codec::encode_values(wide, &rec.values, |name| {
-                self.document
-                    .layers
-                    .get(name)
-                    .map(|l| l.handle.value())
-                    .unwrap_or(0)
-            });
+            let code_page =
+                crate::io::dxf::code_page::dwg_code_page_index(&self.document.header.code_page);
+            let encoding =
+                crate::io::dxf::code_page::encoding_from_code_page(&self.document.header.code_page)
+                    .unwrap_or(encoding_rs::WINDOWS_1252);
+            let bytes = crate::io::dwg::eed_codec::encode_values_with_encoding(
+                wide,
+                &rec.values,
+                encoding,
+                code_page,
+                |name| {
+                    self.document
+                        .layers
+                        .get(name)
+                        .map(|l| l.handle.value())
+                        .unwrap_or(0)
+                },
+            );
             // The block length is framed as a BS (i16); skip a pathologically
             // large record rather than overflow and desync the object stream.
             if bytes.len() > i16::MAX as usize {

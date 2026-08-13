@@ -61,16 +61,28 @@ impl DwgWriter {
 
     /// Write a DWG file to any `Write + Seek` output.
     pub fn write_to_writer<W: Write + Seek>(mut output: W, document: &CadDocument) -> Result<()> {
+        let perf = std::env::var_os("PERF").is_some();
+        let started = web_time::Instant::now();
         validate_version(document.version)?;
         let version = document.version;
 
-        if uses_ac21_format(version) {
+        let result = if uses_ac21_format(version) {
             write_ac21(&mut output, document, version)
         } else if uses_paged_format(version) {
             write_ac18(&mut output, document, version)
         } else {
             write_ac15(&mut output, document, version)
+        };
+        if perf {
+            eprintln!(
+                "[perf] dwg-write total={:.1}ms version={:?} entities={} objects={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                version,
+                document.entities().count(),
+                document.objects.len(),
+            );
         }
+        result
     }
 
     /// Write an AC21 DWG file **without LZ77 compression** (diagnostic).
@@ -115,6 +127,27 @@ fn validate_version(version: DxfVersion) -> Result<()> {
     }
 }
 
+fn acds_data<'a>(
+    document: &'a CadDocument,
+    version: DxfVersion,
+    sab_entries: &[(Handle, Vec<u8>)],
+) -> std::borrow::Cow<'a, [u8]> {
+    let fingerprint = super::sab_fingerprint(
+        sab_entries
+            .iter()
+            .map(|(handle, bytes)| (*handle, bytes.as_slice())),
+    );
+    if document.dwg_source_version == Some(version)
+        && !fingerprint.is_empty()
+        && fingerprint == document.raw_acds_fingerprint
+    {
+        if let Some(raw) = document.raw_acds_data.as_deref() {
+            return std::borrow::Cow::Borrowed(raw.as_slice());
+        }
+    }
+    std::borrow::Cow::Owned(build_acds_prototype(sab_entries))
+}
+
 /// Whether the version uses the AC21 (R2007) file format.
 ///
 /// AC1021 uses RS-encoded pages, LZ77 AC21 compression, and CRC-64
@@ -146,6 +179,9 @@ fn prepare_header(
     extents: &Option<crate::types::BoundingBox3D>,
 ) -> HeaderVariables {
     let mut h = document.header.clone();
+    let emitted = |handle: Handle| {
+        !handle.is_null() && handle_map.iter().any(|(value, _)| *value == handle.value())
+    };
 
     // ── Sync table control handles from actual table objects ──
     // The tables always have valid handles from initialize_defaults(),
@@ -291,11 +327,10 @@ fn prepare_header(
         }
     }
 
-    // R2007+: current_material_handle — validate against objects
+    // R2007+: current_material_handle — validate against emitted objects.
+    // Unsupported raw materials may be dropped during a version conversion.
     {
-        let mat_valid = !h.current_material_handle.is_null()
-            && document.objects.contains_key(&h.current_material_handle);
-        if !mat_valid {
+        if !emitted(h.current_material_handle) {
             h.current_material_handle = Handle::NULL;
         }
     }
@@ -400,22 +435,48 @@ fn write_ac15<W: Write + Seek>(
     version: DxfVersion,
 ) -> Result<()> {
     let mut fhw = DwgFileHeaderWriterAC15::new(version);
+    fhw.set_maintenance_version(document.maintenance_version);
+    fhw.set_code_page(
+        crate::io::dxf::code_page::dwg_code_page_index(&document.header.code_page),
+    );
 
     // ── Phase 1: Compute objects FIRST to get handle map ──
+    let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
     let (obj_data, handle_map_u32, extents, _sab_entries) = obj_writer.write();
+    if std::env::var_os("PERF").is_some() {
+        eprintln!(
+            "[perf] dwg-write objects={:.1}ms bytes={} handles={} format=ac15",
+            objects_started.elapsed().as_secs_f64() * 1000.0,
+            obj_data.len(),
+            handle_map_u32.len(),
+        );
+    }
 
     // ── Phase 2: Prepare header (sync handles + correct HANDSEED) ──
     let corrected_header = prepare_header(document, &handle_map_u32, &extents);
 
     // ── Section: Header (uses synced + corrected header) ──
     let maint = document.maintenance_version;
-    let header_data = header_writer::write_header(version, &corrected_header, maint);
+    let header_encoding =
+        crate::io::dxf::code_page::encoding_from_code_page(&document.header.code_page)
+            .unwrap_or(encoding_rs::WINDOWS_1252);
+    let header_data = header_writer::write_header_with_encoding(
+        version,
+        &corrected_header,
+        maint,
+        header_encoding,
+    );
     fhw.add_section(section_names::HEADER, header_data);
 
     // ── Section: Classes ──
     let classes: Vec<_> = document.classes.iter().cloned().collect();
-    let classes_data = classes_writer::write_classes(version, &classes, maint);
+    let classes_data = classes_writer::write_classes_with_encoding(
+        version,
+        &classes,
+        maint,
+        header_encoding,
+    );
     fhw.add_section(section_names::CLASSES, classes_data);
 
     // ── Section: AcDbObjects (pre-computed) ──
@@ -476,6 +537,9 @@ fn write_ac18<W: Write + Seek>(
 
     // AC18 writer reserves 0x100 bytes at file start for metadata
     let mut fhw = DwgFileHeaderWriterAC18::new(version, maint, output)?;
+    fhw.set_code_page(
+        crate::io::dxf::code_page::dwg_code_page_index(&document.header.code_page),
+    );
 
     // R2004+ default page size for most sections
     const PAGE_SIZE: usize = 0x7400;
@@ -483,19 +547,41 @@ fn write_ac18<W: Write + Seek>(
     const SMALL_PAGE: usize = 0x80;
 
     // ── Phase 1: Compute objects FIRST to get handle map ──
+    let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
     let (obj_data, handle_map_u32, extents, sab_entries) = obj_writer.write();
+    if std::env::var_os("PERF").is_some() {
+        eprintln!(
+            "[perf] dwg-write objects={:.1}ms bytes={} handles={} format=ac18",
+            objects_started.elapsed().as_secs_f64() * 1000.0,
+            obj_data.len(),
+            handle_map_u32.len(),
+        );
+    }
 
     // ── Phase 2: Prepare header (sync handles + correct HANDSEED) ──
     let corrected_header = prepare_header(document, &handle_map_u32, &extents);
 
     // ── Section: Header (uses synced + corrected header) ──
-    let header_data = header_writer::write_header(version, &corrected_header, maint);
+    let header_encoding =
+        crate::io::dxf::code_page::encoding_from_code_page(&document.header.code_page)
+            .unwrap_or(encoding_rs::WINDOWS_1252);
+    let header_data = header_writer::write_header_with_encoding(
+        version,
+        &corrected_header,
+        maint,
+        header_encoding,
+    );
     fhw.add_section(output, section_names::HEADER, &header_data, true, PAGE_SIZE)?;
 
     // ── Section: Classes ──
     let classes: Vec<_> = document.classes.iter().cloned().collect();
-    let classes_data = classes_writer::write_classes(version, &classes, maint);
+    let classes_data = classes_writer::write_classes_with_encoding(
+        version,
+        &classes,
+        maint,
+        header_encoding,
+    );
     fhw.add_section(output, section_names::CLASSES, &classes_data, true, PAGE_SIZE)?;
 
     // ── Section: SummaryInfo ──
@@ -546,7 +632,7 @@ fn write_ac18<W: Write + Seek>(
 
     // ── Section: AcDsPrototype_1b (AC1027+ ACIS SAB storage) ──
     if !sab_entries.is_empty() {
-        let acds_data = build_acds_prototype(&sab_entries);
+        let acds_data = acds_data(document, version, &sab_entries);
         fhw.add_section(output, section_names::ACDS_PROTOTYPE, &acds_data, true, PAGE_SIZE)?;
     }
 
@@ -596,8 +682,17 @@ fn write_ac21_impl<W: Write + Seek>(
     fhw.skip_lz77 = skip_lz77;
 
     // ── Phase 1: Compute objects FIRST to get handle map ──
+    let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
     let (obj_data, handle_map_u32, extents, sab_entries) = obj_writer.write();
+    if std::env::var_os("PERF").is_some() {
+        eprintln!(
+            "[perf] dwg-write objects={:.1}ms bytes={} handles={} format=ac21",
+            objects_started.elapsed().as_secs_f64() * 1000.0,
+            obj_data.len(),
+            handle_map_u32.len(),
+        );
+    }
 
     // ── Phase 2: Prepare header (sync handles + correct HANDSEED) ──
     let corrected_header = prepare_header(document, &handle_map_u32, &extents);
@@ -639,7 +734,7 @@ fn write_ac21_impl<W: Write + Seek>(
 
     // AcDsPrototype_1b (AC1027+ ACIS SAB storage)
     if !sab_entries.is_empty() {
-        let acds_data = build_acds_prototype(&sab_entries);
+        let acds_data = acds_data(document, version, &sab_entries);
         fhw.add_section(output, section_names::ACDS_PROTOTYPE, &acds_data)?;
     }
 
@@ -663,7 +758,15 @@ fn write_ac21_impl<W: Write + Seek>(
     // Classes
     let classes: Vec<_> = document.classes.iter().cloned().collect();
     let maint = document.maintenance_version;
-    let classes_data = classes_writer::write_classes(version, &classes, maint);
+    let header_encoding =
+        crate::io::dxf::code_page::encoding_from_code_page(&document.header.code_page)
+            .unwrap_or(encoding_rs::WINDOWS_1252);
+    let classes_data = classes_writer::write_classes_with_encoding(
+        version,
+        &classes,
+        maint,
+        header_encoding,
+    );
     fhw.add_section(output, section_names::CLASSES, &classes_data)?;
 
     // AuxHeader (uses corrected HANDSEED)
@@ -671,7 +774,12 @@ fn write_ac21_impl<W: Write + Seek>(
     fhw.add_section(output, section_names::AUX_HEADER, &aux_data)?;
 
     // Header (uses corrected HANDSEED)
-    let header_data = header_writer::write_header(version, &corrected_header, maint);
+    let header_data = header_writer::write_header_with_encoding(
+        version,
+        &corrected_header,
+        maint,
+        header_encoding,
+    );
     fhw.add_section(output, section_names::HEADER, &header_data)?;
 
     // ── Finalize: section map, page map, file header, metadata ──

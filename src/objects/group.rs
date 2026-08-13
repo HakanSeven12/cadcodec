@@ -29,6 +29,10 @@ pub struct Group {
     pub owner: Handle,
     /// Group name
     pub name: String,
+    /// DWG/DXF unnamed flag. This is stored independently from the dictionary
+    /// key and must not be inferred after reading a binary drawing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub unnamed: bool,
     /// Group description (DXF code 300)
     pub description: String,
     /// Entity handles in the group (DXF code 340, hard-pointer)
@@ -47,6 +51,7 @@ impl Group {
             handle: Handle::NULL,
             owner: Handle::NULL,
             name: name.into(),
+            unnamed: false,
             description: String::new(),
             entities: Vec::new(),
             selectable: true,
@@ -55,7 +60,9 @@ impl Group {
 
     /// Create an unnamed group (name starts with "*")
     pub fn unnamed() -> Self {
-        Self::new("*A")
+        let mut group = Self::new("*A");
+        group.unnamed = true;
+        group
     }
 
     /// Create a group with description
@@ -68,7 +75,7 @@ impl Group {
     /// Check if this is an unnamed group
     /// Unnamed groups have empty names or names starting with "*"
     pub fn is_unnamed(&self) -> bool {
-        self.name.is_empty() || self.name.starts_with('*')
+        self.unnamed
     }
 
     /// Add an entity to the group
@@ -280,4 +287,3 @@ mod tests {
         assert_eq!(handles, vec![Handle::new(100), Handle::new(101)]);
     }
 }
-

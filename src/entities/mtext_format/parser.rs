@@ -925,8 +925,18 @@ impl MTextParser {
                     i += 1;
                 }
             } else if ch == 's' && i + 1 < chars.len() {
-                // Line spacing: se<n> (exact) or sm<n> (multiple)
+                // Line spacing: s* (entity default), se<n> (exact), or
+                // sm<n> (multiple).
                 let sub = chars[i + 1];
+                if sub == '*' {
+                    self.current_paragraph.properties.line_spacing =
+                        Some(MTextLineSpacing::Default);
+                    i += 2;
+                    if i < chars.len() && chars[i] == ',' {
+                        i += 1;
+                    }
+                    continue;
+                }
                 if sub == 'e' || sub == 'm' {
                     let start = i + 2;
                     let mut k = start;

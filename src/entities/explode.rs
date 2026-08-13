@@ -28,6 +28,7 @@ fn inherit_common(source: &EntityCommon) -> EntityCommon {
         linetype: source.linetype.clone(),
         linetype_scale: source.linetype_scale,
         transparency: source.transparency,
+        color_name: source.color_name.clone(),
         invisible: source.invisible,
         owner_handle: source.owner_handle,
         ..EntityCommon::new()
@@ -439,7 +440,7 @@ fn explode_multileader(ml: &MultiLeader) -> Vec<EntityType> {
             rectangle_width: ml.context.text_width,
             rectangle_height: None,
             rotation: ml.context.text_rotation,
-            style: "STANDARD".to_string(),
+            style: "Standard".to_string(),
             attachment_point: AttachmentPoint::TopLeft,
             drawing_direction: DrawingDirection::LeftToRight,
             line_spacing_factor: ml.context.line_spacing_factor,
@@ -529,6 +530,17 @@ fn explode_dimension(dim: &Dimension) -> Vec<EntityType> {
         }
         Dimension::Ordinate(d) => {
             result.push(line_entity(d.feature_location, d.leader_endpoint, 0.0, base.normal, common));
+        }
+        Dimension::Arc(d) => {
+            result.push(line_entity(d.center_point, d.first_extension_point, 0.0, base.normal, common));
+            result.push(line_entity(d.center_point, d.second_extension_point, 0.0, base.normal, common));
+            if d.has_leader {
+                result.push(line_entity(d.first_leader_point, d.second_leader_point, 0.0, base.normal, common));
+            }
+        }
+        Dimension::LargeRadial(d) => {
+            result.push(line_entity(d.definition_point, d.jog_point, 0.0, base.normal, common));
+            result.push(line_entity(d.jog_point, d.chord_point, 0.0, base.normal, common));
         }
     }
 
@@ -830,6 +842,7 @@ impl EntityType {
             | EntityType::Light(_)
             | EntityType::SectionSymbol(_)
             | EntityType::ViewBorder(_)
+            | EntityType::Extended(_)
             | EntityType::Unknown(_) => Vec::new(),
         }
     }
@@ -1113,4 +1126,3 @@ mod tests {
         assert_eq!(parts[0].common().owner_handle, Handle::new(0x100));
     }
 }
-

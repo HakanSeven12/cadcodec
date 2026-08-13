@@ -71,6 +71,11 @@ pub struct Spline {
     /// Knot parameterization method (R2013+ DWG): 0=Chord, 1=SquareRoot,
     /// 2=Uniform, 15=Custom. Zero for splines saved before R2013.
     pub knot_parameterization: i32,
+    /// Show the control-vertex frame (R2013+ DWG flag).
+    pub cv_frame_visible: bool,
+    /// Complete R2013+ spline flag word, including flags not otherwise
+    /// represented by this API.
+    pub dwg_flags1: i32,
 }
 
 impl Spline {
@@ -91,6 +96,8 @@ impl Spline {
             begin_tangent: Vector3::ZERO,
             end_tangent: Vector3::ZERO,
             knot_parameterization: 0,
+            cv_frame_visible: false,
+            dwg_flags1: 0,
         }
     }
 
@@ -237,5 +244,4 @@ impl Entity for Spline {
         super::transform::transform_spline(self, transform);
     }
 }
-
 

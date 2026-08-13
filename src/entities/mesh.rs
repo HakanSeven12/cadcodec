@@ -231,6 +231,8 @@ pub struct Mesh {
     pub faces: Vec<MeshFace>,
     /// Mesh edges with crease information.
     pub edges: Vec<MeshEdge>,
+    /// Trailing mesh override option stored by DWG.
+    pub override_option: i32,
 }
 
 impl Mesh {
@@ -244,6 +246,7 @@ impl Mesh {
             vertices: Vec::new(),
             faces: Vec::new(),
             edges: Vec::new(),
+            override_option: 0,
         }
     }
 
@@ -1051,4 +1054,3 @@ mod tests {
         assert!(!mesh.blend_crease);
     }
 }
-

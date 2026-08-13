@@ -238,6 +238,26 @@ pub(crate) fn transform_lwpolyline(e: &mut LwPolyline, transform: &Transform) {
 
 // ── Text ─────────────────────────────────────────────────────────────────────
 
+/// Carry a stored orientation angle through a transform.
+///
+/// TEXT, MTEXT, SHAPE and the ATTRIB pair keep which way they face as a single
+/// angle rather than as geometry, so transforming their points alone leaves the
+/// glyphs pointing the old way — ROTATE put the text in the right place and
+/// still drew it horizontal. Turn the angle into the direction it stands for,
+/// send that through the transform, and read the angle back. `atan2` ignores
+/// any scale the transform also carries, and a reflection lands on the mirrored
+/// angle, which is what the mirror paths used to work out separately.
+///
+/// A transform that flattens the direction away leaves the angle alone rather
+/// than snapping it to zero through `atan2(0, 0)`.
+pub(crate) fn rotate_stored_angle(rotation: &mut f64, transform: &Transform) {
+    let direction = Vector3::new(rotation.cos(), rotation.sin(), 0.0);
+    let rotated = transform.apply_rotation(direction);
+    if rotated.x != 0.0 || rotated.y != 0.0 {
+        *rotation = rotated.y.atan2(rotated.x);
+    }
+}
+
 pub(crate) fn transform_text(e: &mut Text, transform: &Transform) {
     // Insertion / alignment points are stored in OCS.
     let new_normal = transform.apply_rotation(e.normal).normalize();
@@ -251,6 +271,7 @@ pub(crate) fn transform_text(e: &mut Text, transform: &Transform) {
     let scale_factor = transformed_unit.length();
     e.height *= scale_factor;
     e.normal = new_normal;
+    rotate_stored_angle(&mut e.rotation, transform);
 }
 
 // ── MText ────────────────────────────────────────────────────────────────────
@@ -266,6 +287,7 @@ pub(crate) fn transform_mtext(e: &mut MText, transform: &Transform) {
         *h *= scale_factor;
     }
     e.normal = transform.apply_rotation(e.normal).normalize();
+    rotate_stored_angle(&mut e.rotation, transform);
 }
 
 // ── Spline ───────────────────────────────────────────────────────────────────
@@ -742,6 +764,7 @@ pub(crate) fn transform_attribute_definition(
     let transformed_unit = transform.apply_rotation(unit_x);
     let scale_factor = transformed_unit.length();
     e.height *= scale_factor;
+    rotate_stored_angle(&mut e.rotation, transform);
 }
 
 // ── AttributeEntity ──────────────────────────────────────────────────────────
@@ -758,6 +781,7 @@ pub(crate) fn transform_attribute_entity(e: &mut AttributeEntity, transform: &Tr
     let transformed_unit = transform.apply_rotation(unit_x);
     let scale_factor = transformed_unit.length();
     e.height *= scale_factor;
+    rotate_stored_angle(&mut e.rotation, transform);
 }
 
 // ── Leader ───────────────────────────────────────────────────────────────────
@@ -856,7 +880,6 @@ pub(crate) fn transform_solid3d(e: &mut Solid3D, transform: &Transform) {
         for pt in &mut wire.points {
             *pt = transform.apply(*pt);
         }
-        wire.translation = transform.apply(wire.translation);
     }
     for silhouette in &mut e.silhouettes {
         silhouette.target = transform.apply(silhouette.target);
@@ -881,6 +904,17 @@ pub(crate) fn transform_region(e: &mut Region, transform: &Transform) {
             *pt = transform.apply(*pt);
         }
     }
+    for silhouette in &mut e.silhouettes {
+        silhouette.target = transform.apply(silhouette.target);
+        silhouette.view_direction =
+            transform.apply_rotation(silhouette.view_direction).normalize();
+        silhouette.up_vector = transform.apply_rotation(silhouette.up_vector).normalize();
+        for wire in &mut silhouette.wires {
+            for pt in &mut wire.points {
+                *pt = transform.apply(*pt);
+            }
+        }
+    }
 }
 
 // ── Body ─────────────────────────────────────────────────────────────────────
@@ -893,13 +927,36 @@ pub(crate) fn transform_body(e: &mut Body, transform: &Transform) {
             *pt = transform.apply(*pt);
         }
     }
+    for silhouette in &mut e.silhouettes {
+        silhouette.target = transform.apply(silhouette.target);
+        silhouette.view_direction =
+            transform.apply_rotation(silhouette.view_direction).normalize();
+        silhouette.up_vector = transform.apply_rotation(silhouette.up_vector).normalize();
+        for wire in &mut silhouette.wires {
+            for pt in &mut wire.points {
+                *pt = transform.apply(*pt);
+            }
+        }
+    }
 }
 
 pub(crate) fn transform_surface(e: &mut crate::entities::Surface, transform: &Transform) {
+    e.point_of_reference = transform.apply(e.point_of_reference);
     compose_acis_placement(&mut e.acis_data, transform);
     for wire in &mut e.wires {
         for pt in &mut wire.points {
             *pt = transform.apply(*pt);
+        }
+    }
+    for silhouette in &mut e.silhouettes {
+        silhouette.target = transform.apply(silhouette.target);
+        silhouette.view_direction =
+            transform.apply_rotation(silhouette.view_direction).normalize();
+        silhouette.up_vector = transform.apply_rotation(silhouette.up_vector).normalize();
+        for wire in &mut silhouette.wires {
+            for pt in &mut wire.points {
+                *pt = transform.apply(*pt);
+            }
         }
     }
 }
@@ -948,15 +1005,13 @@ pub(crate) fn transform_polyface_mesh(e: &mut PolyfaceMesh, transform: &Transfor
 // ── Wipeout ──────────────────────────────────────────────────────────────────
 
 pub(crate) fn transform_wipeout(e: &mut Wipeout, transform: &Transform) {
+    // `u_vector` / `v_vector` carry both the image direction AND its size, so
+    // the linear part of the transform (rotation + scale, via `apply_rotation`)
+    // already scales them. Multiplying again by the scale factor double-scaled
+    // the mask (a 2× insert grew the wipeout 4×).
     e.insertion_point = transform.apply(e.insertion_point);
     e.u_vector = transform.apply_rotation(e.u_vector);
     e.v_vector = transform.apply_rotation(e.v_vector);
-
-    let unit_x = Vector3::new(1.0, 0.0, 0.0);
-    let transformed_unit = transform.apply_rotation(unit_x);
-    let scale_factor = transformed_unit.length();
-    e.u_vector = e.u_vector * scale_factor;
-    e.v_vector = e.v_vector * scale_factor;
 }
 
 // ── Shape ────────────────────────────────────────────────────────────────────
@@ -971,6 +1026,7 @@ pub(crate) fn transform_shape(e: &mut Shape, transform: &Transform) {
     let scale_factor = transformed_unit.length();
     e.size *= scale_factor;
     e.normal = new_normal;
+    rotate_stored_angle(&mut e.rotation, transform);
 }
 
 // ── Underlay ─────────────────────────────────────────────────────────────────
@@ -1076,6 +1132,7 @@ impl EntityType {
             EntityType::Light(_) => {}
             // Anchored to their drawing view (see translate).
             EntityType::SectionSymbol(_) | EntityType::ViewBorder(_) => {}
+            EntityType::Extended(_) => {}
             EntityType::Unknown(e) => transform_unknown(e, transform),
         }
     }

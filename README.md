@@ -37,6 +37,7 @@ fn main() -> acadrust::Result<()> {
 - **41 Entity Types** — Lines, arcs, polylines, hatches, dimensions, 3D solids, viewports, and more
 - **Tables & Objects** — Layers, linetypes, styles, dictionaries, layouts, materials
 - **Serde Support** — Optional `Serialize`/`Deserialize` for all types (`features = ["serde"]`)
+- **IFCCAD foundation** — Experimental, opt-in conformance infrastructure (`features = ["ifccad"]`); IFCX/IFCDR/IFCPR production codecs are not yet available
 - **Failsafe Mode** — Error-tolerant parsing with structured diagnostics
 - **Encoding Support** — ~40 code pages for pre-2007 files
 

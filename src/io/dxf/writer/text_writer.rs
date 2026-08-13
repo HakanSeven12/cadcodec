@@ -99,37 +99,15 @@ impl<W: Write> DxfTextWriter<W> {
             }
         }
         if abs >= 1e15 && abs != 0.0 {
-            // Large magnitude: use heap-allocated formatting to avoid overflow
-            let s = format!("{:.6}", value);
-            let trimmed = s.trim_end_matches('0');
-            let trimmed = if trimmed.ends_with('.') {
-                &s[..trimmed.len() + 1] // keep one digit after '.'
-            } else {
-                trimmed
-            };
-            // Write directly to the underlying writer (bypass fmt_buf)
-            // Return 0 to signal the caller that we already wrote
-            // Actually, we need to return the len for the caller pattern.
-            // Copy into fmt_buf if it fits, otherwise write directly.
-            let bytes = trimmed.as_bytes();
-            let total = bytes.len() + 2; // +CRLF
-            if total <= self.fmt_buf.len() {
-                self.fmt_buf[..bytes.len()].copy_from_slice(bytes);
-                self.fmt_buf[bytes.len()] = b'\r';
-                self.fmt_buf[bytes.len() + 1] = b'\n';
-                return total;
-            }
-            // Extremely rare: value so large even 6 decimals exceeds buffer
-            // Truncate to integer representation
-            let s2 = format!("{:.0}", value);
-            let b2 = s2.as_bytes();
-            let t2 = b2.len().min(self.fmt_buf.len() - 4);
-            self.fmt_buf[..t2].copy_from_slice(&b2[..t2]);
-            self.fmt_buf[t2] = b'.';
-            self.fmt_buf[t2 + 1] = b'0';
-            self.fmt_buf[t2 + 2] = b'\r';
-            self.fmt_buf[t2 + 3] = b'\n';
-            return t2 + 4;
+            // Scientific notation stays compact for every finite f64. Sixteen
+            // fractional digits provide the 17 significant decimal digits
+            // needed to round-trip an arbitrary binary64 value.
+            let s = format!("{:.16e}", value);
+            let bytes = s.as_bytes();
+            self.fmt_buf[..bytes.len()].copy_from_slice(bytes);
+            self.fmt_buf[bytes.len()] = b'\r';
+            self.fmt_buf[bytes.len() + 1] = b'\n';
+            return bytes.len() + 2;
         }
         let mut cursor = Cursor::new(&mut self.fmt_buf[..]);
         // Rust's `{}` Display for f64 emits the shortest decimal string that
@@ -177,6 +155,18 @@ impl<W: Write> DxfStreamWriter for DxfTextWriter<W> {
         } else {
             self.write_value_crlf(value.as_bytes())?;
         }
+        Ok(())
+    }
+
+    fn write_xrecord_string(&mut self, code: i32, value: &str) -> Result<()> {
+        self.write_code(code)?;
+        let escaped = value
+            .replace('^', "^ ")
+            .replace("\r\n", "^M^J")
+            .replace('\r', "^M")
+            .replace('\n', "^J")
+            .replace('\t', "^I");
+        self.write_value_crlf(escaped.as_bytes())?;
         Ok(())
     }
 
@@ -372,4 +362,3 @@ mod tests {
         assert_eq!(output, " 40\r\n15.0\r\n");
     }
 }
-

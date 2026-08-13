@@ -163,6 +163,22 @@ pub(crate) fn translate_dimension(e: &mut Dimension, offset: Vector3) {
             d.feature_location = d.feature_location + offset;
             d.leader_endpoint = d.leader_endpoint + offset;
         }
+        Dimension::Arc(d) => {
+            d.definition_point = d.definition_point + offset;
+            d.base.text_middle_point = d.base.text_middle_point + offset;
+            d.first_extension_point = d.first_extension_point + offset;
+            d.second_extension_point = d.second_extension_point + offset;
+            d.center_point = d.center_point + offset;
+            d.first_leader_point = d.first_leader_point + offset;
+            d.second_leader_point = d.second_leader_point + offset;
+        }
+        Dimension::LargeRadial(d) => {
+            d.definition_point = d.definition_point + offset;
+            d.base.text_middle_point = d.base.text_middle_point + offset;
+            d.chord_point = d.chord_point + offset;
+            d.override_center = d.override_center + offset;
+            d.jog_point = d.jog_point + offset;
+        }
     }
 }
 
@@ -375,7 +391,6 @@ pub(crate) fn translate_solid3d(e: &mut Solid3D, offset: Vector3) {
         for pt in &mut wire.points {
             *pt = *pt + offset;
         }
-        wire.translation = wire.translation + offset;
     }
 
     for silhouette in &mut e.silhouettes {
@@ -398,6 +413,14 @@ pub(crate) fn translate_region(e: &mut Region, offset: Vector3) {
             *pt = *pt + offset;
         }
     }
+    for silhouette in &mut e.silhouettes {
+        silhouette.target = silhouette.target + offset;
+        for wire in &mut silhouette.wires {
+            for pt in &mut wire.points {
+                *pt = *pt + offset;
+            }
+        }
+    }
 }
 
 // ── Body ─────────────────────────────────────────────────────────────────────
@@ -410,13 +433,30 @@ pub(crate) fn translate_body(e: &mut Body, offset: Vector3) {
             *pt = *pt + offset;
         }
     }
+    for silhouette in &mut e.silhouettes {
+        silhouette.target = silhouette.target + offset;
+        for wire in &mut silhouette.wires {
+            for pt in &mut wire.points {
+                *pt = *pt + offset;
+            }
+        }
+    }
 }
 
 pub(crate) fn translate_surface(e: &mut crate::entities::Surface, offset: Vector3) {
+    e.point_of_reference = e.point_of_reference + offset;
     super::transform::compose_acis_placement(&mut e.acis_data, &Transform::from_translation(offset));
     for wire in &mut e.wires {
         for pt in &mut wire.points {
             *pt = *pt + offset;
+        }
+    }
+    for silhouette in &mut e.silhouettes {
+        silhouette.target = silhouette.target + offset;
+        for wire in &mut silhouette.wires {
+            for pt in &mut wire.points {
+                *pt = *pt + offset;
+            }
         }
     }
 }
@@ -554,6 +594,7 @@ impl EntityType {
             // view; the preserved raw record is re-emitted verbatim, so a
             // display-only move would silently revert on save.
             EntityType::SectionSymbol(_) | EntityType::ViewBorder(_) => {}
+            EntityType::Extended(e) => e.translate(offset),
             EntityType::Unknown(e) => translate_unknown(e, offset),
         }
     }

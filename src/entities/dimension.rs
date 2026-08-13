@@ -21,6 +21,10 @@ pub enum DimensionType {
     Angular3Point = 5,
     /// Ordinate dimension
     Ordinate = 6,
+    /// Arc-length dimension
+    ArcLength = 8,
+    /// Jogged / large-radius radial dimension
+    LargeRadial = 9,
 }
 
 /// Attachment point type for dimension text
@@ -76,6 +80,21 @@ pub struct DimensionBase {
     pub block_name: String,
     /// Line spacing factor
     pub line_spacing_factor: f64,
+    /// Line spacing style (1 = at least, 2 = exact).
+    pub line_spacing_style: i16,
+    /// Scale applied when inserting the anonymous dimension block.
+    pub insertion_scale: Vector3,
+    /// Rotation applied when inserting the anonymous dimension block.
+    pub insertion_rotation: f64,
+    /// Undocumented R2007+ dimension state bit preserved for round-trip.
+    pub dwg_unknown_bit: bool,
+    /// Flip the first dimension arrow.
+    pub flip_arrow1: bool,
+    /// Flip the second dimension arrow.
+    pub flip_arrow2: bool,
+    /// Complete DWG dimension flag byte. Bit zero mirrors
+    /// [`text_user_positioned`](Self::text_user_positioned).
+    pub dwg_flags_byte: u8,
     /// Dimension text was positioned at a user-defined location rather than at
     /// the style's default (DXF group 70, bit 0x80). When false the text
     /// follows the dimension style (DIMTAD etc.); when true `text_middle_point`
@@ -103,6 +122,13 @@ impl DimensionBase {
             version: 0,
             block_name: String::new(),
             line_spacing_factor: 1.0,
+            line_spacing_style: 1,
+            insertion_scale: Vector3::new(1.0, 1.0, 1.0),
+            insertion_rotation: 0.0,
+            dwg_unknown_bit: false,
+            flip_arrow1: false,
+            flip_arrow2: false,
+            dwg_flags_byte: 0,
             text_user_positioned: false,
         }
     }
@@ -587,6 +613,82 @@ impl Default for DimensionOrdinate {
     }
 }
 
+/// Arc-length dimension entity.
+///
+/// Measures all or part of a circular arc and optionally carries a leader.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DimensionArc {
+    pub base: DimensionBase,
+    pub definition_point: Vector3,
+    pub first_extension_point: Vector3,
+    pub second_extension_point: Vector3,
+    pub center_point: Vector3,
+    pub is_partial: bool,
+    pub arc_start_parameter: f64,
+    pub arc_end_parameter: f64,
+    pub has_leader: bool,
+    pub first_leader_point: Vector3,
+    pub second_leader_point: Vector3,
+}
+
+impl DimensionArc {
+    pub fn measurement(&self) -> f64 {
+        let radius = self.center_point.distance(&self.first_extension_point);
+        radius * (self.arc_end_parameter - self.arc_start_parameter).abs()
+    }
+}
+
+impl Default for DimensionArc {
+    fn default() -> Self {
+        Self {
+            base: DimensionBase::new(DimensionType::ArcLength),
+            definition_point: Vector3::ZERO,
+            first_extension_point: Vector3::ZERO,
+            second_extension_point: Vector3::ZERO,
+            center_point: Vector3::ZERO,
+            is_partial: false,
+            arc_start_parameter: 0.0,
+            arc_end_parameter: 0.0,
+            has_leader: false,
+            first_leader_point: Vector3::ZERO,
+            second_leader_point: Vector3::ZERO,
+        }
+    }
+}
+
+/// Jogged radial dimension used when the true circle center lies outside the
+/// useful drawing area.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DimensionLargeRadial {
+    pub base: DimensionBase,
+    pub definition_point: Vector3,
+    pub chord_point: Vector3,
+    pub jog_angle: f64,
+    pub override_center: Vector3,
+    pub jog_point: Vector3,
+}
+
+impl DimensionLargeRadial {
+    pub fn measurement(&self) -> f64 {
+        self.definition_point.distance(&self.chord_point)
+    }
+}
+
+impl Default for DimensionLargeRadial {
+    fn default() -> Self {
+        Self {
+            base: DimensionBase::new(DimensionType::LargeRadial),
+            definition_point: Vector3::ZERO,
+            chord_point: Vector3::ZERO,
+            jog_angle: 0.0,
+            override_center: Vector3::ZERO,
+            jog_point: Vector3::ZERO,
+        }
+    }
+}
+
 /// Unified dimension enum for all dimension types
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -598,6 +700,8 @@ pub enum Dimension {
     Angular2Ln(DimensionAngular2Ln),
     Angular3Pt(DimensionAngular3Pt),
     Ordinate(DimensionOrdinate),
+    Arc(DimensionArc),
+    LargeRadial(DimensionLargeRadial),
 }
 
 impl Dimension {
@@ -611,6 +715,8 @@ impl Dimension {
             Dimension::Angular2Ln(d) => &d.base,
             Dimension::Angular3Pt(d) => &d.base,
             Dimension::Ordinate(d) => &d.base,
+            Dimension::Arc(d) => &d.base,
+            Dimension::LargeRadial(d) => &d.base,
         }
     }
 
@@ -624,6 +730,8 @@ impl Dimension {
             Dimension::Angular2Ln(d) => &mut d.base,
             Dimension::Angular3Pt(d) => &mut d.base,
             Dimension::Ordinate(d) => &mut d.base,
+            Dimension::Arc(d) => &mut d.base,
+            Dimension::LargeRadial(d) => &mut d.base,
         }
     }
 
@@ -637,6 +745,8 @@ impl Dimension {
             Dimension::Angular2Ln(d) => d.measurement_degrees(),
             Dimension::Angular3Pt(d) => d.measurement_degrees(),
             Dimension::Ordinate(d) => d.measurement(),
+            Dimension::Arc(d) => d.measurement(),
+            Dimension::LargeRadial(d) => d.measurement(),
         }
     }
 }
@@ -700,6 +810,8 @@ impl super::Entity for Dimension {
             Dimension::Angular2Ln(d) => BoundingBox3D::from_points(&[d.angle_vertex, d.first_point, d.second_point, d.definition_point]).unwrap_or_default(),
             Dimension::Angular3Pt(d) => BoundingBox3D::from_points(&[d.angle_vertex, d.first_point, d.second_point, d.definition_point]).unwrap_or_default(),
             Dimension::Ordinate(d) => BoundingBox3D::from_points(&[d.feature_location, d.leader_endpoint, d.definition_point]).unwrap_or_default(),
+            Dimension::Arc(d) => BoundingBox3D::from_points(&[d.definition_point, d.first_extension_point, d.second_extension_point, d.center_point, d.first_leader_point, d.second_leader_point]).unwrap_or_default(),
+            Dimension::LargeRadial(d) => BoundingBox3D::from_points(&[d.definition_point, d.chord_point, d.override_center, d.jog_point]).unwrap_or_default(),
         }
     }
 
@@ -716,6 +828,8 @@ impl super::Entity for Dimension {
             Dimension::Angular2Ln(_) => "DIMENSION_ANGULAR_2LINE",
             Dimension::Angular3Pt(_) => "DIMENSION_ANGULAR_3POINT",
             Dimension::Ordinate(_) => "DIMENSION_ORDINATE",
+            Dimension::Arc(_) => "ARC_DIMENSION",
+            Dimension::LargeRadial(_) => "LARGE_RADIAL_DIMENSION",
         }
     }
 }

@@ -26,7 +26,7 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Cursor};
 use std::fs::File;
 use std::path::Path;
@@ -41,9 +41,70 @@ use crate::io::dwg::reed_solomon::reed_solomon_decode;
 use crate::io::dwg::decompressor_ac18::decompress_ac18;
 use crate::io::dwg::decompressor_ac21::decompress_ac21;
 use crate::io::dwg::checksum::{apply_mask, apply_magic_sequence};
+use crate::io::dwg::parallel::{map_ordered, worker_count};
+use crate::io::read::{push_read_diagnostic, ReadDiagnostic, ReadStage, SourceFormat};
+
+fn report_read_error(
+    notifications: &mut NotificationCollection,
+    diagnostics: &mut Vec<ReadDiagnostic>,
+    code: &str,
+    stage: ReadStage,
+    section: Option<&str>,
+    message: String,
+) {
+    notifications.notify(NotificationType::Error, message.clone());
+    let mut diagnostic = ReadDiagnostic::new(code, stage, message);
+    diagnostic.section = section.map(str::to_owned);
+    push_read_diagnostic(diagnostics, diagnostic);
+}
 
 /// AC1021 file header offset (data pages start after this)
 const AC21_FILE_HEADER_SIZE: u64 = 0x480;
+
+fn ac21_page_layout(
+    compressed_size: u64,
+    correction_factor: u64,
+    block_size: usize,
+) -> Result<(usize, usize, usize), DxfError> {
+    let aligned = compressed_size.wrapping_add(7) & 0xFFFF_FFF8;
+    let total_size = aligned.wrapping_mul(correction_factor) as usize;
+    if total_size == 0 || total_size > 100_000_000 {
+        return Err(DxfError::InvalidFormat(format!(
+            "Invalid page buffer size: {} (compressed={}, factor={}, aligned={})",
+            total_size, compressed_size, correction_factor, aligned
+        )));
+    }
+    let factor = (total_size + block_size - 1) / block_size;
+    Ok((total_size, factor, factor * 255))
+}
+
+fn decode_ac21_page(
+    encoded: &[u8],
+    total_size: usize,
+    factor: usize,
+    block_size: usize,
+    compressed_size: u64,
+    uncompressed_size: u64,
+) -> Vec<u8> {
+    let mut compressed_data = vec![0u8; total_size];
+    reed_solomon_decode(encoded, &mut compressed_data, factor, block_size);
+    if compressed_size == uncompressed_size {
+        compressed_data.truncate(uncompressed_size as usize);
+        return compressed_data;
+    }
+
+    let mut padded_source = vec![0u8; compressed_data.len() + 64];
+    padded_source[..compressed_data.len()].copy_from_slice(&compressed_data);
+    let mut decompressed_data = vec![0u8; uncompressed_size as usize + 64];
+    decompress_ac21(
+        &padded_source,
+        0,
+        compressed_size as u32,
+        &mut decompressed_data,
+    );
+    decompressed_data.truncate(uncompressed_size as usize);
+    decompressed_data
+}
 
 /// Results from reading a DWG file header.
 ///
@@ -248,7 +309,10 @@ fn find_acds_end(buf: &[u8], from: usize, to: usize) -> Option<(usize, usize)> {
 /// `off[r+1]`). Records with an empty range carry no geometry and are skipped.
 /// Empty when there is no such table (the caller then falls back to order-based
 /// attachment).
-fn extract_acds_record_blobs(buf: &[u8]) -> Vec<(u64, Vec<u8>)> {
+fn extract_acds_record_blobs(
+    buf: &[u8],
+    modeler_handles: &HashSet<u64>,
+) -> Vec<(u64, Vec<u8>)> {
     let rd = |p: usize| -> Option<u32> {
         buf.get(p..p + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()))
     };
@@ -296,7 +360,9 @@ fn extract_acds_record_blobs(buf: &[u8]) -> Vec<(u64, Vec<u8>)> {
             let region_start = base + off;
             let region_end = recs.get(k + 1).map_or(seg_end, |&(_, o)| base + o);
             if region_start >= seg_end || region_end <= region_start {
-                orphan_handles.push(handle); // blob lives in the pre-table pool
+                if modeler_handles.contains(&handle) {
+                    orphan_handles.push(handle); // blob lives in the pre-table pool
+                }
                 continue;
             }
             let region = &buf[region_start..region_end.min(seg_end)];
@@ -305,7 +371,9 @@ fn extract_acds_record_blobs(buf: &[u8]) -> Vec<(u64, Vec<u8>)> {
                 .position(|w| w == b"ASM BinaryFile")
                 .or_else(|| region.windows(15).position(|w| w == b"ACIS BinaryFile"))
             else {
-                orphan_handles.push(handle); // blob lives in the pre-table pool
+                if modeler_handles.contains(&handle) {
+                    orphan_handles.push(handle); // blob lives in the pre-table pool
+                }
                 continue;
             };
             let start = region_start + mp;
@@ -381,9 +449,44 @@ fn extract_acds_sab_blobs(buf: &[u8]) -> Vec<Vec<u8>> {
     blobs
 }
 
+/// Remove AcDs `blob01` continuation frames embedded at 1 MiB boundaries.
+///
+/// Large ASM bodies are split across storage segments. The decompressed AcDs
+/// byte stream places an 80-byte segment header/continuation descriptor between
+/// consecutive SAB chunks:
+/// `AC D5 "blob01" ... 55×8 ...`. Those bytes belong to the datastore, not the
+/// SAB token stream; leaving them in makes the ACIS decoder fail at 0x0f_ffb0.
+fn strip_acds_blob01_frames(blob: Vec<u8>) -> Vec<u8> {
+    const PREFIX: &[u8] = b"\xAC\xD5blob01";
+    const FRAME_LEN: usize = 80;
+    const PADDING: [u8; 8] = [0x55; 8];
+    let mut clean = Vec::with_capacity(blob.len());
+    let mut cursor = 0usize;
+    let mut scan = 0usize;
+    while let Some(relative) = blob[scan..].windows(PREFIX.len()).position(|w| w == PREFIX) {
+        let start = scan + relative;
+        let valid = start + FRAME_LEN <= blob.len()
+            && blob.get(start + 12..start + 16) == Some(&1u32.to_le_bytes())
+            && blob.get(start + 16..start + 24) == Some(&48u64.to_le_bytes())
+            && blob.get(start + 40..start + 48) == Some(&PADDING);
+        if valid {
+            clean.extend_from_slice(&blob[cursor..start]);
+            cursor = start + FRAME_LEN;
+            scan = cursor;
+        } else {
+            scan = start + 1;
+        }
+    }
+    if cursor == 0 {
+        return blob;
+    }
+    clean.extend_from_slice(&blob[cursor..]);
+    clean
+}
+
 /// Fill an `AcisData` from a SAB blob and mark it binary v2.
 fn acds_fill(acis: &mut crate::entities::solid3d::AcisData, blob: Vec<u8>) {
-    acis.sab_data = blob;
+    acis.sab_data = strip_acds_blob01_frames(blob);
     acis.sat_data = String::new();
     acis.is_binary = true;
     acis.version = crate::entities::solid3d::AcisVersion::Version2;
@@ -396,22 +499,49 @@ fn acds_apply(entity: &mut crate::entities::EntityType, blob: Vec<u8>) -> bool {
     match entity {
         EntityType::Solid3D(s) => {
             acds_fill(&mut s.acis_data, blob);
-            if let Some(p) = s.acis_data.placement_origin() {
-                s.point_of_reference = p;
+            // The inline wireframe anchor (bbox centre) is the preferred
+            // reference point; fall back to the SAB placement translation
+            // only when the file carried none.
+            if s.point_of_reference == crate::types::Vector3::ZERO {
+                if let Some(p) = s
+                    .acis_data
+                    .geometry_centre()
+                    .or_else(|| s.acis_data.placement_origin())
+                {
+                    s.point_of_reference = p;
+                }
             }
             true
         }
         EntityType::Region(r) => {
             acds_fill(&mut r.acis_data, blob);
-            if let Some(p) = r.acis_data.placement_origin() {
-                r.point_of_reference = p;
+            // The inline wireframe anchor (bbox centre) is the preferred
+            // reference point; fall back to the SAB placement translation
+            // only when the file carried none.
+            if r.point_of_reference == crate::types::Vector3::ZERO {
+                if let Some(p) = r
+                    .acis_data
+                    .geometry_centre()
+                    .or_else(|| r.acis_data.placement_origin())
+                {
+                    r.point_of_reference = p;
+                }
             }
             true
         }
         EntityType::Body(b) => {
             acds_fill(&mut b.acis_data, blob);
-            if let Some(p) = b.acis_data.placement_origin() {
-                b.point_of_reference = p;
+            // The inline wireframe anchor (bbox centre) is the preferred
+            // reference point; fall back to the SAB placement translation
+            // only when the file carried none.
+            if b.point_of_reference == crate::types::Vector3::ZERO {
+                if let Some(p) = b
+                    .acis_data
+                    .geometry_centre()
+                    .or_else(|| b.acis_data.placement_origin())
+                {
+                    b.point_of_reference = p;
+                }
             }
             true
         }
@@ -570,6 +700,10 @@ pub struct DwgReader<R: Read + Seek> {
     /// Source path, when opened from a file — copied onto the document so the
     /// `Filename` / `FilePath` fields can resolve.
     source_path: Option<String>,
+    /// Optional monotonic read progress callback. The value is in 0..=1000 so
+    /// callers can map DWG parsing into a larger file-open pipeline without
+    /// coupling this crate to a UI or an async runtime.
+    progress: Option<std::sync::Arc<dyn Fn(u16) + Send + Sync>>,
 }
 
 impl DwgReader<File> {
@@ -587,6 +721,27 @@ impl DwgReader<File> {
             options,
             notifications: NotificationCollection::new(),
             source_path: Some(path.to_string_lossy().into_owned()),
+            progress: None,
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl DwgReader<Cursor<memmap2::Mmap>> {
+    /// Open through a read-only memory map. Section seeks then become pointer
+    /// moves and the OS can page/readahead the file without repeated syscalls.
+    pub fn from_mmap<P: AsRef<Path>>(path: P) -> Result<Self, DxfError> {
+        let path = path.as_ref();
+        let file = File::open(path)?;
+        // SAFETY: read-only map owns its file-backed virtual-memory mapping;
+        // this reader never mutates the file while the mapping is alive.
+        let map = unsafe { memmap2::MmapOptions::new().map(&file)? };
+        Ok(Self {
+            stream: Cursor::new(map),
+            options: DwgReadOptions::default(),
+            notifications: NotificationCollection::new(),
+            source_path: Some(path.to_string_lossy().into_owned()),
+            progress: None,
         })
     }
 }
@@ -599,6 +754,7 @@ impl<R: Read + Seek> DwgReader<R> {
             options: DwgReadOptions::default(),
             notifications: NotificationCollection::new(),
             source_path: None,
+            progress: None,
         }
     }
 
@@ -609,6 +765,23 @@ impl<R: Read + Seek> DwgReader<R> {
             options,
             notifications: NotificationCollection::new(),
             source_path: None,
+            progress: None,
+        }
+    }
+
+    /// Receive monotonic parsing progress in the inclusive range 0..=1000.
+    ///
+    /// The callback may run from Rayon worker threads while object records are
+    /// decoded, so it must be thread-safe and should only perform cheap atomic
+    /// updates.
+    pub fn set_progress_callback(&mut self, progress: std::sync::Arc<dyn Fn(u16) + Send + Sync>) {
+        self.progress = Some(progress);
+    }
+
+    #[inline]
+    fn report_progress(&self, value: u16) {
+        if let Some(progress) = &self.progress {
+            progress(value.min(1000));
         }
     }
 
@@ -624,61 +797,131 @@ impl<R: Read + Seek> DwgReader<R> {
     /// In failsafe mode, file-header errors are caught and a partial
     /// document is returned instead of propagating the error.
     pub fn read(&mut self) -> std::result::Result<crate::document::CadDocument, DxfError> {
+        self.read_with_stats().map(|outcome| outcome.document)
+    }
+
+    /// Read the file and return the document with source/decode statistics.
+    pub fn read_with_stats(
+        &mut self,
+    ) -> std::result::Result<crate::io::read::ReadOutcome, DxfError> {
         let failsafe = self.options.failsafe;
+        let perf = std::env::var_os("PERF").is_some();
+        let total_started = web_time::Instant::now();
+        let mut diagnostics = Vec::new();
+        self.report_progress(0);
 
         // 1. Read the DWG file header and section map
+        let stage_started = web_time::Instant::now();
         let info = match self.read_file_header() {
             Ok(info) => info,
             Err(e) if failsafe => {
-                self.notifications.notify(
-                    NotificationType::Error,
+                report_read_error(
+                    &mut self.notifications,
+                    &mut diagnostics,
+                    "file-header-read-failed",
+                    ReadStage::FileHeader,
+                    None,
                     format!("Failsafe: file header read failed, returning partial document: {}", e),
                 );
                 let mut doc = crate::document::CadDocument::default();
                 doc.notifications.extend(std::mem::take(&mut self.notifications));
-                return Ok(doc);
+                let stats = crate::io::read::ReadStats::from_document(
+                    &doc,
+                    SourceFormat::Dwg,
+                    0,
+                    0,
+                    0,
+                    0,
+                    false,
+                    true,
+                    false,
+                    diagnostics,
+                );
+                return Ok(crate::io::read::ReadOutcome::new(doc, stats));
             }
             Err(e) => return Err(e),
         };
+        if perf {
+            eprintln!(
+                "[perf] dwg-read header={:.1}ms sections={} pages={}",
+                stage_started.elapsed().as_secs_f64() * 1000.0,
+                info.section_descriptors.len(),
+                info.page_records.len(),
+            );
+        }
         let dxf_version = crate::types::DxfVersion::parse(&info.version_string)
             .unwrap_or(crate::types::DxfVersion::Unknown);
+        self.report_progress(20);
         let mut document = crate::document::CadDocument::with_version(dxf_version);
         document.maintenance_version = info.acad_maintenance_version;
         document.dwg_source_version = Some(dxf_version);
 
         // 2. Read Classes (AcDb:Classes)
-        if let Ok(classes_buf) = self.get_section_buffer("AcDb:Classes", &info) {
-            match crate::io::dwg::dwg_stream_readers::classes_reader::read_classes(
+        match self.get_section_buffer("AcDb:Classes", &info) {
+            Ok(classes_buf) => match crate::io::dwg::dwg_stream_readers::classes_reader::read_classes_with_encoding(
                 &classes_buf,
                 dxf_version,
                 info.acad_maintenance_version,
+                crate::io::dxf::code_page::encoding_from_dwg_code_page(info.code_page),
             ) {
                 Ok(classes) => document.classes = classes,
-                Err(e) => self.notifications.notify(
-                    NotificationType::Warning,
+                Err(e) => report_read_error(
+                    &mut self.notifications,
+                    &mut diagnostics,
+                    "classes-decode-failed",
+                    ReadStage::Classes,
+                    Some("AcDb:Classes"),
                     format!("Failed to read classes: {}", e),
                 ),
-            }
+            },
+            Err(e) => report_read_error(
+                &mut self.notifications,
+                &mut diagnostics,
+                "classes-extract-failed",
+                ReadStage::Classes,
+                Some("AcDb:Classes"),
+                format!("Failed to extract classes section: {}", e),
+            ),
         }
+        self.report_progress(30);
 
         // 3. Read Header Variables (AcDb:Header)
-        if let Ok(header_buf) = self.get_section_buffer("AcDb:Header", &info) {
-            match crate::io::dwg::dwg_stream_readers::header_reader::read_header(
+        match self.get_section_buffer("AcDb:Header", &info) {
+            Ok(header_buf) => match crate::io::dwg::dwg_stream_readers::header_reader::read_header_with_encoding(
                 &header_buf,
                 dxf_version,
                 info.acad_maintenance_version,
+                crate::io::dxf::code_page::encoding_from_dwg_code_page(info.code_page),
             ) {
                 Ok(header_vars) => document.header = header_vars,
-                Err(e) => self.notifications.notify(
-                    NotificationType::Warning,
+                Err(e) => report_read_error(
+                    &mut self.notifications,
+                    &mut diagnostics,
+                    "header-decode-failed",
+                    ReadStage::Header,
+                    Some("AcDb:Header"),
                     format!("Failed to read header: {}", e),
                 ),
-            }
+            },
+            Err(e) => report_read_error(
+                &mut self.notifications,
+                &mut diagnostics,
+                "header-extract-failed",
+                ReadStage::Header,
+                Some("AcDb:Header"),
+                format!("Failed to extract header section: {}", e),
+            ),
         }
+        document.header.code_page =
+            crate::io::dxf::code_page::dwg_code_page_name(info.code_page).to_string();
+        self.report_progress(40);
 
         // 4. Read Handle Map (AcDb:Handles)
-        let handle_map = if let Ok(handle_buf) = self.get_section_buffer("AcDb:Handles", &info) {
-            match crate::io::dwg::dwg_stream_readers::handle_reader::read_handles(&handle_buf) {
+        let mut handles_section_read = false;
+        let handle_map = match self.get_section_buffer("AcDb:Handles", &info) {
+            Ok(handle_buf) => {
+                handles_section_read = true;
+                match crate::io::dwg::dwg_stream_readers::handle_reader::read_handles(&handle_buf) {
                 Ok(mut hm) => {
                     // AC15: Handle offsets are absolute file positions.
                     // Convert to buffer-relative by subtracting the objects
@@ -692,37 +935,91 @@ impl<R: Read + Seek> DwgReader<R> {
                     hm
                 },
                 Err(e) => {
-                    self.notifications.notify(
-                        NotificationType::Warning,
+                    report_read_error(
+                        &mut self.notifications,
+                        &mut diagnostics,
+                        "handles-decode-failed",
+                        ReadStage::Handles,
+                        Some("AcDb:Handles"),
                         format!("Failed to read handles: {}", e),
                     );
                     std::collections::HashMap::new()
                 }
+                }
             }
-        } else {
-            std::collections::HashMap::new()
+            Err(e) => {
+                report_read_error(
+                    &mut self.notifications,
+                    &mut diagnostics,
+                    "handles-extract-failed",
+                    ReadStage::Handles,
+                    Some("AcDb:Handles"),
+                    format!("Failed to extract handles section: {}", e),
+                );
+                std::collections::HashMap::new()
+            }
         };
+        self.report_progress(50);
 
         // 5. Read Objects (AcDb:AcDbObjects) and build document
+        let handle_count = handle_map.len();
+        let mut objects_section_read = false;
+        let mut record_stream_read = false;
+        let mut decoded_source_records = 0usize;
+        let mut skipped_source_records = 0usize;
+        let objects_started = web_time::Instant::now();
         if !handle_map.is_empty() {
-            if let Ok(objects_buf) = self.get_section_buffer("AcDb:AcDbObjects", &info) {
-                match crate::io::dwg::dwg_stream_readers::object_reader::DwgObjectReader::new(
+            match self.get_section_buffer("AcDb:AcDbObjects", &info) {
+                Ok(objects_buf) => {
+                    objects_section_read = true;
+                    match crate::io::dwg::dwg_stream_readers::object_reader::DwgObjectReader::with_encoding(
                     objects_buf,
                     dxf_version,
                     handle_map,
+                    crate::io::dxf::code_page::encoding_from_dwg_code_page(info.code_page),
                 ) {
                     Ok(obj_reader) => {
+                        record_stream_read = true;
                         let mut builder = crate::io::dwg::dwg_document_builder::DwgDocumentBuilder::new(obj_reader);
                         builder.set_failsafe(failsafe);
-                        let build_notifications = builder.build(&mut document);
-                        self.notifications.extend(build_notifications);
+                        if let Some(progress) = &self.progress {
+                            builder.set_progress_callback(progress.clone());
+                        }
+                        let build_outcome = builder.build_with_stats(&mut document);
+                        decoded_source_records = build_outcome.decoded_records;
+                        skipped_source_records = build_outcome.skipped_records;
+                        diagnostics.extend(build_outcome.diagnostics);
+                        self.notifications.extend(build_outcome.notifications);
                     },
-                    Err(e) => self.notifications.notify(
-                        NotificationType::Warning,
+                    Err(e) => report_read_error(
+                        &mut self.notifications,
+                        &mut diagnostics,
+                        "objects-init-failed",
+                        ReadStage::Objects,
+                        Some("AcDb:AcDbObjects"),
                         format!("Failed to init object reader: {}", e),
                     ),
+                    }
                 }
+                Err(e) => report_read_error(
+                    &mut self.notifications,
+                    &mut diagnostics,
+                    "objects-extract-failed",
+                    ReadStage::Objects,
+                    Some("AcDb:AcDbObjects"),
+                    format!("Failed to extract objects section: {}", e),
+                ),
             }
+        }
+        self.report_progress(930);
+        if perf {
+            eprintln!(
+                "[perf] dwg-read objects={:.1}ms handles={} entities={} objects={}",
+                objects_started.elapsed().as_secs_f64() * 1000.0,
+                handle_count,
+                document.entities().count(),
+                document.objects.len(),
+            );
         }
 
         // 6. R2013+ (AC1027+): 3DSOLID / REGION / BODY ACIS geometry is not
@@ -734,7 +1031,20 @@ impl<R: Read + Seek> DwgReader<R> {
             // Authoritative: the `_data_` record table(s) bind each blob to its
             // owning handle. When present, attach by handle — the only mapping
             // that survives BIM exports whose blob/record/handle orders diverge.
-            let record_blobs = extract_acds_record_blobs(&acds_buf);
+            let modeler_handles: HashSet<u64> = document
+                .entities()
+                .filter(|entity| {
+                    matches!(
+                        entity,
+                        crate::entities::EntityType::Solid3D(_)
+                            | crate::entities::EntityType::Region(_)
+                            | crate::entities::EntityType::Body(_)
+                            | crate::entities::EntityType::Surface(_)
+                    ) && entity.common().has_ds_data
+                })
+                .map(|entity| entity.common().handle.value())
+                .collect();
+            let record_blobs = extract_acds_record_blobs(&acds_buf, &modeler_handles);
             let attached = if !record_blobs.is_empty() {
                 attach_acds_record_blobs(&mut document, record_blobs)
             } else {
@@ -748,11 +1058,90 @@ impl<R: Read + Seek> DwgReader<R> {
                 }
             };
             if attached > 0 {
+                let fingerprint = super::sab_fingerprint(document.entities().filter_map(|entity| {
+                    let acis = match entity {
+                        crate::entities::EntityType::Solid3D(entity) => &entity.acis_data,
+                        crate::entities::EntityType::Region(entity) => &entity.acis_data,
+                        crate::entities::EntityType::Body(entity) => &entity.acis_data,
+                        crate::entities::EntityType::Surface(entity) => &entity.acis_data,
+                        _ => return None,
+                    };
+                    (!acis.sab_data.is_empty())
+                        .then_some((entity.common().handle, acis.sab_data.as_slice()))
+                }));
+                document.raw_acds_data = Some(std::sync::Arc::new(acds_buf));
+                document.raw_acds_fingerprint = fingerprint;
                 self.notifications.notify(
                     NotificationType::Warning,
                     format!("AcDs: attached {} SAB blob(s) to modeler entities", attached),
                 );
             }
+        }
+        self.report_progress(970);
+
+        // 7. Preview / thumbnail image. Stored uncompressed at the raw file
+        //    offset in the header's preview seeker (all versions), wrapped in a
+        //    sentinel-bracketed container. Best-effort: a malformed or absent
+        //    preview simply leaves `document.preview` as `None`.
+        if info.preview_address > 0 {
+            let base = info.preview_address as u64;
+            if self.stream.seek(SeekFrom::Start(base)).is_ok() {
+                let mut head = [0u8; 20];
+                if self.stream.read_exact(&mut head).is_ok() {
+                    if let Some(overall) = crate::io::dwg::preview::overall_size(&head) {
+                        // Guard against a garbage size before allocating.
+                        if overall > 0 && overall < 64 * 1024 * 1024 {
+                            let total = crate::io::dwg::preview::container_len(overall);
+                            let mut buf = vec![0u8; total];
+                            if self.stream.seek(SeekFrom::Start(base)).is_ok()
+                                && self.stream.read_exact(&mut buf).is_ok()
+                            {
+                                document.preview =
+                                    crate::io::dwg::preview::parse_preview(&buf, base);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Record the source path (Filename / FilePath fields) when opened from a
+        // file rather than a bare stream.
+        document.source_path = self.source_path.clone();
+
+        // Document summary information (Author/Title/Subject/… → the
+        // Document-category dynamic-text fields).
+        if let Ok(buf) = self.get_section_buffer("AcDb:SummaryInfo", &info) {
+            let utf16 = crate::io::dwg::dwg_version::DwgVersion::from_dxf_version(dxf_version)
+                .map(|v| v.r2007_plus())
+                .unwrap_or(true);
+            document.summary_info = parse_summary_info(&buf, utf16);
+        }
+
+        // R2000/R14 down-saved gradient hatches store their gradient in the
+        // ACAD round-trip mechanism, not the object stream (the DWG gradient
+        // block is R2004+): the two colours in EED (GradientColor1ACI /
+        // GradientColor2ACI) and the gradient type in an ACAD_XREC_ROUNDTRIP
+        // XRecord under the hatch's extension dictionary. Reconstruct the
+        // gradient so it renders as AutoCAD/ODA show it instead of a flat
+        // solid fill.
+        //
+        // Gate strictly to pre-R2004: a native R2004+ file carries the real
+        // gradient in its hatch object (read_hatch reads `is_gradient` and the
+        // colours directly), so that flag is authoritative. Such hatches often
+        // ALSO keep stale GradientColor1/2ACI round-trip EED from an earlier
+        // edit; recovering from it would resurrect a gradient the drawing has
+        // since turned off (native `is_gradient` = 0), painting a solid-fill
+        // hatch as a spurious gradient. Only R2000/R14, whose object stream has
+        // no gradient block, need the round-trip fallback.
+        let pre_r2004 = crate::io::dwg::dwg_version::DwgVersion::from_dxf_version(dxf_version)
+            .map(|v| !v.r2004_plus())
+            .unwrap_or(false);
+        if pre_r2004 {
+            recover_roundtrip_gradients(&mut document);
+            // Pre-R2004 stores an MTEXT background fill as round-trip EED
+            // instead of the native codes (dimension text fills, etc.).
+            recover_mtext_bg_roundtrip(&mut document);
         }
 
         // 7. Preview / thumbnail image. Stored uncompressed at the raw file
@@ -798,7 +1187,31 @@ impl<R: Read + Seek> DwgReader<R> {
         // inspect them via `document.notifications`.
         document.notifications.extend(std::mem::take(&mut self.notifications));
 
-        Ok(document)
+        if perf {
+            eprintln!(
+                "[perf] dwg-read total={:.1}ms entities={} objects={} classes={}",
+                total_started.elapsed().as_secs_f64() * 1000.0,
+                document.entities().count(),
+                document.objects.len(),
+                document.classes.iter().count(),
+            );
+        }
+        self.report_progress(1000);
+        let source_sections = usize::from(handles_section_read)
+            .saturating_add(usize::from(objects_section_read));
+        let stats = crate::io::read::ReadStats::from_document(
+            &document,
+            SourceFormat::Dwg,
+            source_sections,
+            handle_count,
+            decoded_source_records,
+            skipped_source_records,
+            record_stream_read,
+            failsafe,
+            true,
+            diagnostics,
+        );
+        Ok(crate::io::read::ReadOutcome::new(document, stats))
     }
 
     /// Read the file header and extract all CRC values.
@@ -1588,21 +2001,8 @@ impl<R: Read + Seek> DwgReader<R> {
         correction_factor: u64,
         block_size: usize,
     ) -> Result<Vec<u8>, DxfError> {
-        // Calculate sizes matching ACadSharp's getPageBuffer()
-        let v = compressed_size.wrapping_add(7);
-        let v1 = v & 0xFFFF_FFF8; // Align to 8 bytes
-
-        let total_size = v1.wrapping_mul(correction_factor) as usize;
-
-        if total_size == 0 || total_size > 100_000_000 {
-            return Err(DxfError::InvalidFormat(format!(
-                "Invalid page buffer size: {} (compressed={}, factor={}, v1={})",
-                total_size, compressed_size, correction_factor, v1
-            )));
-        }
-
-        let factor = (total_size + block_size - 1) / block_size;
-        let read_length = factor * 255;
+        let (total_size, factor, read_length) =
+            ac21_page_layout(compressed_size, correction_factor, block_size)?;
 
         // Read encoded data from file
         self.stream.seek(SeekFrom::Start(AC21_FILE_HEADER_SIZE + page_offset))?;
@@ -1613,39 +2013,14 @@ impl<R: Read + Seek> DwgReader<R> {
             encoded_buffer[bytes_read..].fill(0);
         }
 
-        // Reed-Solomon decode
-        let mut compressed_data = vec![0u8; total_size];
-        reed_solomon_decode(&encoded_buffer, &mut compressed_data, factor, block_size);
-
-        // LZ77 AC21 decompress.
-        // Some writers store compressed data even when the compressed size is
-        // not smaller than the uncompressed size (the ODA spec suggests data
-        // should be stored raw in that case, but not all implementations follow
-        // this convention).  Always decompress when the sizes differ; only skip
-        // when they are exactly equal (meaning data was stored raw).
-        if compressed_size != uncompressed_size {
-            // AC21 decompressor may read/write slightly past declared sizes
-            // due to block-level copy operations (4/8/32 byte chunks).
-            // Pad both source and destination buffers.
-            let src_padded_size = compressed_data.len() + 64;
-            let mut padded_source = vec![0u8; src_padded_size];
-            padded_source[..compressed_data.len()].copy_from_slice(&compressed_data);
-
-            let dst_padded_size = uncompressed_size as usize + 64;
-            let mut decompressed_data = vec![0u8; dst_padded_size];
-            decompress_ac21(
-                &padded_source,
-                0,
-                compressed_size as u32,
-                &mut decompressed_data,
-            );
-            decompressed_data.truncate(uncompressed_size as usize);
-            Ok(decompressed_data)
-        } else {
-            // compressed_size == uncompressed_size: data is stored raw
-            compressed_data.truncate(uncompressed_size as usize);
-            Ok(compressed_data)
-        }
+        Ok(decode_ac21_page(
+            &encoded_buffer,
+            total_size,
+            factor,
+            block_size,
+            compressed_size,
+            uncompressed_size,
+        ))
     }
 
     /// Get the merged decompressed buffer for a named section (AC21).
@@ -1670,6 +2045,8 @@ impl<R: Read + Seek> DwgReader<R> {
         info: &DwgFileHeaderInfo,
     ) -> Result<Vec<u8>, DxfError> {
         let failsafe = self.options.failsafe;
+        let perf = std::env::var_os("PERF").is_some();
+        let started = web_time::Instant::now();
 
         // ── AC15 path: direct read from section locators ──
         // If we have section_locators (AC15 format), read raw bytes
@@ -1684,6 +2061,14 @@ impl<R: Read + Seek> DwgReader<R> {
                 self.stream.seek(SeekFrom::Start(offset as u64))?;
                 let mut buf = vec![0u8; size as usize];
                 self.stream.read_exact(&mut buf)?;
+                if perf {
+                    eprintln!(
+                        "[perf] dwg-section name={} format=ac15 time={:.1}ms bytes={}",
+                        section_name,
+                        started.elapsed().as_secs_f64() * 1000.0,
+                        buf.len(),
+                    );
+                }
                 return Ok(buf);
             } else {
                 return Err(DxfError::Parse(
@@ -1694,7 +2079,16 @@ impl<R: Read + Seek> DwgReader<R> {
 
         // ── AC18 path: page-based with LZ77 AC18 compression ──
         if info.is_ac18_format {
-            return self.get_section_buffer_ac18(section_name, info);
+            let result = self.get_section_buffer_ac18(section_name, info);
+            if perf {
+                eprintln!(
+                    "[perf] dwg-section name={} format=ac18 time={:.1}ms bytes={}",
+                    section_name,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    result.as_ref().map_or(0, Vec::len),
+                );
+            }
+            return result;
         }
 
         // ── AC21 path: page-based section descriptors ──
@@ -1718,64 +2112,134 @@ impl<R: Read + Seek> DwgReader<R> {
         let encoding = section.encoding;
         let block_size: usize = 251;
 
+        enum PagePayload {
+            Ready(Vec<u8>),
+            Encoded {
+                bytes: Vec<u8>,
+                total_size: usize,
+                factor: usize,
+                compressed_size: u64,
+                uncompressed_size: u64,
+            },
+            Failed(String),
+        }
+        struct PreparedPage {
+            number: i64,
+            fill_size: usize,
+            payload: PagePayload,
+        }
+
+        // File seeks stay ordered; CPU-heavy Reed-Solomon and LZ77 work runs
+        // concurrently in bounded batches. This keeps peak memory near
+        // `result + 2 * worker pages` instead of retaining encoded and decoded
+        // copies of the whole section at once.
+        let batch_pages = worker_count().saturating_mul(2);
         let mut skipped_pages = 0u32;
-
-        for page in &section.pages {
-            // Look up the page record to get the file offset
-            if let Some(&(page_offset, _page_size)) = info.page_records.get(&(page.page_number as i32)) {
-                let page_result = if encoding == 1 {
-                    // encoding=1: read raw data directly (no RS, no LZ77).
-                    // AutoCAD stores encoding=1 pages as raw bytes aligned to 32.
-                    let read_size = page.decompressed_size as usize;
-                    (|| -> Result<Vec<u8>, DxfError> {
-                        self.stream.seek(SeekFrom::Start(AC21_FILE_HEADER_SIZE + page_offset as u64))?;
-                        let mut buf = vec![0u8; read_size];
-                        self.stream.read_exact(&mut buf)?;
-                        Ok(buf)
-                    })()
-                } else {
-                    self.get_page_buffer_at(
-                        page_offset as u64,
-                        page.compressed_size,
-                        page.decompressed_size,
-                        1, // correction factor is always 1 for data pages
-                        block_size,
-                    )
+        for page_batch in section.pages.chunks(batch_pages) {
+            let mut prepared = Vec::with_capacity(page_batch.len());
+            for page in page_batch {
+                let fill_size = page.decompressed_size as usize;
+                let payload = match info.page_records.get(&(page.page_number as i32)) {
+                    Some(&(page_offset, _)) if encoding == 1 => {
+                        let read = (|| -> Result<Vec<u8>, DxfError> {
+                            self.stream.seek(SeekFrom::Start(
+                                AC21_FILE_HEADER_SIZE + page_offset as u64,
+                            ))?;
+                            let mut bytes = vec![0u8; fill_size];
+                            self.stream.read_exact(&mut bytes)?;
+                            Ok(bytes)
+                        })();
+                        match read {
+                            Ok(bytes) => PagePayload::Ready(bytes),
+                            Err(error) if failsafe => PagePayload::Failed(error.to_string()),
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Some(&(page_offset, _)) => {
+                        match ac21_page_layout(page.compressed_size, 1, block_size) {
+                            Ok((total_size, factor, read_length)) => {
+                                let read = (|| -> Result<Vec<u8>, DxfError> {
+                                    self.stream.seek(SeekFrom::Start(
+                                        AC21_FILE_HEADER_SIZE + page_offset as u64,
+                                    ))?;
+                                    let mut bytes = vec![0u8; read_length];
+                                    let read = self.stream.read(&mut bytes)?;
+                                    bytes[read..].fill(0);
+                                    Ok(bytes)
+                                })();
+                                match read {
+                                    Ok(bytes) => PagePayload::Encoded {
+                                        bytes,
+                                        total_size,
+                                        factor,
+                                        compressed_size: page.compressed_size,
+                                        uncompressed_size: page.decompressed_size,
+                                    },
+                                    Err(error) if failsafe => {
+                                        PagePayload::Failed(error.to_string())
+                                    }
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                            Err(error) if failsafe => PagePayload::Failed(error.to_string()),
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    None if failsafe => PagePayload::Failed(format!(
+                        "page {} not found in page map",
+                        page.page_number
+                    )),
+                    None => {
+                        return Err(DxfError::Parse(format!(
+                            "Page {} not found in page map",
+                            page.page_number
+                        )))
+                    }
                 };
+                prepared.push(PreparedPage {
+                    number: page.page_number,
+                    fill_size,
+                    payload,
+                });
+            }
 
+            let decoded = map_ordered(prepared, |page| {
+                let data = match page.payload {
+                    PagePayload::Ready(bytes) => Ok(bytes),
+                    PagePayload::Encoded {
+                        bytes,
+                        total_size,
+                        factor,
+                        compressed_size,
+                        uncompressed_size,
+                    } => Ok(decode_ac21_page(
+                        &bytes,
+                        total_size,
+                        factor,
+                        block_size,
+                        compressed_size,
+                        uncompressed_size,
+                    )),
+                    PagePayload::Failed(error) => Err(error),
+                };
+                (page.number, page.fill_size, data)
+            });
+
+            for (page_number, fill_size, page_result) in decoded {
                 match page_result {
                     Ok(page_data) => result.extend_from_slice(&page_data),
-                    Err(e) if failsafe => {
+                    Err(error) => {
                         skipped_pages += 1;
                         self.notifications.notify(
                             NotificationType::Error,
                             format!(
                                 "Failsafe: skipped corrupt page {} in section '{}': {}",
-                                page.page_number, section_name, e
+                                page_number, section_name, error
                             ),
                         );
-                        // Fill with zeros to maintain expected offsets
-                        let fill_size = page.decompressed_size as usize;
-                        result.extend(std::iter::repeat(0u8).take(fill_size));
+                        result.resize(result.len() + fill_size, 0);
                     }
-                    Err(e) => return Err(e),
                 }
-            } else if failsafe {
-                skipped_pages += 1;
-                self.notifications.notify(
-                    NotificationType::Error,
-                    format!(
-                        "Failsafe: page {} not found in page map for section '{}'",
-                        page.page_number, section_name
-                    ),
-                );
-                // Fill with zeros to maintain expected offsets
-                let fill_size = page.decompressed_size as usize;
-                result.extend(std::iter::repeat(0u8).take(fill_size));
-            } else {
-                return Err(DxfError::Parse(
-                    format!("Page {} not found in page map", page.page_number)
-                ));
             }
         }
 
@@ -1794,6 +2258,15 @@ impl<R: Read + Seek> DwgReader<R> {
         // Truncate to the declared section size (last page may be padded)
         result.truncate(total_size);
 
+        if perf {
+            eprintln!(
+                "[perf] dwg-section name={} format=ac21 time={:.1}ms bytes={} pages={}",
+                section_name,
+                started.elapsed().as_secs_f64() * 1000.0,
+                result.len(),
+                section.pages.len(),
+            );
+        }
         Ok(result)
     }
 
@@ -1818,60 +2291,68 @@ impl<R: Read + Seek> DwgReader<R> {
         let max_page_size = section.decompressed_size as usize;
 
         let mut result = vec![0u8; total_size];
+        let batch_pages = worker_count().saturating_mul(2);
 
-        for page in &section.pages {
-            let page_number = page.page_number as i32;
+        for page_batch in section.pages.chunks(batch_pages) {
+            let mut prepared = Vec::with_capacity(page_batch.len());
+            for page in page_batch {
+                let page_number = page.page_number as i32;
 
-            let &(page_file_offset, _page_total_size) = info.page_records.get(&page_number)
-                .ok_or_else(|| DxfError::Parse(
-                    format!("AC18 page {} not found in page records for section '{}'",
-                            page_number, section_name)
-                ))?;
+                let &(page_file_offset, _page_total_size) = info.page_records.get(&page_number)
+                    .ok_or_else(|| DxfError::Parse(
+                        format!("AC18 page {} not found in page records for section '{}'",
+                                page_number, section_name)
+                    ))?;
 
-            self.stream.seek(SeekFrom::Start(page_file_offset as u64))?;
+                self.stream.seek(SeekFrom::Start(page_file_offset as u64))?;
 
-            // Read 32-byte data section header (XOR-masked)
-            let mut header = [0u8; 32];
-            self.stream.read_exact(&mut header)?;
+                // Read 32-byte data section header (XOR-masked)
+                let mut header = [0u8; 32];
+                self.stream.read_exact(&mut header)?;
 
-            // XOR unmask using the page's file position
-            apply_mask(&mut header, page_file_offset as u64);
+                // XOR unmask using the page's file position
+                apply_mask(&mut header, page_file_offset as u64);
 
-            // Parse header fields
-            let mut hcursor = Cursor::new(&header[..]);
-            let _section_type = hcursor.read_i32::<LittleEndian>()?;
-            let _section_id = hcursor.read_i32::<LittleEndian>()?;
-            let data_compressed_size = hcursor.read_i32::<LittleEndian>()?;
-            let _page_size = hcursor.read_i32::<LittleEndian>()?;
-            let data_offset = hcursor.read_i64::<LittleEndian>()?;
+                // Parse header fields
+                let mut hcursor = Cursor::new(&header[..]);
+                let _section_type = hcursor.read_i32::<LittleEndian>()?;
+                let _section_id = hcursor.read_i32::<LittleEndian>()?;
+                let data_compressed_size = hcursor.read_i32::<LittleEndian>()?;
+                let _page_size = hcursor.read_i32::<LittleEndian>()?;
+                let data_offset = hcursor.read_i64::<LittleEndian>()?;
 
-            // Read compressed data
-            if data_compressed_size <= 0 || data_compressed_size > 10_000_000 {
-                self.notifications.notify(
-                    NotificationType::Warning,
-                    format!(
-                        "AC18: Invalid compressed size {} for page {} in section '{}'",
-                        data_compressed_size, page_number, section_name
-                    ),
-                );
-                continue;
+                // Read compressed data
+                if data_compressed_size <= 0 || data_compressed_size > 10_000_000 {
+                    self.notifications.notify(
+                        NotificationType::Warning,
+                        format!(
+                            "AC18: Invalid compressed size {} for page {} in section '{}'",
+                            data_compressed_size, page_number, section_name
+                        ),
+                    );
+                    continue;
+                }
+                let mut compressed = vec![0u8; data_compressed_size as usize];
+                self.stream.read_exact(&mut compressed)?;
+
+                prepared.push((data_offset as usize, compressed));
             }
-            let mut compressed = vec![0u8; data_compressed_size as usize];
-            self.stream.read_exact(&mut compressed)?;
 
-            // Decompress
-            let decompressed = if is_compressed {
-                decompress_ac18(&compressed, max_page_size)
-            } else {
-                compressed
-            };
+            let decoded = map_ordered(prepared, |(dst_start, compressed)| {
+                let decompressed = if is_compressed {
+                    decompress_ac18(&compressed, max_page_size)
+                } else {
+                    compressed
+                };
+                (dst_start, decompressed)
+            });
 
-            // Copy to result at the correct offset within the section data
-            let dst_start = data_offset as usize;
-            if dst_start < total_size {
-                let copy_len = decompressed.len().min(total_size - dst_start);
-                result[dst_start..dst_start + copy_len]
-                    .copy_from_slice(&decompressed[..copy_len]);
+            for (dst_start, decompressed) in decoded {
+                if dst_start < total_size {
+                    let copy_len = decompressed.len().min(total_size - dst_start);
+                    result[dst_start..dst_start + copy_len]
+                        .copy_from_slice(&decompressed[..copy_len]);
+                }
             }
         }
 
@@ -2105,5 +2586,232 @@ mod section_name_tests {
     #[test]
     fn empty_when_first_byte_null() {
         assert_eq!(section_name_from_field(&[0u8; 64]), "");
+    }
+}
+
+
+/// Reconstruct a gradient hatch that was down-saved (R2000/R2004) as a solid
+/// fill plus round-trip metadata: the two colours live in EED
+/// (`GradientColor1ACI` / `GradientColor2ACI`) and the gradient type name in an
+/// `ACAD_XREC_ROUNDTRIP` XRecord under the hatch's extension dictionary. When a
+/// solid hatch carries this metadata but no live gradient block, rebuild
+/// `gradient_color` so it renders as the intended gradient.
+pub(crate) fn recover_roundtrip_gradients(document: &mut crate::document::CadDocument) {
+    use crate::entities::EntityType;
+    use crate::objects::ObjectType;
+    use crate::types::{Color, Handle};
+
+    const GRADIENT_NAMES: &[&str] = &[
+        "SPHERICAL",
+        "HEMISPHERICAL",
+        "CURVED",
+        "CYLINDER",
+        "INVSPHERICAL",
+        "INVHEMISPHERICAL",
+        "INVCURVED",
+        "INVCYLINDER",
+        "LINEAR",
+    ];
+
+    // Phase 1 — collect (immutable): which hatches need a gradient, and what.
+    let mut recovered: Vec<(Handle, u8, u8, String)> = Vec::new();
+    for e in document.entities() {
+        let EntityType::Hatch(h) = e else { continue };
+        if h.gradient_color.enabled || !h.is_solid {
+            continue;
+        }
+        let eed = &h.common.extended_data;
+        // EED app names vary in case across versions (R14 upper-cases them:
+        // GRADIENTCOLOR1ACI vs R2000's GradientColor1ACI), so match loosely.
+        let aci = |app: &str| -> Option<u8> {
+            eed.records()
+                .iter()
+                .find(|r| r.application_name.eq_ignore_ascii_case(app))
+                .and_then(|r| {
+                    r.values.iter().find_map(|v| match v {
+                        crate::xdata::XDataValue::Integer16(n) => Some(*n as u8),
+                        _ => None,
+                    })
+                })
+        };
+        let (Some(c1), Some(c2)) = (aci("GradientColor1ACI"), aci("GradientColor2ACI")) else {
+            continue;
+        };
+
+        // A live down-saved gradient always carries an ACAD_XREC_ROUNDTRIP
+        // XRecord (under the hatch's extension dictionary) alongside the
+        // GradientColor*ACI EED. When only the EED survives — no extension
+        // dictionary, or one without that XRecord — the colours are stale
+        // metadata left behind by an edit that turned a gradient into a plain
+        // solid fill (or recoloured it). Resurrecting a gradient then paints a
+        // genuine single-colour solid hatch as a two-colour gradient, so treat
+        // the missing round-trip XRecord as proof the hatch is really solid.
+        //
+        // Gradient type: the trailing name string in that same XRecord
+        // (hatch xdict → "ACAD_XREC_ROUNDTRIP" → XRecord raw_data).
+        let mut name = String::new();
+        let mut has_roundtrip = false;
+        if let Some(xd) = h.common.xdictionary_handle {
+            if let Some(ObjectType::Dictionary(d)) = document.objects.get(&xd) {
+                // R14 mis-sizes dictionary key strings, leaving trailing
+                // garbage bytes ("ACAD_XREC_ROUNDTRIP\x03q0…"), so match by
+                // prefix rather than equality.
+                if let Some((_, xrec_h)) = d.entries.iter().find(|(k, _)| {
+                    k.len() >= 19 && k[..19].eq_ignore_ascii_case("ACAD_XREC_ROUNDTRIP")
+                }) {
+                    has_roundtrip = true;
+                    if let Some(ObjectType::XRecord(xr)) = document.objects.get(xrec_h) {
+                        let ascii: String = xr
+                            .raw_data
+                            .iter()
+                            .map(|&b| if (32..127).contains(&b) { b as char } else { ' ' })
+                            .collect();
+                        let up = ascii.to_ascii_uppercase();
+                        for cand in GRADIENT_NAMES {
+                            if up.contains(cand) {
+                                name = (*cand).to_string();
+                                break;
+                            }
+                        }
+                        // A DXF-sourced round-trip XRecord encodes the gradient
+                        // type as a number in the 1004 binary (first LE int32 =
+                        // 123 + gradient index in AutoCAD's dropdown order),
+                        // not as an ASCII name; decode it when no name matched.
+                        if name.is_empty() && xr.raw_data.len() >= 4 {
+                            const BY_INDEX: &[&str] = &[
+                                "LINEAR",
+                                "CYLINDER",
+                                "INVCYLINDER",
+                                "SPHERICAL",
+                                "HEMISPHERICAL",
+                                "CURVED",
+                                "INVSPHERICAL",
+                                "INVHEMISPHERICAL",
+                                "INVCURVED",
+                            ];
+                            let v = u32::from_le_bytes([
+                                xr.raw_data[0],
+                                xr.raw_data[1],
+                                xr.raw_data[2],
+                                xr.raw_data[3],
+                            ]);
+                            if (123..123 + BY_INDEX.len() as u32).contains(&v) {
+                                name = BY_INDEX[(v - 123) as usize].to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // No round-trip XRecord ⇒ the gradient EED is stale; keep it solid.
+        if !has_roundtrip {
+            continue;
+        }
+        if name.is_empty() {
+            name = "LINEAR".to_string();
+        }
+        recovered.push((e.common().handle, c1, c2, name));
+    }
+
+    // Phase 2 — apply (mutable).
+    for (handle, c1, c2, name) in recovered {
+        if let Some(EntityType::Hatch(h)) = document.get_entity_mut(handle) {
+            h.gradient_color.enabled = true;
+            h.gradient_color.is_single_color = c1 == c2;
+            h.gradient_color.colors = vec![
+                crate::entities::hatch::GradientColorEntry {
+                    value: 0.0,
+                    color: Color::from_index(c1 as i16),
+                },
+                crate::entities::hatch::GradientColorEntry {
+                    value: 1.0,
+                    color: Color::from_index(c2 as i16),
+                },
+            ];
+            h.gradient_color.name = name;
+        }
+    }
+}
+
+/// Recover an MTEXT background fill that a pre-R2004 (R2000/R14) save stored as
+/// round-trip EED (`ACAD_MTEXT_BBRT` … `ACAD_MTEXT_BERT`) instead of the native
+/// codes (90 flags / 63|421 colour / 45 scale / 441 transparency), which those
+/// versions predate. AutoCAD/ODA render the fill from this metadata; without it
+/// a down-saved dimension text (or any MTEXT) shows no background. Applied only
+/// when the entity has no native fill flag. The colour is stored with the
+/// AutoCAD "method byte" (0xC2 = RGB, 0xC3 = ACI, 0xC0/0xC1 = ByLayer/ByBlock).
+pub(crate) fn recover_mtext_bg_roundtrip(document: &mut crate::document::CadDocument) {
+    use crate::entities::EntityType;
+    use crate::types::{Color, Handle};
+    use crate::xdata::XDataValue;
+
+    fn color_from_method(v: i32) -> Color {
+        let u = v as u32;
+        match (u >> 24) & 0xFF {
+            0xC0 => Color::ByLayer,
+            0xC1 => Color::ByBlock,
+            0xC3 => Color::from_index((u & 0xFF) as i16),
+            _ => Color::Rgb {
+                r: ((u >> 16) & 0xFF) as u8,
+                g: ((u >> 8) & 0xFF) as u8,
+                b: (u & 0xFF) as u8,
+            },
+        }
+    }
+
+    let mut recovered: Vec<(Handle, i32, f64, Color, i32)> = Vec::new();
+    for e in document.entities() {
+        let EntityType::MText(m) = e else { continue };
+        if m.background_fill_flags != 0 {
+            continue; // native fill present — nothing to recover
+        }
+        let Some(rec) = m
+            .common
+            .extended_data
+            .records()
+            .iter()
+            .find(|r| r.application_name.eq_ignore_ascii_case("ACAD"))
+        else {
+            continue;
+        };
+        let vals = &rec.values;
+        let Some(begin) = vals
+            .iter()
+            .position(|v| matches!(v, XDataValue::String(s) if s == "ACAD_MTEXT_BBRT"))
+        else {
+            continue;
+        };
+        // Walk the BBRT…BERT block as (Integer16 code, value) pairs.
+        let (mut flags, mut scale, mut color, mut transp) =
+            (0i32, 1.0f64, Color::ByLayer, 0i32);
+        let mut i = begin + 1;
+        while i + 1 < vals.len() {
+            if matches!(&vals[i], XDataValue::String(s) if s == "ACAD_MTEXT_BERT") {
+                break;
+            }
+            if let XDataValue::Integer16(code) = vals[i] {
+                match (code, &vals[i + 1]) {
+                    (91, XDataValue::Integer32(v)) => flags = *v,
+                    (46, XDataValue::Real(v)) => scale = *v,
+                    (64, XDataValue::Integer32(v)) => color = color_from_method(*v),
+                    (442, XDataValue::Integer32(v)) => transp = *v,
+                    _ => {}
+                }
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        if flags != 0 {
+            recovered.push((m.common.handle, flags, scale, color, transp));
+        }
+    }
+    for (h, flags, scale, color, transp) in recovered {
+        if let Some(EntityType::MText(m)) = document.get_entity_mut(h) {
+            m.background_fill_flags = flags;
+            m.background_scale = scale;
+            m.background_color = color;
+            m.background_transparency = transp;
+        }
     }
 }

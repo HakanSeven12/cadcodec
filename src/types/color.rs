@@ -16,6 +16,8 @@ pub enum Color {
     /// Color by layer (index 256)
     #[default]
     ByLayer,
+    /// No color (index 257 / CMC method 0xC8).
+    None,
     /// Color by block (index 0)
     ByBlock,
     /// AutoCAD Color Index (1-255)
@@ -30,6 +32,7 @@ impl Color {
         match index {
             0 => Color::ByBlock,
             256 => Color::ByLayer,
+            257 => Color::None,
             1..=255 => Color::Index(index as u8),
             _ if index < 0 => Color::Index((-index).min(255) as u8),  // Negative means layer is off
             _ => Color::Index(7), // Default to white
@@ -69,6 +72,7 @@ impl Color {
             Color::ByBlock => Some(0),
             Color::Index(i) => Some(*i as u16),
             Color::ByLayer => Some(256),
+            Color::None => Some(257),
             Color::Rgb { .. } => None,
         }
     }
@@ -119,6 +123,7 @@ impl Color {
         match self {
             Color::ByBlock => 0,
             Color::ByLayer => 256,
+            Color::None => 257,
             Color::Index(i) => *i as i16,
             Color::Rgb { r, g, b } => aci_table::nearest_aci(*r, *g, *b) as i16,
         }
@@ -129,6 +134,7 @@ impl fmt::Display for Color {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Color::ByLayer => write!(f, "ByLayer"),
+            Color::None => write!(f, "None"),
             Color::ByBlock => write!(f, "ByBlock"),
             Color::Index(i) => write!(f, "Index({})", i),
             Color::Rgb { r, g, b } => write!(f, "RGB({}, {}, {})", r, g, b),
@@ -211,5 +217,4 @@ mod tests {
         assert!(!Color::ByLayer.is_true_color());
     }
 }
-
 

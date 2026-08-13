@@ -57,7 +57,8 @@ fn xdata_value_type(gc: i16) -> XdVt {
         290..=299 => Int8, // bool, one byte
         300..=309 => Str,
         310..=319 => Binary,
-        320..=369 => Handle, // 320-329 handle, 330-369 objectid (8 bytes)
+        320..=329 => Handle,
+        330..=369 => Handle,
         370..=389 => Int16,
         390..=399 => Handle,
         400..=409 => Int16,
@@ -67,15 +68,27 @@ fn xdata_value_type(gc: i16) -> XdVt {
         440..=459 => Int32,
         460..=469 => Real,
         470..=479 => Str,
+        480..=481 => Handle,
         999 => Str,
         1004 => Binary,
-        1000..=1009 => Str,
+        1000..=1003 => Str,
+        1005 => Handle,
         1010..=1039 => Point3d,
         1040..=1042 => Real,
         1043..=1069 => Point3d,
         1070 => Int16,
         1071 => Int32,
         _ => Invalid,
+    }
+}
+
+fn xrecord_reference_type(kind: ProxyReferenceKind) -> DwgReferenceType {
+    match kind {
+        ProxyReferenceKind::Undefined => DwgReferenceType::Undefined,
+        ProxyReferenceKind::SoftOwnership => DwgReferenceType::SoftOwnership,
+        ProxyReferenceKind::HardOwnership => DwgReferenceType::HardOwnership,
+        ProxyReferenceKind::SoftPointer => DwgReferenceType::SoftPointer,
+        ProxyReferenceKind::HardPointer => DwgReferenceType::HardPointer,
     }
 }
 
@@ -86,9 +99,15 @@ fn xdata_value_type(gc: i16) -> XdVt {
 /// path; only the inline strings inside the xdata are version-specific. Without
 /// this a cross-version save would emit the source version's strings and the
 /// reader would mis-parse them ("Invalid xdata type"). Items are byte-aligned
-/// (every value is a byte multiple). Code-page strings are treated as Latin-1,
-/// which is exact for the ASCII keys/app names XRECORDs carry.
-fn transcode_xrecord_xdata(raw: &[u8], src_unicode: bool, tgt_unicode: bool) -> Vec<u8> {
+/// (every value is a byte multiple). Each legacy string's embedded code-page
+/// index is honored.
+fn transcode_xrecord_xdata(
+    raw: &[u8],
+    src_unicode: bool,
+    tgt_unicode: bool,
+    target_encoding: &'static encoding_rs::Encoding,
+    target_code_page: u8,
+) -> Vec<u8> {
     if src_unicode == tgt_unicode {
         return raw.to_vec();
     }
@@ -96,10 +115,19 @@ fn transcode_xrecord_xdata(raw: &[u8], src_unicode: bool, tgt_unicode: bool) -> 
     let mut out = Vec::with_capacity(raw.len() + raw.len() / 2);
     let mut p = 0usize;
     while p + 2 <= raw.len() {
+        let item_start = p;
+        let output_start = out.len();
+        macro_rules! preserve_tail {
+            () => {{
+                out.truncate(output_start);
+                out.extend_from_slice(&raw[item_start..]);
+                return out;
+            }};
+        }
         let gc = rd_u16(raw, p) as i16;
         let vt = xdata_value_type(gc);
         if vt == XdVt::Invalid {
-            break;
+            preserve_tail!();
         }
         out.extend_from_slice(&raw[p..p + 2]); // group code
         p += 2;
@@ -114,7 +142,7 @@ fn transcode_xrecord_xdata(raw: &[u8], src_unicode: bool, tgt_unicode: bool) -> 
         };
         if let Some(n) = fixed {
             if p + n > raw.len() {
-                break;
+                preserve_tail!();
             }
             out.extend_from_slice(&raw[p..p + n]);
             p += n;
@@ -122,11 +150,11 @@ fn transcode_xrecord_xdata(raw: &[u8], src_unicode: bool, tgt_unicode: bool) -> 
         }
         if vt == XdVt::Binary {
             if p >= raw.len() {
-                break;
+                preserve_tail!();
             }
             let size = raw[p] as usize;
             if p + 1 + size > raw.len() {
-                break;
+                preserve_tail!();
             }
             out.extend_from_slice(&raw[p..p + 1 + size]);
             p += 1 + size;
@@ -134,13 +162,13 @@ fn transcode_xrecord_xdata(raw: &[u8], src_unicode: bool, tgt_unicode: bool) -> 
         }
         // Str: decode source format, re-encode target format.
         if p + 2 > raw.len() {
-            break;
+            preserve_tail!();
         }
         let len = rd_u16(raw, p) as usize;
         p += 2;
         let text: String = if src_unicode {
             if p + len * 2 > raw.len() {
-                break;
+                preserve_tail!();
             }
             let units: Vec<u16> = (0..len).map(|i| rd_u16(raw, p + i * 2)).collect();
             p += len * 2;
@@ -148,27 +176,101 @@ fn transcode_xrecord_xdata(raw: &[u8], src_unicode: bool, tgt_unicode: bool) -> 
         } else {
             // [u8 codepage][len bytes]
             if p + 1 + len > raw.len() {
-                break;
+                preserve_tail!();
             }
-            p += 1; // codepage byte (treat bytes as Latin-1)
-            let s: String = raw[p..p + len].iter().map(|&b| b as char).collect();
+            let source_code_page = raw[p] as u16;
+            p += 1;
+            let s = crate::io::dxf::code_page::encoding_from_dwg_code_page(
+                source_code_page,
+            )
+            .decode(&raw[p..p + len])
+            .0
+            .into_owned();
             p += len;
             s
         };
         if tgt_unicode {
-            let utf16: Vec<u16> = text.encode_utf16().collect();
+            let utf16: Vec<u16> = text
+                .encode_utf16()
+                .take(u16::MAX as usize)
+                .collect();
             out.extend_from_slice(&(utf16.len() as u16).to_le_bytes());
             for u in utf16 {
                 out.extend_from_slice(&u.to_le_bytes());
             }
         } else {
-            let bytes: Vec<u8> = text.chars().map(|c| c as u8).collect();
+            let encoded = target_encoding.encode(&text).0;
+            let bytes = &encoded.as_ref()[..encoded.len().min(u16::MAX as usize)];
             out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
-            out.push(30); // ANSI_1252 code page
+            out.push(target_code_page);
             out.extend_from_slice(&bytes);
         }
     }
+    out.extend_from_slice(&raw[p..]);
     out
+}
+
+fn encode_xrecord_entries(
+    entries: &[XRecordEntry],
+    unicode: bool,
+    encoding: &'static encoding_rs::Encoding,
+    code_page: u8,
+) -> Vec<u8> {
+    let mut output = Vec::new();
+    for entry in entries {
+        output.extend_from_slice(&(entry.code as i16 as u16).to_le_bytes());
+        match &entry.value {
+            XRecordValue::String(value) => {
+                if unicode {
+                    let units: Vec<u16> = value.encode_utf16().collect();
+                    output.extend_from_slice(
+                        &(units.len().min(u16::MAX as usize) as u16).to_le_bytes(),
+                    );
+                    for unit in units.iter().take(u16::MAX as usize) {
+                        output.extend_from_slice(&unit.to_le_bytes());
+                    }
+                } else {
+                    let encoded = encoding.encode(value).0;
+                    let bytes = encoded.as_ref();
+                    output.extend_from_slice(
+                        &(bytes.len().min(u16::MAX as usize) as u16).to_le_bytes(),
+                    );
+                    output.push(code_page);
+                    output.extend_from_slice(
+                        &bytes[..bytes.len().min(u16::MAX as usize)],
+                    );
+                }
+            }
+            XRecordValue::Double(value) => {
+                output.extend_from_slice(&value.to_le_bytes());
+            }
+            XRecordValue::Int16(value) => {
+                output.extend_from_slice(&value.to_le_bytes());
+            }
+            XRecordValue::Int32(value) => {
+                output.extend_from_slice(&value.to_le_bytes());
+            }
+            XRecordValue::Int64(value) => {
+                output.extend_from_slice(&value.to_le_bytes());
+            }
+            XRecordValue::Byte(value) => output.push(*value),
+            XRecordValue::Bool(value) => output.push(*value as u8),
+            XRecordValue::Handle(value) => {
+                output.extend_from_slice(&value.value().to_le_bytes());
+            }
+            XRecordValue::Point3D(x, y, z) => {
+                output.extend_from_slice(&x.to_le_bytes());
+                output.extend_from_slice(&y.to_le_bytes());
+                output.extend_from_slice(&z.to_le_bytes());
+            }
+            XRecordValue::Chunk(value) => {
+                let length = value.len().min(u8::MAX as usize);
+                output.push(length as u8);
+                output.extend_from_slice(&value[..length]);
+            }
+        }
+    }
+    output
 }
 
 /// Flatten a [`Matrix4`](crate::types::Matrix4) into 12 doubles holding its 3×4
@@ -194,7 +296,31 @@ impl<'a> DwgObjectWriter<'a> {
         match obj {
             ObjectType::Dictionary(d) => self.write_dictionary(d),
             ObjectType::Layout(l) => self.write_layout(l),
-            ObjectType::XRecord(x) => self.write_xrecord(x),
+            ObjectType::XRecord(x) => {
+                if !x.entries_complete {
+                    if let Some(raw) = &x.raw_dwg_data {
+                        if self.raw_passthrough_compatible(x.raw_dwg_version) {
+                            for reference in &x.object_references {
+                                if self.document.objects.contains_key(&reference.handle) {
+                                    self.object_queue.push_back(reference.handle);
+                                }
+                            }
+                            if let Some(xdictionary) = x.xdictionary_handle {
+                                if self.document.objects.contains_key(&xdictionary) {
+                                    self.object_queue.push_back(xdictionary);
+                                }
+                            }
+                            self.register_raw_object(
+                                x.handle,
+                                raw,
+                                x.raw_dwg_handle_bits,
+                            );
+                            return;
+                        }
+                    }
+                }
+                self.write_xrecord(x)
+            }
             ObjectType::Group(g) => self.write_group(g),
             ObjectType::MLineStyle(m) => self.write_mlinestyle(m),
             ObjectType::MultiLeaderStyle(m) => self.write_multileader_style(m),
@@ -212,11 +338,27 @@ impl<'a> DwgObjectWriter<'a> {
             ObjectType::BookColor(b) => self.write_book_color(b),
             ObjectType::WipeoutVariables(w) => self.write_wipeout_variables(w),
             ObjectType::SpatialFilter(s) => self.write_spatial_filter(s),
-            // Stub / unsupported objects — skip
-            ObjectType::GeoData(_)
-            | ObjectType::VisualStyle(_)
-            | ObjectType::Material(_)
-            | ObjectType::TableStyle(_) => {}
+            ObjectType::GeoData(g) => self.write_geodata(g),
+            ObjectType::BlockVisibilityParameter(p) => {
+                self.write_block_visibility_parameter(p)
+            }
+            ObjectType::DynamicBlock(value) => self.write_dynamic_block(value),
+            ObjectType::Associative(value) => self.write_associative_object(value),
+            ObjectType::ClassObject(value) => self.write_class_object(value),
+            ObjectType::DataObject(value) => self.write_data_object(value),
+            ObjectType::Field(value) => self.write_field_object(value),
+            ObjectType::FieldList(value) => self.write_field_list(value),
+            ObjectType::RegisteredClass(value) => {
+                self.write_registered_class_object(value)
+            }
+            ObjectType::DgnLineStyle(value) => {
+                self.write_dgn_line_style_object(value)
+            }
+            ObjectType::ProxyObject(value) => self.write_proxy_object(value),
+            ObjectType::VisualStyle(v) => self.write_visual_style(v),
+            ObjectType::Material(m) => self.write_material(m),
+            ObjectType::TableContent(t) => self.write_table_content_object(t),
+            ObjectType::TableStyle(t) => self.write_table_style(t),
             ObjectType::Unknown { handle, raw_dwg_data, raw_dwg_handle_bits, raw_dwg_version, .. } => {
                 if let Some(ref raw) = raw_dwg_data {
                     if self.raw_passthrough_compatible(*raw_dwg_version) {
@@ -227,6 +369,883 @@ impl<'a> DwgObjectWriter<'a> {
         }
     }
 
+    fn write_registered_class_object(
+        &mut self,
+        value: &RegisteredClassObject,
+    ) {
+        if !value.properties.is_empty() {
+            let payload =
+                crate::objects::semantic_property::encode_registered_class_envelope(
+                    &value.dxf_name,
+                    &value.cpp_class_name,
+                    &value.properties,
+                    &value.payload,
+                );
+            self.write_common_non_entity_data(
+                common::OBJ_PROXY_OBJECT,
+                value.handle,
+                value.owner,
+                &value.reactors,
+                &value.xdictionary_handle,
+            );
+            self.writer.write_bit_long(499);
+            if self.dxf_version > crate::types::DxfVersion::AC1015 {
+                self.writer.write_variable_text(&value.dxf_name);
+            }
+            if self.version.r2018_plus(self.dxf_version) {
+                self.writer.write_bit_long(0);
+                self.writer.write_bit_long(0);
+            } else {
+                self.writer.write_bit_long(0);
+            }
+            if self.version.r2000_plus() {
+                self.writer.write_bit(true);
+            }
+            self.write_registered_payload(&payload, &value.object_ids);
+            self.register_object(value.handle);
+            return;
+        }
+        let type_code = self.class_type_code(&value.dxf_name, 0);
+        self.write_common_non_entity_data(
+            type_code,
+            value.handle,
+            value.owner,
+            &value.reactors,
+            &value.xdictionary_handle,
+        );
+        self.write_registered_payload(&value.payload, &value.object_ids);
+        self.register_object(value.handle);
+    }
+
+    fn write_dgn_line_style_object(&mut self, value: &DgnLineStyleObject) {
+        let type_code = self.class_type_code(value.dxf_name(), 0);
+        self.write_common_non_entity_data(
+            type_code,
+            value.handle,
+            value.owner,
+            &value.reactors,
+            &value.xdictionary_handle,
+        );
+        match &value.data {
+            DgnLineStyleData::Definition {
+                description,
+                version,
+                style_number,
+                component_uid,
+                is_continuous,
+                unit_definition,
+                unit_scale,
+                units_type,
+                is_element,
+                is_physical,
+                is_scale_independent,
+                is_snappable,
+                root_component,
+                ..
+            } => {
+                self.writer.write_variable_text(description);
+                self.writer.write_bit_long(*version);
+                self.writer.write_bit_long(*style_number);
+                self.writer.write_bytes(component_uid);
+                self.writer.write_bit(*is_continuous);
+                self.writer.write_bit_double(*unit_definition);
+                self.writer.write_bit_double(*unit_scale);
+                self.writer.write_bit_long(*units_type);
+                self.writer.write_bit(*is_element);
+                self.writer.write_bit(*is_physical);
+                self.writer.write_bit(*is_scale_independent);
+                self.writer.write_bit(*is_snappable);
+                self.writer.write_handle(
+                    DwgReferenceType::HardPointer,
+                    root_component.value(),
+                );
+            }
+            DgnLineStyleData::Component {
+                kind,
+                description,
+                version,
+                component_uid,
+                scale,
+                property_flags,
+                component,
+                ..
+            } => {
+                self.writer.write_variable_text(description);
+                self.writer.write_bit_long(*version);
+                self.writer.write_bit_long(kind.code());
+                self.writer.write_bytes(component_uid);
+                self.writer.write_bit_double(*scale);
+                self.writer.write_bytes(&[*property_flags]);
+                self.write_dgn_line_style_component(component);
+            }
+            DgnLineStyleData::Registered {
+                payload,
+                object_ids,
+                ..
+            } => self.write_registered_payload(payload, object_ids),
+        }
+        self.register_object(value.handle);
+    }
+
+    fn write_dgn_line_style_component(&mut self, component: &DgnLsComponentData) {
+        match component {
+            DgnLsComponentData::Symbol(value) => {
+                self.writer.write_bit_double(value.stored_unit_scale);
+                self.writer.write_bit_double(value.unit_scale);
+                self.writer.write_bit(value.has_unit_scale);
+                self.writer.write_bit(value.is_3d);
+                self.writer.write_handle(
+                    DwgReferenceType::HardPointer,
+                    value.block.value(),
+                );
+            }
+            DgnLsComponentData::Compound(value) => {
+                self.writer.write_bit_long(value.entries.len() as i32);
+                for entry in &value.entries {
+                    self.writer.write_bit_double(entry.offset);
+                }
+                for entry in &value.entries {
+                    self.writer.write_handle(
+                        DwgReferenceType::HardPointer,
+                        entry.component.value(),
+                    );
+                }
+            }
+            DgnLsComponentData::Stroke(value) => {
+                self.write_dgn_stroke_pattern(value);
+            }
+            DgnLsComponentData::Point(value) => {
+                self.writer.write_bit_long(value.symbols.len() as i32);
+                for symbol in &value.symbols {
+                    self.writer.write_bit(symbol.partial_strokes);
+                    self.writer.write_bit(symbol.clip_partial);
+                    self.writer.write_bit(symbol.allow_stretch);
+                    self.writer.write_bit(symbol.partial_projected);
+                    self.writer.write_bit(symbol.use_symbol_color);
+                    self.writer.write_bit(symbol.use_symbol_lineweight);
+                    self.writer.write_bit_long(symbol.justify);
+                    self.writer.write_bit_long(symbol.rotation_type);
+                    self.writer.write_bit_long(symbol.vertex_mask);
+                    self.writer.write_bit_double(symbol.x_offset);
+                    self.writer.write_bit_double(symbol.y_offset);
+                    self.writer.write_bit_double(symbol.angle);
+                    self.writer.write_bit_long(symbol.stroke_number);
+                }
+                self.writer.write_handle(
+                    DwgReferenceType::HardPointer,
+                    value.stroke_component.value(),
+                );
+                for symbol in &value.symbols {
+                    self.writer.write_handle(
+                        DwgReferenceType::HardPointer,
+                        symbol.symbol_component.value(),
+                    );
+                }
+            }
+            DgnLsComponentData::Internal(value) => {
+                self.write_dgn_stroke_pattern(&value.pattern);
+                self.writer.write_bit_long(value.internal_version);
+                self.writer.write_bit_long(value.hardware_style);
+                self.writer.write_bit(value.is_hardware_style);
+                self.writer.write_bit_long(value.line_code);
+            }
+        }
+    }
+
+    fn write_dgn_stroke_pattern(&mut self, pattern: &DgnLsStrokePattern) {
+        self.writer.write_bit(pattern.has_iteration_limit);
+        self.writer.write_bit(pattern.is_single_segment);
+        self.writer.write_bit_long(pattern.iteration_limit);
+        self.writer.write_bit_double(pattern.auto_phase);
+        self.writer.write_bit_double(pattern.phase);
+        let phase_mode = pattern.phase_mode.code();
+        self.writer.write_bit((phase_mode & 2) != 0);
+        self.writer.write_bit((phase_mode & 1) != 0);
+        self.writer.write_bit_long(pattern.strokes.len() as i32);
+        for stroke in &pattern.strokes {
+            self.writer.write_bit(stroke.is_dash);
+            self.writer.write_bit(stroke.bypass_corner);
+            self.writer.write_bit(stroke.can_be_scaled);
+            self.writer.write_bit(stroke.invert_at_origin);
+            self.writer.write_bit(stroke.invert_at_end);
+            self.writer.write_bit_double(stroke.length);
+            self.writer.write_bit_double(stroke.start_width);
+            self.writer.write_bit_double(stroke.end_width);
+            self.writer.write_bit_long(stroke.width_mode);
+            self.writer.write_bit_long(stroke.cap_mode);
+        }
+    }
+
+    pub(super) fn write_registered_payload(
+        &mut self,
+        payload: &crate::objects::ProxyPayload,
+        object_ids: &[crate::objects::ProxyObjectReference],
+    ) {
+        let data = payload.data();
+        for bit_index in 0..payload.bit_count as usize {
+            let byte = data.get(bit_index / 8).copied().unwrap_or(0);
+            self.writer
+                .write_bit((byte & (0x80 >> (bit_index % 8))) != 0);
+        }
+        for object_id in object_ids {
+            let reference_type = match object_id.kind {
+                crate::objects::ProxyReferenceKind::Undefined => {
+                    DwgReferenceType::Undefined
+                }
+                crate::objects::ProxyReferenceKind::SoftOwnership => {
+                    DwgReferenceType::SoftOwnership
+                }
+                crate::objects::ProxyReferenceKind::HardOwnership => {
+                    DwgReferenceType::HardOwnership
+                }
+                crate::objects::ProxyReferenceKind::SoftPointer => {
+                    DwgReferenceType::SoftPointer
+                }
+                crate::objects::ProxyReferenceKind::HardPointer => {
+                    DwgReferenceType::HardPointer
+                }
+            };
+            self.writer.write_handle(
+                reference_type,
+                object_id.handle.value(),
+            );
+        }
+    }
+
+    fn write_proxy_object(&mut self, value: &ProxyObject) {
+        self.write_common_non_entity_data(
+            common::OBJ_PROXY_OBJECT,
+            value.handle,
+            value.owner,
+            &value.reactors,
+            &value.xdictionary_handle,
+        );
+        self.writer.write_bit_long(value.class_id);
+        if self.dxf_version > crate::types::DxfVersion::AC1015 {
+            let dxf_subclass = if value.dxf_subclass.is_empty() {
+                self.document
+                    .classes
+                    .iter()
+                    .find(|class| {
+                        i32::from(class.class_number) == value.class_id
+                    })
+                    .map(|class| class.dxf_name.as_str())
+                    .unwrap_or("")
+            } else {
+                &value.dxf_subclass
+            };
+            self.writer.write_variable_text(dxf_subclass);
+        }
+        if self.version.r2018_plus(self.dxf_version) {
+            self.writer.write_bit_long(value.dwg_version);
+            self.writer.write_bit_long(value.maintenance_version);
+        } else {
+            self.writer.write_bit_long(
+                (value.maintenance_version << 16)
+                    | (value.dwg_version & 0xffff),
+            );
+        }
+        if self.version.r2000_plus() {
+            self.writer.write_bit(value.from_dxf);
+        }
+        let payload = value.payload.data();
+        for bit_index in 0..value.payload.bit_count as usize {
+            let byte = payload.get(bit_index / 8).copied().unwrap_or(0);
+            self.writer
+                .write_bit((byte & (0x80 >> (bit_index % 8))) != 0);
+        }
+        let text_payload = value.text_payload.data();
+        for bit_index in 0..value.text_payload.bit_count as usize {
+            let byte =
+                text_payload.get(bit_index / 8).copied().unwrap_or(0);
+            self.writer.write_text_bit(
+                (byte & (0x80 >> (bit_index % 8))) != 0,
+            );
+        }
+        for object_id in &value.object_ids {
+            let reference_type = match object_id.kind {
+                crate::objects::ProxyReferenceKind::Undefined => {
+                    DwgReferenceType::Undefined
+                }
+                crate::objects::ProxyReferenceKind::SoftOwnership => {
+                    DwgReferenceType::SoftOwnership
+                }
+                crate::objects::ProxyReferenceKind::HardOwnership => {
+                    DwgReferenceType::HardOwnership
+                }
+                crate::objects::ProxyReferenceKind::SoftPointer => {
+                    DwgReferenceType::SoftPointer
+                }
+                crate::objects::ProxyReferenceKind::HardPointer => {
+                    DwgReferenceType::HardPointer
+                }
+            };
+            self.writer.write_handle(
+                reference_type,
+                object_id.handle.value(),
+            );
+        }
+        self.register_object(value.handle);
+    }
+
+    fn write_block_visibility_parameter(
+        &mut self,
+        value: &BlockVisibilityParameter,
+    ) {
+        let type_code = self.class_type_code(
+            "BLOCKVISIBILITYPARAMETER",
+            common::OBJ_BLOCKVISIBILITYPARAMETER,
+        );
+        self.write_common_non_entity_data(
+            type_code,
+            value.handle,
+            value.owner,
+            &[],
+            &None,
+        );
+        self.writer.write_bit_long(value.eval_parent_id);
+        self.writer.write_bit_long(value.eval_major);
+        self.writer.write_bit_long(value.eval_minor);
+        self.writer.write_bit_short(value.eval_value_code);
+        match &value.eval_value {
+            BlockEvalValue::Real(v) => self.writer.write_bit_double(*v),
+            BlockEvalValue::Point(v) => self
+                .writer
+                .write_2raw_double(crate::types::Vector2::new(v[0], v[1])),
+            BlockEvalValue::Text(v) => self.writer.write_variable_text(v),
+            BlockEvalValue::Long(v) => self.writer.write_bit_long(*v),
+            BlockEvalValue::Handle(v) => self.writer.write_handle(
+                DwgReferenceType::HardPointer,
+                v.value(),
+            ),
+            BlockEvalValue::Short(v) => self.writer.write_bit_short(*v),
+            BlockEvalValue::None => {}
+        }
+        self.writer.write_bit_long(value.eval_node_id);
+        self.writer.write_variable_text(&value.element_name);
+        self.writer.write_bit_long(value.element_major);
+        self.writer.write_bit_long(value.element_minor);
+        self.writer.write_bit_long(value.element_eed_1071);
+        self.writer.write_bit(value.show_properties);
+        self.writer.write_bit(value.chain_actions);
+        self.writer.write_3bit_double(value.def_point);
+        for property in &value.property_info {
+            self.writer
+                .write_bit_long(property.connections.len() as i32);
+            for connection in &property.connections {
+                self.writer.write_bit_long(connection.code);
+                self.writer.write_variable_text(&connection.name);
+            }
+        }
+        self.writer.write_bit_long(value.property_info_count);
+        self.writer.write_bit(value.is_initialized);
+        self.writer.write_variable_text(&value.name);
+        self.writer.write_variable_text(&value.description);
+        self.writer.write_bit(value.unknown_bool);
+        self.writer.write_bit_long(value.all_blocks.len() as i32);
+        for handle in &value.all_blocks {
+            self.writer
+                .write_handle(DwgReferenceType::SoftPointer, handle.value());
+        }
+        self.writer.write_bit_long(value.states.len() as i32);
+        for state in &value.states {
+            self.writer.write_variable_text(&state.name);
+            self.writer
+                .write_bit_long(state.visible_blocks.len() as i32);
+            for handle in &state.visible_blocks {
+                self.writer
+                    .write_handle(DwgReferenceType::SoftPointer, handle.value());
+            }
+            self.writer
+                .write_bit_long(state.visible_params.len() as i32);
+            for handle in &state.visible_params {
+                self.writer
+                    .write_handle(DwgReferenceType::SoftPointer, handle.value());
+            }
+        }
+        self.register_object(value.handle);
+    }
+
+    fn write_visual_style(&mut self, value: &VisualStyle) {
+        let Some(type_code) = self
+            .document
+            .classes
+            .get_by_name("VISUALSTYLE")
+            .map(|class| class.class_number)
+        else {
+            return;
+        };
+        self.write_common_non_entity_data(
+            type_code,
+            value.handle,
+            value.owner,
+            &value.reactors,
+            &value.xdictionary_handle,
+        );
+        self.writer.write_variable_text(&value.description);
+        self.writer.write_bit_long(value.style_type as i32);
+
+        if !self.version.r2010_plus() {
+            self.writer.write_bit_long(value.face_lighting_model as i32);
+            self.writer.write_bit_long(value.face_lighting_quality as i32);
+            self.writer.write_bit_long(value.face_color_mode as i32);
+            let properties = value.legacy_properties();
+            self.writer.write_bit_double(
+                Self::visual_style_double(&properties[0]),
+            );
+            self.writer.write_bit_double(
+                Self::visual_style_double(&properties[1]),
+            );
+            self.writer.write_cm_color(
+                &Self::visual_style_color(&properties[2]),
+            );
+            self.writer.write_bit_long(value.face_modifier);
+            self.writer.write_bit_long(value.edge_model);
+            self.writer.write_bit_long(value.edge_style);
+            self.writer.write_cm_color(&Self::visual_style_color(&properties[3]));
+            self.writer.write_cm_color(&Self::visual_style_color(&properties[4]));
+            self.writer.write_bit_long(Self::visual_style_long(&properties[5]));
+            self.writer.write_bit_double(Self::visual_style_double(&properties[6]));
+            self.writer.write_bit_long(Self::visual_style_long(&properties[7]));
+            self.writer.write_cm_color(&Self::visual_style_color(&properties[8]));
+            self.writer.write_bit_double(Self::visual_style_double(&properties[9]));
+            self.writer.write_bit_short(Self::visual_style_long(&properties[10]) as i16);
+            self.writer.write_bit_short(Self::visual_style_long(&properties[11]) as i16);
+            self.writer.write_bit_long(Self::visual_style_long(&properties[12]));
+            self.writer.write_cm_color(&Self::visual_style_color(&properties[13]));
+            self.writer.write_bit_short(Self::visual_style_long(&properties[14]) as i16);
+            self.writer.write_byte(Self::visual_style_long(&properties[15]) as u8);
+            self.writer.write_bit_short(Self::visual_style_long(&properties[16]) as i16);
+            self.writer.write_bit(Self::visual_style_bool(&properties[17]));
+            self.writer.write_bit_short(Self::visual_style_long(&properties[18]) as i16);
+            self.writer.write_bit_short(Self::visual_style_long(&properties[19]) as i16);
+            self.writer.write_bit_long(Self::visual_style_long(&properties[20]));
+            self.writer.write_bit_long(Self::visual_style_long(&properties[21]));
+            self.writer.write_bit_long(Self::visual_style_long(&properties[22]));
+            self.writer.write_bit_double(Self::visual_style_double(&properties[23]));
+            self.writer.write_bit(value.internal_use_only);
+        } else {
+            self.writer
+                .write_bit_short(value.extended_lighting_model);
+            self.writer.write_bit(value.internal_use_only);
+            for property in value.core_properties() {
+                self.write_visual_style_property(&property);
+            }
+            if self.version.r2013_plus(self.dxf_version) {
+                for property in value.extended_properties() {
+                    self.write_visual_style_property(&property);
+                }
+            }
+        }
+
+        self.register_object(value.handle);
+    }
+
+    fn visual_style_long(property: &VisualStyleProperty) -> i32 {
+        match &property.value {
+            VisualStylePropertyValue::Short(value) => *value as i32,
+            VisualStylePropertyValue::Long(value) => *value,
+            VisualStylePropertyValue::Double(value) => *value as i32,
+            VisualStylePropertyValue::Bool(value) => *value as i32,
+            _ => 0,
+        }
+    }
+
+    fn visual_style_double(property: &VisualStyleProperty) -> f64 {
+        match &property.value {
+            VisualStylePropertyValue::Short(value) => *value as f64,
+            VisualStylePropertyValue::Long(value) => *value as f64,
+            VisualStylePropertyValue::Double(value) => *value,
+            VisualStylePropertyValue::Bool(value) => *value as u8 as f64,
+            _ => 0.0,
+        }
+    }
+
+    fn visual_style_bool(property: &VisualStyleProperty) -> bool {
+        match &property.value {
+            VisualStylePropertyValue::Short(value) => *value != 0,
+            VisualStylePropertyValue::Long(value) => *value != 0,
+            VisualStylePropertyValue::Double(value) => *value != 0.0,
+            VisualStylePropertyValue::Bool(value) => *value,
+            _ => false,
+        }
+    }
+
+    fn visual_style_color(property: &VisualStyleProperty) -> crate::types::Color {
+        match &property.value {
+            VisualStylePropertyValue::Color(value) => *value,
+            _ => crate::types::Color::ByLayer,
+        }
+    }
+
+    fn write_visual_style_value(&mut self, value: &VisualStylePropertyValue) {
+        match value {
+            VisualStylePropertyValue::Short(value) => {
+                self.writer.write_bit_short(*value);
+            }
+            VisualStylePropertyValue::Long(value) => {
+                self.writer.write_bit_long(*value);
+            }
+            VisualStylePropertyValue::Double(value) => {
+                self.writer.write_bit_double(*value);
+            }
+            VisualStylePropertyValue::Bool(value) => {
+                self.writer.write_bit(*value);
+            }
+            VisualStylePropertyValue::Color(value) => {
+                self.writer.write_cm_color(value);
+            }
+            VisualStylePropertyValue::Text(value) => {
+                self.writer.write_variable_text(value);
+            }
+        }
+    }
+
+    fn write_visual_style_property(&mut self, property: &VisualStyleProperty) {
+        self.write_visual_style_value(&property.value);
+        self.writer.write_bit_short(property.enabled);
+    }
+
+    fn write_material(&mut self, value: &Material) {
+        let Some(type_code) = self
+            .document
+            .classes
+            .get_by_name("MATERIAL")
+            .map(|class| class.class_number)
+        else {
+            return;
+        };
+        self.write_common_non_entity_data(
+            type_code,
+            value.handle,
+            value.owner,
+            &value.reactors,
+            &value.xdictionary_handle,
+        );
+        self.writer.write_variable_text(&value.name);
+        self.writer.write_variable_text(&value.description);
+        self.write_material_color(&value.ambient_color);
+        self.write_material_color(&value.diffuse_color);
+        self.write_material_map(&value.diffuse_map);
+        self.write_material_color(&value.specular_color);
+        self.write_material_map(&value.specular_map);
+        self.writer
+            .write_bit_double(value.specular_gloss_factor);
+        self.write_material_map(&value.reflection_map);
+        self.writer.write_bit_double(value.opacity_percent);
+        self.write_material_map(&value.opacity_map);
+        self.write_material_map(&value.bump_map);
+        self.writer.write_bit_double(value.refraction_index);
+        self.write_material_map(&value.refraction_map);
+        if self.version.r2007_plus() {
+            self.writer.write_bit_double(value.translucence);
+            self.writer.write_bit_double(value.self_illumination);
+            self.writer.write_bit_double(value.reflectivity);
+            self.writer.write_bit_long(value.illumination_model);
+            self.writer.write_bit_long(value.channel_flags);
+            self.writer.write_bit_long(value.mode);
+        }
+        self.register_object(value.handle);
+    }
+
+    fn write_material_color(&mut self, value: &MaterialColor) {
+        self.writer.write_byte(value.flag);
+        self.writer.write_bit_double(value.factor);
+        if value.flag == 1 {
+            self.writer.write_bit_long(value.rgb.unwrap_or_default());
+        }
+    }
+
+    fn write_material_texture(&mut self, value: &MaterialTexture, depth: usize) {
+        self.writer.write_bit_short(value.mode);
+        if value.mode == 0 || value.mode == 1 {
+            self.write_material_color(&value.color1);
+            self.write_material_color(&value.color2);
+        } else if value.mode == 2 {
+            match value.procedural.as_ref() {
+                Some(MaterialProceduralValue::Bool(item)) => {
+                    self.writer.write_bit_short(1);
+                    self.writer.write_bit(*item);
+                }
+                Some(MaterialProceduralValue::Integer(item)) => {
+                    self.writer.write_bit_short(2);
+                    self.writer.write_bit_short(*item);
+                }
+                Some(MaterialProceduralValue::Real(item)) => {
+                    self.writer.write_bit_short(3);
+                    self.writer.write_bit_double(*item);
+                }
+                Some(MaterialProceduralValue::Color(item)) => {
+                    self.writer.write_bit_short(4);
+                    self.writer.write_cm_color(item);
+                }
+                Some(MaterialProceduralValue::Text(item)) => {
+                    self.writer.write_bit_short(5);
+                    self.writer.write_variable_text(item);
+                }
+                Some(MaterialProceduralValue::Table(items)) if depth < 8 => {
+                    self.writer.write_bit_short(6);
+                    self.writer.write_bit_short(items.len().min(i16::MAX as usize) as i16);
+                    for (name, texture) in items.iter().take(i16::MAX as usize) {
+                        self.writer.write_variable_text(name);
+                        self.write_material_texture(texture, depth + 1);
+                    }
+                    self.writer.write_bit(value.table_end);
+                }
+                _ => {
+                    self.writer.write_bit_short(0);
+                }
+            }
+        }
+    }
+
+    fn write_material_map(&mut self, value: &MaterialMap) {
+        self.writer.write_bit_double(value.blend_factor);
+        self.writer.write_byte(value.projection);
+        self.writer.write_byte(value.tiling);
+        self.writer.write_byte(value.auto_transform);
+        for item in value.transform {
+            self.writer.write_bit_double(item);
+        }
+        self.writer.write_byte(value.source);
+        if value.source == 1 {
+            self.writer.write_variable_text(&value.file_name);
+        } else if value.source == 2 {
+            if let Some(texture) = &value.texture {
+                self.write_material_texture(texture, 0);
+            } else {
+                self.write_material_texture(&MaterialTexture::default(), 0);
+            }
+        }
+    }
+
+    fn write_table_content_object(
+        &mut self,
+        value: &crate::entities::Table,
+    ) {
+        let type_code =
+            self.class_type_code("TABLECONTENT", common::OBJ_TABLECONTENT);
+        self.write_common_non_entity_data(
+            type_code,
+            value.common.handle,
+            value.common.owner_handle,
+            &value.common.reactors,
+            &value.common.xdictionary_handle,
+        );
+        self.write_table_content(value);
+        self.register_object(value.common.handle);
+    }
+
+    fn write_table_style(&mut self, value: &TableStyle) {
+        let Some(type_code) = self
+            .document
+            .classes
+            .get_by_name("TABLESTYLE")
+            .map(|class| class.class_number)
+        else {
+            return;
+        };
+        self.write_common_non_entity_data(
+            type_code,
+            value.handle,
+            value.owner_handle,
+            &[],
+            &None,
+        );
+
+        if !self.version.r2010_plus() {
+            self.writer.write_variable_text(&value.name);
+            self.writer
+                .write_bit_short(value.flow_direction as i16);
+            self.writer.write_bit_short(value.flags.bits());
+            self.writer.write_bit_double(value.horizontal_margin);
+            self.writer.write_bit_double(value.vertical_margin);
+            self.writer.write_bit(value.title_suppressed);
+            self.writer.write_bit(value.header_suppressed);
+            self.write_legacy_table_row_style(&value.data_row_style);
+            self.write_legacy_table_row_style(&value.title_row_style);
+            self.write_legacy_table_row_style(&value.header_row_style);
+        } else {
+            self.writer.write_byte(value.modern_unknown_byte);
+            self.writer.write_variable_text(&value.name);
+            self.writer.write_bit_long(value.modern_unknown_long1);
+            self.writer.write_bit_long(value.modern_unknown_long2);
+            self.writer
+                .write_handle(
+                    DwgReferenceType::HardOwnership,
+                    value.modern_cell_style_handle.value(),
+                );
+            if let Some(style) = &value.modern_style {
+                self.write_named_table_cell_style(style);
+            } else {
+                self.write_default_modern_table_cell_style(value);
+            }
+            self.writer
+                .write_bit_long(value.modern_overrides.len().min(i32::MAX as usize) as i32);
+            for (key, style) in value.modern_overrides.iter().take(i32::MAX as usize) {
+                self.writer.write_bit_long(*key);
+                self.write_named_table_cell_style(style);
+            }
+        }
+
+        self.register_object(value.handle);
+    }
+
+    fn write_legacy_table_row_style(&mut self, value: &RowCellStyle) {
+        self.writer.write_handle(
+            DwgReferenceType::HardPointer,
+            value
+                .text_style_handle
+                .map(|handle| handle.value())
+                .unwrap_or(0),
+        );
+        self.writer.write_bit_double(value.text_height);
+        self.writer.write_bit_short(value.alignment as i16);
+        self.writer.write_cm_true_color(&value.text_color);
+        self.writer.write_cm_true_color(&value.fill_color);
+        self.writer.write_bit(value.fill_enabled);
+        for border in [
+            &value.top_border,
+            &value.horizontal_inside_border,
+            &value.bottom_border,
+            &value.left_border,
+            &value.vertical_inside_border,
+            &value.right_border,
+        ] {
+            self.writer.write_bit_short(border.line_weight.as_i16());
+            self.writer.write_bit(!border.is_invisible);
+            self.writer.write_cm_true_color(&border.color);
+        }
+        if self.version == crate::io::dwg::DwgVersion::AC21 {
+            self.writer.write_bit_long(value.data_type);
+            self.writer.write_bit_long(value.unit_type);
+            self.writer.write_variable_text(&value.format_string);
+        }
+    }
+
+    fn write_object_table_content_format(&mut self, value: &TableContentFormat) {
+        self.writer
+            .write_bit_long(value.property_override_flags);
+        self.writer.write_bit_long(value.property_flags);
+        self.writer.write_bit_long(value.value_data_type);
+        self.writer.write_bit_long(value.value_unit_type);
+        self.writer
+            .write_variable_text(&value.value_format_string);
+        self.writer.write_bit_double(value.rotation);
+        self.writer.write_bit_double(value.block_scale);
+        self.writer.write_bit_long(value.cell_alignment);
+        self.writer.write_cm_true_color(&value.content_color);
+        self.writer.write_handle(
+            DwgReferenceType::HardPointer,
+            value.text_style.value(),
+        );
+        self.writer.write_bit_double(value.text_height);
+    }
+
+    pub(super) fn write_table_cell_style_data(&mut self, value: &TableCellStyleData) {
+        self.writer.write_bit_long(value.style_type);
+        self.writer.write_bit_short(value.data_flags);
+        if value.data_flags == 0 {
+            return;
+        }
+        self.writer
+            .write_bit_long(value.property_override_flags);
+        self.writer.write_bit_long(value.merge_flags);
+        self.writer.write_cm_true_color(&value.background_color);
+        self.writer.write_bit_long(value.content_layout);
+        self.write_object_table_content_format(&value.content_format);
+        self.writer
+            .write_bit_short(value.margin_override_flags);
+        if value.margin_override_flags != 0 {
+            self.writer.write_bit_double(value.vertical_margin);
+            self.writer.write_bit_double(value.horizontal_margin);
+            self.writer.write_bit_double(value.bottom_margin);
+            self.writer.write_bit_double(value.right_margin);
+            self.writer.write_bit_double(value.horizontal_spacing);
+            self.writer.write_bit_double(value.vertical_spacing);
+        }
+        self.writer
+            .write_bit_long(value.borders.len().min(6) as i32);
+        for grid in value.borders.iter().take(6) {
+            self.writer.write_bit_long(grid.index_mask);
+            if grid.index_mask == 0 {
+                continue;
+            }
+            self.writer
+                .write_bit_long(grid.border.property_flags.bits());
+            self.writer
+                .write_bit_long(grid.border.border_type as i32);
+            self.writer.write_cm_true_color(&grid.border.color);
+            self.writer
+                .write_bit_long(grid.border.line_weight.as_i16() as i32);
+            self.writer.write_handle(
+                DwgReferenceType::HardPointer,
+                grid.line_type.value(),
+            );
+            self.writer
+                .write_bit_long((!grid.border.is_invisible) as i32);
+            self.writer
+                .write_bit_double(grid.border.double_line_spacing);
+        }
+    }
+
+    pub(super) fn write_named_table_cell_style(&mut self, value: &NamedTableCellStyle) {
+        self.write_table_cell_style_data(&value.cell_style);
+        self.writer.write_bit_long(value.id);
+        self.writer.write_bit_long(value.style_type);
+        self.writer.write_variable_text(&value.name);
+    }
+
+    fn write_default_modern_table_cell_style(&mut self, value: &TableStyle) {
+        let row = &value.data_row_style;
+        let cell_style = TableCellStyleData {
+            style_type: 5,
+            data_flags: 1,
+            background_color: row.fill_color,
+            content_layout: 1,
+            content_format: TableContentFormat {
+                value_data_type: row.data_type,
+                value_unit_type: row.unit_type,
+                value_format_string: row.format_string.clone(),
+                block_scale: 1.0,
+                cell_alignment: row.alignment as i32,
+                content_color: row.text_color,
+                text_style: row.text_style_handle.unwrap_or(Handle::NULL),
+                text_height: row.text_height,
+                ..TableContentFormat::default()
+            },
+            margin_override_flags: 1,
+            vertical_margin: value.vertical_margin,
+            horizontal_margin: value.horizontal_margin,
+            bottom_margin: value.vertical_margin,
+            right_margin: value.horizontal_margin,
+            horizontal_spacing: value.horizontal_margin * 3.0,
+            vertical_spacing: value.vertical_margin * 3.0,
+            borders: [
+            (1, &row.top_border),
+            (2, &row.right_border),
+            (4, &row.bottom_border),
+            (8, &row.left_border),
+            (16, &row.horizontal_inside_border),
+            (32, &row.vertical_inside_border),
+            ]
+            .into_iter()
+            .map(|(index_mask, border)| TableGridFormat {
+                index_mask,
+                border: border.clone(),
+                line_type: Handle::NULL,
+            })
+            .collect(),
+            ..TableCellStyleData::default()
+        };
+        self.write_named_table_cell_style(&NamedTableCellStyle {
+            cell_style,
+            id: 4,
+            style_type: 2,
+            name: "Table".to_string(),
+        });
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────
 
     /// Whether verbatim `raw_dwg_data` from `raw_dwg_version` can be re-emitted
@@ -234,32 +1253,40 @@ impl<'a> DwgObjectWriter<'a> {
     /// version's object-type encoding, stream layout and text encoding, which
     /// differ across the R2004/R2007 and R2007/R2010 boundaries and cannot be
     /// reframed without parsing the (unsupported) object — so passthrough is
-    /// only valid within the same encoding family. `None` (e.g. DXF) is treated
-    /// as compatible. Incompatible objects are dropped to keep the file valid.
+    /// only valid for the exact source version. Object schemas change inside
+    /// an encoding family too (notably R2013 common data and R2018 proxy
+    /// bodies), so carrying raw bytes across those boundaries corrupts the
+    /// following fields. `None` is treated as compatible.
     pub(super) fn raw_passthrough_compatible(&self, raw_dwg_version: Option<DxfVersion>) -> bool {
         match raw_dwg_version {
             None => true,
-            Some(src) => {
-                let tgt = self.dxf_version;
-                (src >= DxfVersion::AC1021) == (tgt >= DxfVersion::AC1021)
-                    && (src >= DxfVersion::AC1024) == (tgt >= DxfVersion::AC1024)
-            }
+            Some(src) => src == self.dxf_version,
         }
     }
 
     /// Returns `true` when the object at `handle` will actually be
-    /// serialized by `write_object`.  Entries pointing to un-writable
-    /// objects (VisualStyle, Material, TableStyle, etc.) must be
-    /// excluded from dictionary records so the DWG doesn't contain
+    /// serialized by `write_object`. Entries pointing to un-writable
+    /// objects must be excluded from dictionary records so the DWG doesn't contain
     /// dangling handle references.
     pub(super) fn is_writable_object(&self, handle: &Handle) -> bool {
         match self.document.objects.get(handle) {
             None => false,
             Some(obj) => match obj {
-                ObjectType::GeoData(_)
-                | ObjectType::VisualStyle(_)
-                | ObjectType::Material(_)
-                | ObjectType::TableStyle(_) => false,
+                ObjectType::VisualStyle(_) => {
+                    (self.version.r2007_plus()
+                        || (self.version.r13_14_only()
+                            && self.document.dwg_source_version == Some(self.dxf_version)))
+                        && self.document.classes.get_by_name("VISUALSTYLE").is_some()
+                }
+                ObjectType::Material(_) => {
+                    (self.version.r2007_plus()
+                        || (self.version.r13_14_only()
+                            && self.document.dwg_source_version == Some(self.dxf_version)))
+                        && self.document.classes.get_by_name("MATERIAL").is_some()
+                }
+                ObjectType::TableStyle(_) => {
+                    self.document.classes.get_by_name("TABLESTYLE").is_some()
+                }
                 ObjectType::Unknown { type_name, raw_dwg_data, raw_dwg_version, .. } => {
                     // Exclude types that would also be excluded if parsed into proper variants
                     if type_name.starts_with("DWG_OBJ_106") // TABLESTYLE
@@ -278,10 +1305,17 @@ impl<'a> DwgObjectWriter<'a> {
     // ── Dictionary ──────────────────────────────────────────────────
 
     fn write_dictionary(&mut self, dict: &Dictionary) {
-        // For pre-R2000, filter out R2000+-only dictionary entries
-        // (PLOTSTYLENAME, LAYOUT, PLOTSETTINGS, MATERIAL, COLOR, VISUALSTYLE)
-        let entries: Vec<&(String, Handle)> = if self.version.r2000_plus() {
-            dict.entries.iter()
+        // A pre-R2000 source can legitimately carry newer class-based objects
+        // and their NOD entries. Preserve them on a same-version round trip;
+        // only strip the newer roots during an actual down-conversion.
+        let preserve_source_schema =
+            self.version.r13_14_only()
+                && self.document.dwg_source_version == Some(self.dxf_version);
+        let entries: Vec<&(String, Handle)> = if self.version.r2000_plus()
+            || preserve_source_schema
+        {
+            dict.entries
+                .iter()
                 .filter(|(_, h)| !h.is_null() && self.is_writable_object(h))
                 .collect()
         } else {
@@ -339,23 +1373,8 @@ impl<'a> DwgObjectWriter<'a> {
     // ── Dictionary with default ─────────────────────────────────────
 
     fn write_dictionary_with_default(&mut self, dict: &DictionaryWithDefault) {
-        // Pre-R2000: ACDBDICTIONARYWDFLT class doesn't exist, so fall back
-        // to writing as a regular Dictionary (skip the default_handle field).
-        if !self.version.r2000_plus() {
-            let plain = Dictionary {
-                handle: dict.handle,
-                owner: dict.owner,
-                hard_owner: dict.hard_owner,
-                duplicate_cloning: dict.duplicate_cloning,
-                entries: dict.entries.clone(),
-                reactors: vec![],
-                xdictionary_handle: None,
-            };
-            self.write_dictionary(&plain);
-            return;
-        }
-
-        // UNLISTED type — always use DXF class number (500+)
+        // UNLISTED type — always use its class number when the source class
+        // exists.
         let type_code = self.class_type_code("ACDBDICTIONARYWDFLT", common::OBJ_DICTIONARYWDFLT);
 
         self.write_common_non_entity_data(
@@ -374,7 +1393,7 @@ impl<'a> DwgObjectWriter<'a> {
         // Same as dictionary
         self.writer.write_bit_long(entries.len() as i32);
 
-        // R2000+: Cloning flag (BS) + Hard-owner flag (RC)
+        // Unlike a plain DICTIONARY, these fields are present in R13/R14 too.
         self.writer.write_bit_short(dict.duplicate_cloning as i16);
         self.writer.write_byte(if dict.hard_owner { 1 } else { 0 });
 
@@ -445,7 +1464,10 @@ impl<'a> DwgObjectWriter<'a> {
 
         // ── PlotSettings preamble ──
         // ModelType flag (bit 0x400) must be set for model space layouts
-        let plot_flags: i16 = if layout.name == "Model" { 0x400 } else { 0 };
+        let mut plot_flags = layout.plot_flags.to_bits();
+        if layout.name == "Model" {
+            plot_flags |= 0x400;
+        }
         self.write_plot_settings_data(plot_flags, layout);
 
         // ── Layout-specific data ──
@@ -457,8 +1479,11 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_short(layout.flags);
 
         // UCS origin (3BD 13) — layout UCS origin
-        self.writer
-            .write_3bit_double(crate::types::Vector3::ZERO);
+        self.writer.write_3bit_double(crate::types::Vector3::new(
+            layout.ucs_origin.0,
+            layout.ucs_origin.1,
+            layout.ucs_origin.2,
+        ));
 
         // Min limits (2RD 10)
         self.writer.write_raw_double(layout.min_limits.0);
@@ -476,17 +1501,23 @@ impl<'a> DwgObjectWriter<'a> {
             ));
 
         // X axis direction (3BD)
-        self.writer
-            .write_3bit_double(crate::types::Vector3::UNIT_X);
+        self.writer.write_3bit_double(crate::types::Vector3::new(
+            layout.ucs_x_axis.0,
+            layout.ucs_x_axis.1,
+            layout.ucs_x_axis.2,
+        ));
         // Y axis direction (3BD)
-        self.writer
-            .write_3bit_double(crate::types::Vector3::UNIT_Y);
+        self.writer.write_3bit_double(crate::types::Vector3::new(
+            layout.ucs_y_axis.0,
+            layout.ucs_y_axis.1,
+            layout.ucs_y_axis.2,
+        ));
 
         // Elevation (BD)
-        self.writer.write_bit_double(0.0);
+        self.writer.write_bit_double(layout.elevation);
 
         // UCS orthographic type (BS)
-        self.writer.write_bit_short(0);
+        self.writer.write_bit_short(layout.ucs_ortho_type);
 
         // Min extents (3BD)
         self.writer
@@ -505,7 +1536,8 @@ impl<'a> DwgObjectWriter<'a> {
 
         // R2004+: Viewport count (BL)
         if self.version.r2004_plus() {
-            self.writer.write_bit_long(0); // no viewports
+            self.writer
+                .write_bit_long(layout.viewports.len() as i32);
         }
 
         // ── Handle references ──
@@ -517,16 +1549,27 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer
             .write_handle(DwgReferenceType::SoftPointer, layout.viewport.value());
 
-        // UCS handles — ortho type is 0 (None), so:
-        // 346 base UCS handle (hard pointer) — null
+        // 346 base UCS handle (hard pointer)
         self.writer
-            .write_handle(DwgReferenceType::HardPointer, 0);
-        // 345 named UCS handle (hard pointer) — null
+            .write_handle(
+                DwgReferenceType::HardPointer,
+                layout.base_ucs.value(),
+            );
+        // 345 named UCS handle (hard pointer)
         self.writer
-            .write_handle(DwgReferenceType::HardPointer, 0);
+            .write_handle(
+                DwgReferenceType::HardPointer,
+                layout.named_ucs.value(),
+            );
 
-        // R2004+: Viewport handles (repeated count times — 0 for us)
-        // (nothing to write since viewport count is 0)
+        if self.version.r2004_plus() {
+            for viewport in &layout.viewports {
+                self.writer.write_handle(
+                    DwgReferenceType::SoftPointer,
+                    viewport.value(),
+                );
+            }
+        }
 
         self.register_object(layout.handle);
     }
@@ -534,22 +1577,14 @@ impl<'a> DwgObjectWriter<'a> {
     /// Write the PlotSettings portion of a Layout record.
     ///
     /// Field order must match C# DwgObjectWriter.Objects.cs writePlotSettings()
-    /// exactly. Uses simplified/default values.
-    fn write_plot_settings_data(&mut self, plot_flags: i16, layout: &crate::objects::Layout) {
-        // Fall back to A4 landscape when the layout carries no paper size
-        // (e.g. freshly created layouts that never read a PlotSettings block).
-        let (paper_width, paper_height) =
-            if layout.paper_width > 0.0 && layout.paper_height > 0.0 {
-                (layout.paper_width, layout.paper_height)
-            } else {
-                (297.0, 210.0)
-            };
+    /// exactly.
+    fn write_plot_settings_data(&mut self, plot_flags: i32, layout: &crate::objects::Layout) {
         // Page setup name (TV 1)
         self.writer.write_variable_text(&layout.plot_page_name);
         // Printer / Config (TV 2)
         self.writer.write_variable_text(&layout.plot_printer_name);
         // Plot layout flags (BS 70)
-        self.writer.write_bit_short(plot_flags);
+        self.writer.write_bit_short(plot_flags as i16);
 
         // Margins (BD: left, bottom, right, top)
         self.writer.write_bit_double(layout.plot_margin_left);
@@ -558,8 +1593,8 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_double(layout.plot_margin_top);
 
         // Paper width (BD 44), height (BD 45)
-        self.writer.write_bit_double(paper_width);
-        self.writer.write_bit_double(paper_height);
+        self.writer.write_bit_double(layout.paper_width);
+        self.writer.write_bit_double(layout.paper_height);
 
         // Paper size (TV 4)
         self.writer.write_variable_text(&layout.paper_size);
@@ -585,11 +1620,11 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // Real world units / numerator (BD 142)
-        let num = if layout.plot_scale_numerator != 0.0 { layout.plot_scale_numerator } else { 1.0 };
-        let den = if layout.plot_scale_denominator != 0.0 { layout.plot_scale_denominator } else { 1.0 };
-        self.writer.write_bit_double(num);
+        self.writer
+            .write_bit_double(layout.plot_scale_numerator);
         // Drawing units / denominator (BD 143)
-        self.writer.write_bit_double(den);
+        self.writer
+            .write_bit_double(layout.plot_scale_denominator);
 
         // Current style sheet (TV 7)
         self.writer.write_variable_text(&layout.plot_style_sheet);
@@ -598,8 +1633,7 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_short(layout.plot_scale_type);
 
         // Scale factor (BD 147) — standard scale value
-        let factor = if layout.plot_scale_factor != 0.0 { layout.plot_scale_factor } else { 1.0 };
-        self.writer.write_bit_double(factor);
+        self.writer.write_bit_double(layout.plot_scale_factor);
 
         // Paper image origin (2BD 148,149)
         self.writer.write_bit_double(layout.paper_image_origin_x);
@@ -609,18 +1643,30 @@ impl<'a> DwgObjectWriter<'a> {
         if self.version.r2004_plus() {
             self.writer.write_bit_short(layout.shade_plot_mode);
             self.writer.write_bit_short(layout.shade_plot_resolution);
-            let dpi = if layout.shade_plot_dpi != 0 { layout.shade_plot_dpi } else { 300 };
-            self.writer.write_bit_short(dpi);
+            self.writer.write_bit_short(layout.shade_plot_dpi);
 
-            // Plot view handle (hard pointer)
-            self.writer
-                .write_handle(DwgReferenceType::HardPointer, 0);
+            // Plot view handle (soft pointer)
+            let plot_view_handle = if !layout.plot_view_handle.is_null() {
+                layout.plot_view_handle
+            } else {
+                self.document
+                    .views
+                    .get(&layout.plot_view_name)
+                    .map(|view| view.handle)
+                    .unwrap_or(Handle::NULL)
+            };
+            self.writer.write_handle(
+                DwgReferenceType::SoftPointer,
+                plot_view_handle.value(),
+            );
         }
 
         // R2007+: visual style handle
         if self.version.r2007_plus() {
-            self.writer
-                .write_handle(DwgReferenceType::SoftPointer, 0);
+            self.writer.write_handle(
+                DwgReferenceType::SoftPointer,
+                layout.visual_style_handle.value(),
+            );
         }
     }
 
@@ -633,8 +1679,8 @@ impl<'a> DwgObjectWriter<'a> {
             type_code,
             ps.handle,
             ps.owner,
-            &[],
-            &None,
+            &ps.reactors,
+            &ps.xdictionary_handle,
         );
 
         // Field order must match C# writePlotSettings() exactly
@@ -643,7 +1689,7 @@ impl<'a> DwgObjectWriter<'a> {
         // Printer / Config (TV 2)
         self.writer.write_variable_text(&ps.printer_name);
         // Plot layout flags (BS 70)
-        self.writer.write_bit_short(0);
+        self.writer.write_bit_short(ps.flags.to_bits() as i16);
 
         // Margins (BD: left, bottom, right, top)
         self.writer.write_bit_double(ps.margins.left);
@@ -690,11 +1736,11 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_short(ps.scale_type as i16);
 
         // Scale factor (BD 147)
-        self.writer.write_bit_double(1.0);
+        self.writer.write_bit_double(ps.standard_scale_factor);
 
         // Paper image origin (2BD 148,149)
-        self.writer.write_bit_double(0.0);
-        self.writer.write_bit_double(0.0);
+        self.writer.write_bit_double(ps.paper_image_origin_x);
+        self.writer.write_bit_double(ps.paper_image_origin_y);
 
         // R2004+: shade plot fields
         if self.version.r2004_plus() {
@@ -703,15 +1749,28 @@ impl<'a> DwgObjectWriter<'a> {
                 .write_bit_short(ps.shade_plot_resolution as i16);
             self.writer.write_bit_short(ps.shade_plot_dpi);
 
-            // Plot view handle (hard pointer)
-            self.writer
-                .write_handle(DwgReferenceType::HardPointer, 0);
+            // Plot view handle (soft pointer)
+            let plot_view_handle = if !ps.plot_view_handle.is_null() {
+                ps.plot_view_handle
+            } else {
+                self.document
+                    .views
+                    .get(&ps.plot_view_name)
+                    .map(|view| view.handle)
+                    .unwrap_or(Handle::NULL)
+            };
+            self.writer.write_handle(
+                DwgReferenceType::SoftPointer,
+                plot_view_handle.value(),
+            );
         }
 
         // R2007+: visual style handle
         if self.version.r2007_plus() {
-            self.writer
-                .write_handle(DwgReferenceType::SoftPointer, 0);
+            self.writer.write_handle(
+                DwgReferenceType::SoftPointer,
+                ps.visual_style_handle.value(),
+            );
         }
 
         self.register_object(ps.handle);
@@ -729,7 +1788,7 @@ impl<'a> DwgObjectWriter<'a> {
         );
 
         self.writer.write_variable_text(&group.description);
-        self.writer.write_bit_short(1); // unnamed flag (0=named)
+        self.writer.write_bit_short(if group.unnamed { 1 } else { 0 });
         self.writer
             .write_bit_short(if group.selectable { 1 } else { 0 });
 
@@ -798,8 +1857,25 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer
                     .write_handle(DwgReferenceType::HardPointer, lt_handle.value());
             } else {
-                // Before R2018: Ltindex BS (linetype index, 0 = BYLAYER)
-                self.writer.write_bit_short(0);
+                // Before R2018: bit_short index into the linetypes in table
+                // order, EXCLUDING ByBlock/ByLayer; 0x7FFF means ByLayer.
+                let idx: i16 = if elem.linetype.is_empty()
+                    || elem.linetype.eq_ignore_ascii_case("ByLayer")
+                {
+                    0x7FFF
+                } else {
+                    self.document
+                        .line_types
+                        .iter()
+                        .filter(|lt| {
+                            !lt.name.eq_ignore_ascii_case("ByBlock")
+                                && !lt.name.eq_ignore_ascii_case("ByLayer")
+                        })
+                        .position(|lt| lt.name.eq_ignore_ascii_case(&elem.linetype))
+                        .map(|p| p as i16)
+                        .unwrap_or(0x7FFF)
+                };
+                self.writer.write_bit_short(idx);
             }
         }
 
@@ -1037,24 +2113,10 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// Write an `AcDb*ObjectContextData` leaf.
     ///
-    /// An object read from a file carries its verbatim record in `source_raw`
-    /// and is re-emitted byte-for-byte (identical to the previous `Unknown`
-    /// passthrough) when the target uses the same encoding family; on an
-    /// incompatible cross-version save it is dropped, exactly as `Unknown` was.
-    /// A synthesized object (`source_raw == None`) is encoded from its fields:
-    /// the shared `AcDbObjectContextData` base (class_version, is_default), the
-    /// per-type placement payload in the DATA stream, and the
-    /// `AcDbAnnotScaleObjectContextData` scale handle in the object HANDLE
-    /// stream (the data and handle streams are written independently, so the
-    /// scale is the first object-specific handle regardless of interleave).
+    /// The shared `AcDbObjectContextData` base and the type-specific placement
+    /// payload are always encoded from the semantic model, including objects
+    /// read from an existing file.
     fn write_object_context_data(&mut self, obj: &ObjectContextData) {
-        if let Some(ref raw) = obj.source_raw {
-            if self.raw_passthrough_compatible(obj.source_version) {
-                self.register_raw_object(obj.handle, raw, obj.source_handle_bits);
-            }
-            return;
-        }
-
         // UNLISTED type — resolve the 500+ class number (registered in the
         // default class set, so this always resolves for a synthesized object).
         let type_code = self.class_type_code(obj.class_name(), 0);
@@ -1070,8 +2132,16 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_short(obj.class_version);
         self.writer.write_bit(obj.is_default);
 
+        // AcDbAnnotScaleObjectContextData: first object-specific handle.
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, obj.scale.value());
+
         // AcDb<Type>ObjectContextData placement payload (DATA stream).
         match &obj.kind {
+            ObjectContextKind::AnnotScale => {}
+            ObjectContextKind::MLeader(context) => {
+                self.write_multileader_annotation_context(context, false);
+            }
             ObjectContextKind::BlkRef { rotation, insertion, scale_factor } => {
                 self.writer.write_bit_double(*rotation);
                 self.writer.write_bit_double(insertion.x);
@@ -1158,21 +2228,175 @@ impl<'a> DwgObjectWriter<'a> {
                     }
                 }
             }
+            ObjectContextKind::MTextAttribute(value) => {
+                self.writer.write_bit_short(value.horizontal_mode);
+                self.writer.write_bit_double(value.rotation);
+                self.writer.write_raw_double(value.insertion.x);
+                self.writer.write_raw_double(value.insertion.y);
+                let has_context =
+                    value.enable_context && value.context.is_some();
+                self.writer.write_raw_double(value.alignment.x);
+                self.writer.write_raw_double(value.alignment.y);
+                self.writer.write_bit(has_context);
+                if let Some(context) = value.context.as_ref().filter(
+                    |_| has_context,
+                ) {
+                    // Embedded non-entity common tail. Type, handle and EED
+                    // are omitted because this object lives inline.
+                    self.writer
+                        .write_bit_long(context.reactors.len() as i32);
+                    self.writer
+                        .write_bit(context.xdictionary_handle.is_none());
+                    if self.version.r2013_plus(self.dxf_version) {
+                        self.writer.write_bit(context.has_binary_data);
+                    }
+                    self.writer
+                        .write_bit_short(context.class_version);
+                    self.writer.write_bit(context.is_default);
+                    self.writer.write_bit_long(context.mtext.attachment);
+                    self.writer
+                        .write_bit_double(context.mtext.x_axis_dir.x);
+                    self.writer
+                        .write_bit_double(context.mtext.x_axis_dir.y);
+                    self.writer
+                        .write_bit_double(context.mtext.x_axis_dir.z);
+                    self.writer
+                        .write_bit_double(context.mtext.insertion.x);
+                    self.writer
+                        .write_bit_double(context.mtext.insertion.y);
+                    self.writer
+                        .write_bit_double(context.mtext.insertion.z);
+                    self.writer.write_bit_double(context.mtext.rect_width);
+                    self.writer.write_bit_double(context.mtext.rect_height);
+                    self.writer
+                        .write_bit_double(context.mtext.extents_width);
+                    self.writer
+                        .write_bit_double(context.mtext.extents_height);
+                    self.writer.write_bit_long(context.mtext.column_type);
+                    if context.mtext.column_type != 0 {
+                        if let Some(columns) = &context.mtext.columns {
+                            self.writer
+                                .write_bit_long(columns.num_heights);
+                            self.writer.write_bit_double(columns.width);
+                            self.writer.write_bit_double(columns.gutter);
+                            self.writer.write_bit(columns.auto_height);
+                            self.writer.write_bit(columns.flow_reversed);
+                            if !columns.auto_height
+                                && context.mtext.column_type == 2
+                            {
+                                for height in &columns.heights {
+                                    self.writer.write_bit_double(*height);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ObjectContextKind::Leader(value) => {
+                self.writer.write_bit_long(value.points.len() as i32);
+                for point in &value.points {
+                    self.writer.write_3bit_double(*point);
+                }
+                self.writer.write_3bit_double(value.x_direction);
+                self.writer.write_bit(value.annotation_enabled);
+                self.writer.write_3bit_double(value.insertion_offset);
+                self.writer
+                    .write_3bit_double(value.endpoint_projection);
+            }
+            ObjectContextKind::Fcf {
+                location,
+                horizontal_direction,
+            } => {
+                self.writer.write_bit_double(location.x);
+                self.writer.write_bit_double(location.y);
+                self.writer.write_bit_double(location.z);
+                self.writer.write_bit_double(horizontal_direction.x);
+                self.writer.write_bit_double(horizontal_direction.y);
+                self.writer.write_bit_double(horizontal_direction.z);
+            }
+            ObjectContextKind::HatchScale(value) => {
+                self.write_hatch_scale_context_data(value);
+            }
+            ObjectContextKind::HatchView(value) => {
+                self.write_hatch_scale_context_data(&value.hatch);
+                self.writer.write_bit_double(value.view_normal.x);
+                self.writer.write_bit_double(value.view_normal.y);
+                self.writer.write_bit_double(value.view_normal.z);
+                self.writer.write_bit_double(value.view_rotation);
+                self.writer.write_bit(value.evaluate_hatch);
+            }
             ObjectContextKind::Opaque => {}
         }
 
-        // AcDbAnnotScaleObjectContextData: the scale handle rides the object
-        // handle stream (LibreDWG ref-code 2 = soft owner).
-        self.writer
-            .write_handle(DwgReferenceType::SoftOwnership, obj.scale.value());
         // Dimension context also carries a hard-pointer to its block (code 5),
         // emitted after the scale in the handle stream.
         if let ObjectContextKind::Dim(d) = &obj.kind {
             self.writer
                 .write_handle(DwgReferenceType::HardPointer, d.block.value());
         }
+        if let ObjectContextKind::HatchView(value) = &obj.kind {
+            self.writer
+                .write_handle(DwgReferenceType::SoftOwnership, value.view.value());
+        }
+        if let ObjectContextKind::MTextAttribute(value) = &obj.kind {
+            if value.enable_context {
+                if let Some(context) = &value.context {
+                    self.writer.write_handle(
+                        DwgReferenceType::SoftPointer,
+                        context.owner_handle.value(),
+                    );
+                    for reactor in &context.reactors {
+                        self.writer.write_handle(
+                            DwgReferenceType::SoftPointer,
+                            reactor.value(),
+                        );
+                    }
+                    if let Some(xdictionary_handle) =
+                        context.xdictionary_handle
+                    {
+                        self.writer.write_handle(
+                            DwgReferenceType::HardOwnership,
+                            xdictionary_handle.value(),
+                        );
+                    }
+                    self.writer.write_handle(
+                        DwgReferenceType::HardPointer,
+                        context.scale.value(),
+                    );
+                }
+            }
+        }
 
         self.register_object(obj.handle);
+    }
+
+    fn write_hatch_scale_context_data(
+        &mut self,
+        value: &crate::objects::HatchScaleContext,
+    ) {
+        self.writer
+            .write_bit_short(value.pattern_lines.len() as i16);
+        for line in &value.pattern_lines {
+            self.writer.write_bit_double(line.angle);
+            self.writer.write_bit_double(line.base_point.x);
+            self.writer.write_bit_double(line.base_point.y);
+            self.writer.write_bit_double(line.offset.x);
+            self.writer.write_bit_double(line.offset.y);
+            self.writer
+                .write_bit_short(line.dash_lengths.len() as i16);
+            for dash in &line.dash_lengths {
+                self.writer.write_bit_double(*dash);
+            }
+        }
+        self.writer.write_bit_double(value.pattern_scale);
+        self.writer.write_bit_double(value.pattern_base.x);
+        self.writer.write_bit_double(value.pattern_base.y);
+        self.writer.write_bit_double(value.pattern_base.z);
+        self.writer.write_bit_long(value.loop_types.len() as i32);
+        for loop_type in &value.loop_types {
+            self.writer.write_bit_long(*loop_type);
+        }
+        self.writer.write_bit(value.supports_context);
     }
 
     // ── Sort Entities Table ─────────────────────────────────────────
@@ -1220,25 +2444,136 @@ impl<'a> DwgObjectWriter<'a> {
     // ── XRecord ─────────────────────────────────────────────────────
 
     fn write_xrecord(&mut self, xrec: &XRecord) {
+        let type_code = if self.dxf_version <= DxfVersion::AC1014 {
+            self.class_type_code("XRECORD", common::OBJ_XRECORD)
+        } else {
+            common::OBJ_XRECORD
+        };
         self.write_common_non_entity_data(
-            common::OBJ_XRECORD,
+            type_code,
             xrec.handle,
             xrec.owner,
-            &[],
-            &None,
+            &xrec.reactors,
+            &xrec.xdictionary_handle,
         );
+
+        let advanced_material_entries = match self.document.objects.get(&xrec.owner) {
+            Some(ObjectType::Dictionary(dictionary))
+                if dictionary.entries.iter().any(|(name, handle)| {
+                    name.eq_ignore_ascii_case("ADVMATERIAL")
+                        && *handle == xrec.handle
+                }) =>
+            {
+                self.document.objects.values().find_map(|object| match object {
+                    ObjectType::Material(material)
+                        if material.xdictionary_handle == Some(xrec.owner)
+                            && material.has_advanced_data() =>
+                    {
+                        let values = vec![
+                            XRecordEntry::double(
+                                460,
+                                material.color_bleed_scale * 100.0,
+                            ),
+                            XRecordEntry::double(
+                                461,
+                                material.indirect_bump_scale * 100.0,
+                            ),
+                            XRecordEntry::double(
+                                462,
+                                material.reflectance_scale * 100.0,
+                            ),
+                            XRecordEntry::double(
+                                463,
+                                material.transmittance_scale * 100.0,
+                            ),
+                            XRecordEntry::bool(
+                                290,
+                                material.two_sided_material,
+                            ),
+                            XRecordEntry::int16(
+                                270,
+                                material.luminance_mode,
+                            ),
+                            XRecordEntry::double(464, material.luminance),
+                            XRecordEntry::bool(293, material.is_anonymous),
+                            XRecordEntry::int16(
+                                272,
+                                material.global_illumination,
+                            ),
+                            XRecordEntry::int16(
+                                273,
+                                material.final_gather,
+                            ),
+                        ];
+                        let mut merged = xrec.entries.clone();
+                        for value in values {
+                            if let Some(existing) = merged
+                                .iter_mut()
+                                .find(|entry| entry.code == value.code)
+                            {
+                                existing.value = value.value;
+                            } else {
+                                merged.push(value);
+                            }
+                        }
+                        Some(merged)
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+        let xrecord_entries = advanced_material_entries
+            .as_deref()
+            .unwrap_or(&xrec.entries);
+        let encoding =
+            crate::io::dxf::code_page::encoding_from_code_page(
+                &self.document.header.code_page,
+            )
+            .unwrap_or(encoding_rs::WINDOWS_1252);
+        let code_page = crate::io::dxf::code_page::dwg_code_page_index(
+            &self.document.header.code_page,
+        )
+        .min(u8::MAX as u16) as u8;
 
         // Write xdata bytes first (per spec: data before cloning flags). The
         // blob is captured verbatim from the source version; when saving to a
         // different string-encoding family (code page <-> UTF-16) re-encode the
         // inline strings so the xdata stays valid instead of being dropped.
-        let xdata = if xrec.raw_data.is_empty() {
+        let xdata = if !xrec.entries_complete && !xrec.raw_data.is_empty() {
+            let tgt_unicode = self.dxf_version >= DxfVersion::AC1021;
+            match self.document.dwg_source_version {
+                Some(src) if (src >= DxfVersion::AC1021) != tgt_unicode => {
+                    transcode_xrecord_xdata(
+                        &xrec.raw_data,
+                        src >= DxfVersion::AC1021,
+                        tgt_unicode,
+                        encoding,
+                        code_page,
+                    )
+                }
+                _ => xrec.raw_data.clone(),
+            }
+        } else if !xrecord_entries.is_empty() {
+            encode_xrecord_entries(
+                xrecord_entries,
+                self.dxf_version >= DxfVersion::AC1021,
+                encoding,
+                code_page,
+            )
+        } else if xrec.raw_data.is_empty() {
             Vec::new()
         } else {
             let tgt_unicode = self.dxf_version >= DxfVersion::AC1021;
             match self.document.dwg_source_version {
                 Some(src) if (src >= DxfVersion::AC1021) != tgt_unicode => {
-                    transcode_xrecord_xdata(&xrec.raw_data, src >= DxfVersion::AC1021, tgt_unicode)
+                    transcode_xrecord_xdata(
+                        &xrec.raw_data,
+                        src >= DxfVersion::AC1021,
+                        tgt_unicode,
+                        encoding,
+                        code_page,
+                    )
                 }
                 _ => xrec.raw_data.clone(),
             }
@@ -1253,7 +2588,63 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // R2000+: Cloning flags (valid range 0..5; enum already constrains to valid values)
-        self.writer.write_bit_short(xrec.cloning_flags.to_value());
+        if self.dxf_version >= DxfVersion::AC1015 {
+            self.writer.write_bit_short(xrec.cloning_flags.to_value());
+        }
+
+        if xrec.preserve_object_reference_stream {
+            // A decoded DWG may deliberately omit the translation vector even
+            // when its payload contains 330-369 values. Preserve that exact
+            // representation; adding synthesized handles changes clone
+            // semantics in otherwise valid third-party files.
+            for reference in &xrec.object_references {
+                self.writer.write_handle(
+                    xrecord_reference_type(reference.kind),
+                    reference.handle.value(),
+                );
+                if self.document.objects.contains_key(&reference.handle) {
+                    self.object_queue.push_back(reference.handle);
+                }
+            }
+        } else {
+            // DXF-originated and newly edited XRecords need one translation
+            // handle for every 330-369 value. Preserve a supplied kind when
+            // available, otherwise derive it from the group-code range.
+            let object_id_entries: Vec<_> = xrecord_entries
+                .iter()
+                .filter(|entry| (330..=369).contains(&entry.code))
+                .collect();
+            for (index, entry) in object_id_entries.iter().enumerate() {
+                let decoded = xrec.object_references.get(index);
+                let handle = entry
+                    .value
+                    .as_handle()
+                    .or_else(|| decoded.map(|reference| reference.handle))
+                    .unwrap_or(Handle::NULL);
+                let reference_type = decoded
+                    .map(|reference| xrecord_reference_type(reference.kind))
+                    .unwrap_or_else(|| match entry.code {
+                        330..=339 => DwgReferenceType::SoftPointer,
+                        340..=349 => DwgReferenceType::HardPointer,
+                        350..=359 => DwgReferenceType::SoftOwnership,
+                        360..=369 => DwgReferenceType::HardOwnership,
+                        _ => DwgReferenceType::SoftPointer,
+                    });
+                self.writer.write_handle(reference_type, handle.value());
+                if self.document.objects.contains_key(&handle) {
+                    self.object_queue.push_back(handle);
+                }
+            }
+            for reference in xrec.object_references.iter().skip(object_id_entries.len()) {
+                self.writer.write_handle(
+                    xrecord_reference_type(reference.kind),
+                    reference.handle.value(),
+                );
+                if self.document.objects.contains_key(&reference.handle) {
+                    self.object_queue.push_back(reference.handle);
+                }
+            }
+        }
 
         self.register_object(xrec.handle);
     }
@@ -1317,6 +2708,106 @@ impl<'a> DwgObjectWriter<'a> {
         self.register_object(sf.handle);
     }
 
+    // ── Geographic Data ─────────────────────────────────────────────
+
+    fn write_geodata(&mut self, geo: &GeoData) {
+        let type_code = self.class_type_code("GEODATA", common::OBJ_GEODATA);
+        self.write_common_non_entity_data(
+            type_code,
+            geo.handle,
+            geo.owner,
+            &geo.reactors,
+            &geo.xdictionary_handle,
+        );
+
+        self.writer.write_bit_long(geo.version);
+        self.writer
+            .write_handle(DwgReferenceType::SoftPointer, geo.host_block.value());
+        self.writer.write_bit_short(geo.coordinate_type);
+
+        if geo.version == 1 {
+            self.writer.write_3bit_double(geo.reference_point);
+            self.writer.write_bit_long(geo.horizontal_units);
+            self.writer.write_3bit_double(geo.design_point);
+            self.writer
+                .write_3bit_double(geo.obsolete_observation_point);
+            self.writer.write_3bit_double(geo.up_direction);
+            let north_angle =
+                std::f64::consts::FRAC_PI_2 - geo.north_direction.y.atan2(geo.north_direction.x);
+            self.writer.write_bit_double(north_angle);
+            self.writer.write_3bit_double(geo.obsolete_scale_vector);
+            self.writer
+                .write_variable_text(&geo.coordinate_system_definition);
+            self.writer.write_variable_text(&geo.geo_rss_tag);
+            self.writer.write_bit_double(geo.horizontal_unit_scale);
+            self.writer
+                .write_variable_text(&geo.coordinate_system_datum);
+            self.writer.write_variable_text(&geo.coordinate_system_wkt);
+        } else {
+            self.writer.write_3bit_double(geo.design_point);
+            self.writer.write_3bit_double(geo.reference_point);
+            self.writer.write_bit_double(geo.horizontal_unit_scale);
+            self.writer.write_bit_long(geo.horizontal_units);
+            self.writer.write_bit_double(geo.vertical_unit_scale);
+            self.writer.write_bit_long(geo.vertical_units);
+            self.writer.write_3bit_double(geo.up_direction);
+            self.writer.write_2raw_double(geo.north_direction);
+            self.writer
+                .write_bit_long(geo.scale_estimation_method);
+            self.writer.write_bit_double(geo.user_scale_factor);
+            self.writer.write_bit(geo.sea_level_correction);
+            self.writer.write_bit_double(geo.sea_level_elevation);
+            self.writer
+                .write_bit_double(geo.coordinate_projection_radius);
+            self.writer
+                .write_variable_text(&geo.coordinate_system_definition);
+            self.writer.write_variable_text(&geo.geo_rss_tag);
+        }
+
+        self.writer
+            .write_variable_text(&geo.observation_from_tag);
+        self.writer
+            .write_variable_text(&geo.observation_to_tag);
+        self.writer
+            .write_variable_text(&geo.observation_coverage_tag);
+        self.writer.write_bit_long(geo.mesh_points.len() as i32);
+        for point in &geo.mesh_points {
+            self.writer.write_2raw_double(point.source);
+            self.writer.write_2raw_double(point.destination);
+        }
+        self.writer.write_bit_long(geo.mesh_faces.len() as i32);
+        for face in &geo.mesh_faces {
+            self.writer.write_bit_long(face.first);
+            self.writer.write_bit_long(face.second);
+            self.writer.write_bit_long(face.third);
+        }
+        if geo.version == 1 {
+            self.writer.write_bit(geo.civil_data_present);
+            self.writer.write_bit(geo.civil_obsolete_flag);
+            self.writer.write_2raw_double(geo.civil_reference_point1);
+            self.writer.write_2raw_double(geo.civil_reference_point2);
+            self.writer.write_bit_long(geo.civil_unknown1);
+            self.writer.write_bit_long(geo.civil_unknown2);
+            self.writer.write_bit(geo.civil_unknown_flag1);
+            self.writer.write_2raw_double(geo.civil_zero_point1);
+            self.writer.write_2raw_double(geo.civil_zero_point2);
+            self.writer.write_bit(geo.civil_unknown_flag2);
+            self.writer
+                .write_bit_double(geo.civil_north_angle_degrees);
+            self.writer
+                .write_bit_double(geo.civil_north_angle_radians);
+            self.writer
+                .write_bit_long(geo.scale_estimation_method);
+            self.writer.write_bit_double(geo.user_scale_factor);
+            self.writer.write_bit(geo.sea_level_correction);
+            self.writer.write_bit_double(geo.sea_level_elevation);
+            self.writer
+                .write_bit_double(geo.coordinate_projection_radius);
+        }
+
+        self.register_object(geo.handle);
+    }
+
     // ── PlaceHolder ─────────────────────────────────────────────────
 
     fn write_placeholder(&mut self, ph: &PlaceHolder) {
@@ -1344,8 +2835,31 @@ impl<'a> DwgObjectWriter<'a> {
             &None,
         );
 
-        self.writer.write_variable_text(&bc.color_name);
-        self.writer.write_variable_text(&bc.book_name);
+        if self.version.r2004_plus() {
+            self.writer.write_bit_short(0);
+            let (r, g, b) = bc.color.rgb().unwrap_or((0, 0, 0));
+            let true_color =
+                (0xC2u32 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
+            self.writer.write_bit_long(true_color as i32);
+
+            let mut flags = 0u8;
+            if !bc.color_name.is_empty() {
+                flags |= 1;
+            }
+            if !bc.book_name.is_empty() {
+                flags |= 2;
+            }
+            self.writer.write_byte(flags);
+            if flags & 1 != 0 {
+                self.writer.write_variable_text(&bc.color_name);
+            }
+            if flags & 2 != 0 {
+                self.writer.write_variable_text(&bc.book_name);
+            }
+        } else {
+            self.writer
+                .write_bit_short(bc.color.approximate_index());
+        }
 
         self.register_object(bc.handle);
     }
@@ -1366,33 +2880,5 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_short(wv.display_frame);
 
         self.register_object(wv.handle);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::document::CadDocument;
-
-    #[test]
-    fn write_empty_dictionary() {
-        let doc = CadDocument::new();
-        let mut writer = DwgObjectWriter::new(&doc).unwrap();
-        let dict = Dictionary::default();
-        writer.write_dictionary(&dict);
-        assert!(!writer.output.is_empty());
-    }
-
-    #[test]
-    fn write_dictionary_with_entries() {
-        let doc = CadDocument::new();
-        let mut writer = DwgObjectWriter::new(&doc).unwrap();
-        let mut dict = Dictionary::new();
-        dict.handle = Handle::new(0x10);
-        dict.add_entry("TestEntry".to_string(), Handle::new(0x20));
-        writer.write_dictionary(&dict);
-        assert!(!writer.output.is_empty());
-        // Should have enqueued the child handle
-        assert!(writer.object_queue.contains(&Handle::new(0x20)));
     }
 }

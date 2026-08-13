@@ -9,6 +9,9 @@
 
 use std::fmt;
 
+const MAX_NOTIFICATIONS: usize = 1_000;
+const MAX_NOTIFICATION_MESSAGE_CHARS: usize = 2_000;
+
 /// Severity level of a notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -65,16 +68,42 @@ impl fmt::Display for Notification {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NotificationCollection {
     items: Vec<Notification>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    omitted: usize,
+    #[cfg_attr(feature = "serde", serde(default))]
+    omitted_errors: usize,
 }
 
 impl NotificationCollection {
     /// Create an empty collection.
     pub fn new() -> Self {
-        Self { items: Vec::new() }
+        Self {
+            items: Vec::new(),
+            omitted: 0,
+            omitted_errors: 0,
+        }
     }
 
     /// Record a notification.
     pub fn notify(&mut self, notification_type: NotificationType, message: impl Into<String>) {
+        if self.items.len() >= MAX_NOTIFICATIONS {
+            self.omitted = self.omitted.saturating_add(1);
+            if notification_type == NotificationType::Error {
+                self.omitted_errors = self.omitted_errors.saturating_add(1);
+            }
+            return;
+        }
+        let message = message.into();
+        let message = if message.chars().count() > MAX_NOTIFICATION_MESSAGE_CHARS {
+            let mut shortened: String = message
+                .chars()
+                .take(MAX_NOTIFICATION_MESSAGE_CHARS)
+                .collect();
+            shortened.push_str("… [message truncated]");
+            shortened
+        } else {
+            message
+        };
         self.items.push(Notification::new(notification_type, message));
     }
 
@@ -86,6 +115,20 @@ impl NotificationCollection {
     /// Number of notifications.
     pub fn len(&self) -> usize {
         self.items.len()
+    }
+
+    /// Number of additional notifications not retained after the safety limit.
+    pub fn omitted_count(&self) -> usize {
+        self.omitted
+    }
+
+    /// Total error notifications, including errors omitted after the limit.
+    pub fn error_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.notification_type == NotificationType::Error)
+            .count()
+            .saturating_add(self.omitted_errors)
     }
 
     /// Iterate over all notifications.
@@ -105,7 +148,11 @@ impl NotificationCollection {
 
     /// Append all notifications from another collection.
     pub fn extend(&mut self, other: NotificationCollection) {
-        self.items.extend(other.items);
+        for item in other.items {
+            self.notify(item.notification_type, item.message);
+        }
+        self.omitted = self.omitted.saturating_add(other.omitted);
+        self.omitted_errors = self.omitted_errors.saturating_add(other.omitted_errors);
     }
 
     /// Consume the collection into a `Vec`.

@@ -46,6 +46,8 @@ pub struct DwgMergedReader {
     dxf_version: DxfVersion,
     /// Raw data (kept for lazy text/handle setup in ThreeStream mode)
     raw_data: Option<Vec<u8>>,
+    /// Document code page used by lazily-created stream readers.
+    encoding: &'static encoding_rs::Encoding,
     /// Handle-stream bit count from the R2010+ MC framing field.
     /// Stored so unknown entities can reproduce the correct framing on write.
     handle_bits: i64,
@@ -61,6 +63,8 @@ pub struct DwgMergedReader {
     /// For R2010+: equals total_data_bits - handle_bits.
     /// For pre-R2007: equals handle_start_bits from the constructor.
     handle_start_bit: i64,
+    /// Bit position where the text stream starts; main data ends here.
+    text_start_bit: i64,
 }
 
 impl DwgMergedReader {
@@ -82,6 +86,20 @@ impl DwgMergedReader {
         dxf_version: DxfVersion,
         handle_start_bits: i64,
     ) -> Self {
+        Self::new_with_encoding(
+            data,
+            dxf_version,
+            handle_start_bits,
+            encoding_rs::WINDOWS_1252,
+        )
+    }
+
+    pub fn new_with_encoding(
+        data: Vec<u8>,
+        dxf_version: DxfVersion,
+        handle_start_bits: i64,
+        encoding: &'static encoding_rs::Encoding,
+    ) -> Self {
         let dwg = DwgVersion::from_dxf_version(dxf_version)
             .unwrap_or(DwgVersion::AC15);
 
@@ -94,7 +112,8 @@ impl DwgMergedReader {
         match mode {
             MergeMode::TwoStream => {
                 // Two-stream: main = data[:handle_start], handle = data[handle_start:]
-                let main = DwgBitReader::new(data.clone(), dwg, dxf_version);
+                let main =
+                    DwgBitReader::with_encoding(data.clone(), dwg, dxf_version, encoding);
 
                 // Create handle reader from remaining bytes
                 let handle_start_byte = (handle_start_bits / 8) as usize;
@@ -103,7 +122,8 @@ impl DwgMergedReader {
                 } else {
                     Vec::new()
                 };
-                let handle = DwgBitReader::new(handle_data, dwg, dxf_version);
+                let handle =
+                    DwgBitReader::with_encoding(handle_data, dwg, dxf_version, encoding);
 
                 DwgMergedReader {
                     main,
@@ -112,9 +132,11 @@ impl DwgMergedReader {
                     _mode: mode,
                     dxf_version,
                     raw_data: None,
+                    encoding,
                     handle_bits: 0,
                     ref_handle: 0,
                     handle_start_bit: handle_start_bits,
+                    text_start_bit: handle_start_bits,
                 }
             }
             MergeMode::ThreeStream => {
@@ -123,7 +145,8 @@ impl DwgMergedReader {
                 // The BL is not at position 0 — it comes after the type code.
                 // Text and handle readers will be set up later via
                 // setup_text_and_handle() after the caller reads the BL.
-                let main_reader = DwgBitReader::new(data.clone(), dwg, dxf_version);
+                let main_reader =
+                    DwgBitReader::with_encoding(data.clone(), dwg, dxf_version, encoding);
 
                 DwgMergedReader {
                     main: main_reader,
@@ -132,9 +155,11 @@ impl DwgMergedReader {
                     _mode: mode,
                     dxf_version,
                     raw_data: Some(data),
+                    encoding,
                     handle_bits: 0,
                     ref_handle: 0,
                     handle_start_bit: 0,  // set later when RL is known
+                    text_start_bit: 0,
                 }
             }
         }
@@ -162,9 +187,11 @@ impl DwgMergedReader {
             _mode: mode,
             dxf_version,
             raw_data: None,
+            encoding: encoding_rs::WINDOWS_1252,
             handle_bits: 0,
             ref_handle: 0,
             handle_start_bit: 0,
+            text_start_bit: 0,
         }
     }
 
@@ -184,13 +211,24 @@ impl DwgMergedReader {
 
             // Text reader — the flag bit is at RL − 1 (per-object convention,
             // matching the classes reader and object reader).
-            let mut text_reader = DwgBitReader::new(data.clone(), dwg, self.dxf_version);
-            text_reader.set_position_by_flag(total_size_bits - 1);
+            let mut text_reader = DwgBitReader::with_encoding(
+                data.clone(),
+                dwg,
+                self.dxf_version,
+                self.encoding,
+            );
+            self.text_start_bit =
+                text_reader.set_position_by_flag(total_size_bits - 1);
             self.text = Some(text_reader);
 
             // Handle reader — starts at the next byte boundary after the flag bit.
             let handle_start = ((total_size_bits + 1 + 7) / 8) * 8;
-            let mut handle_reader = DwgBitReader::new(data.clone(), dwg, self.dxf_version);
+            let mut handle_reader = DwgBitReader::with_encoding(
+                data.clone(),
+                dwg,
+                self.dxf_version,
+                self.encoding,
+            );
             handle_reader.set_position_in_bits(handle_start);
             self.handle = Some(handle_reader);
         }
@@ -222,9 +260,21 @@ impl DwgMergedReader {
     pub fn read_bit(&mut self) -> bool { self.main.read_bit() }
     pub fn read_byte(&mut self) -> u8 { self.main.read_byte() }
     pub fn read_bytes(&mut self, length: usize) -> Vec<u8> { self.main.read_bytes(length) }
+    pub fn decode_legacy_text(&self, bytes: &[u8]) -> String {
+        self.main.decode_legacy_text(bytes)
+    }
     /// Bytes left in the main data stream from the current position.
     pub fn remaining_bytes(&self) -> usize {
         self.main.data_len().saturating_sub(self.main.position())
+    }
+    /// Bits remaining in entity main-data stream, excluding text and handles.
+    pub fn main_remaining_bits(&self) -> i64 {
+        let end = if self.text_start_bit > 0 {
+            self.text_start_bit
+        } else {
+            self.handle_start_bit
+        };
+        (end - self.main.position_in_bits()).max(0)
     }
     pub fn read_bit_short(&mut self) -> i16 { self.main.read_bit_short() }
     pub fn read_bit_long(&mut self) -> i32 { self.main.read_bit_long() }
@@ -242,6 +292,30 @@ impl DwgMergedReader {
         self.main.read_bit_double_with_default(default)
     }
     pub fn read_cm_color(&mut self) -> Color { self.main.read_cm_color() }
+    /// Read a CMTC color.  TABLESTYLE stores the full R2004 CMC payload
+    /// even when the containing DWG uses a pre-R2004 file version.
+    pub fn read_cm_true_color(&mut self) -> Color {
+        let _color_index = self.main.read_bit_short();
+        let rgb = self.main.read_bit_long() as u32;
+        let arr = rgb.to_le_bytes();
+        let color = if rgb == 0xC000_0000 {
+            Color::ByLayer
+        } else if rgb == 0xC800_0000 {
+            Color::None
+        } else if (rgb & 0x0100_0000) != 0 {
+            Color::from_index(arr[0] as i16)
+        } else {
+            Color::from_rgb(arr[2], arr[1], arr[0])
+        };
+        let flags = self.main.read_byte();
+        if (flags & 1) != 0 {
+            let _ = self.read_variable_text();
+        }
+        if (flags & 2) != 0 {
+            let _ = self.read_variable_text();
+        }
+        color
+    }
     pub fn read_en_color(&mut self) -> (Color, crate::types::Transparency, bool) {
         self.main.read_en_color()
     }
@@ -266,6 +340,23 @@ impl DwgMergedReader {
         }
     }
 
+    /// Bits remaining after the currently decoded fields in the separate
+    /// R2007+ text stream.
+    pub fn text_remaining_bits(&self) -> i64 {
+        self.text
+            .as_ref()
+            .map(DwgBitReader::text_stream_remaining_bits)
+            .unwrap_or(0)
+    }
+
+    /// Read one bit from the separate R2007+ text stream.
+    pub fn read_text_bit(&mut self) -> bool {
+        self.text
+            .as_mut()
+            .map(DwgBitReader::read_text_stream_bit)
+            .unwrap_or(false)
+    }
+
     /// Read a text string, but always from the main stream.
     ///
     /// Used for fields that are always inline even in R2007+.
@@ -286,6 +377,10 @@ impl DwgMergedReader {
         if let Some(ref mut handle_reader) = self.handle {
             handle_reader.set_position_in_bits(bit_position);
         }
+        self.handle_start_bit = bit_position;
+        if self.text.is_none() {
+            self.text_start_bit = bit_position;
+        }
     }
 
     /// Read a handle reference.
@@ -301,6 +396,19 @@ impl DwgMergedReader {
             Some(handle_reader) => handle_reader.read_handle_relative(self.ref_handle),
             None => self.main.read_handle_relative(self.ref_handle),
         }
+    }
+
+    pub fn handle_remaining_bits(&self) -> i64 {
+        match &self.handle {
+            Some(reader) => {
+                reader.data_len() as i64 * 8 - reader.position_in_bits()
+            }
+            None => {
+                self.main.data_len() as i64 * 8
+                    - self.main.position_in_bits()
+            }
+        }
+        .max(0)
     }
 
     /// Read a handle reference from the MAIN (data) stream, even when a
@@ -335,6 +443,12 @@ impl DwgMergedReader {
         }
     }
 
+    /// Read a handle reference using the current object's handle as the base
+    /// and return both the resolved handle and its ownership/pointer kind.
+    pub fn read_typed_handle(&mut self) -> (u64, crate::io::dwg::dwg_reference_type::DwgReferenceType) {
+        self.read_handle_reference(self.ref_handle)
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     //  Position and state queries
     // ════════════════════════════════════════════════════════════════════════
@@ -364,6 +478,16 @@ impl DwgMergedReader {
 
     /// Set the bit position where the handle stream starts.
     pub fn set_handle_start(&mut self, bit: i64) { self.handle_start_bit = bit; }
+
+    /// Set the exclusive end of the main-data stream.
+    ///
+    /// In R2007+ records this is the start of the optional text stream, not
+    /// the text-present flag or the handle stream.  Opaque class/proxy payload
+    /// readers use this boundary and must never absorb either framing data or
+    /// string bytes into the payload.
+    pub fn set_main_data_end(&mut self, bit: i64) {
+        self.text_start_bit = bit;
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -464,4 +588,3 @@ mod tests {
         assert_eq!(h, 0x42);
     }
 }
-
