@@ -7,7 +7,10 @@
 
 use std::ops::{BitOr, BitOrAssign};
 
-use crate::objects::{Dictionary, DictionaryCloningFlags, ObjectType, XRecord, XRecordEntry};
+use crate::objects::{
+    Dictionary, DictionaryCloningFlags, ObjectType, XRecord, XRecordEntry, XRecordValue,
+};
+use crate::tables::normalize_name;
 use crate::types::{Color, Handle, LineWeight, Transparency};
 use crate::CadDocument;
 
@@ -108,6 +111,42 @@ pub struct LayerState {
 }
 
 impl CadDocument {
+    pub(crate) fn rename_layer_state_references(&mut self, old_key: &str, new_name: &str) {
+        let Some(dictionary_handle) = self.layer_states_dictionary_handle() else {
+            return;
+        };
+        let handles = match self.objects.get(&dictionary_handle) {
+            Some(ObjectType::Dictionary(dictionary)) => dictionary
+                .entries
+                .iter()
+                .map(|(_, handle)| *handle)
+                .collect::<Vec<_>>(),
+            _ => return,
+        };
+        for handle in handles {
+            let Some(ObjectType::XRecord(xrecord)) = self.objects.get_mut(&handle) else {
+                continue;
+            };
+            let header_end = xrecord
+                .entries
+                .iter()
+                .position(|entry| entry.code == 330)
+                .unwrap_or(xrecord.entries.len());
+            let Some(entry) = xrecord.entries[..header_end].iter_mut().find(|entry| {
+                entry.code == 302
+                    && entry
+                        .value
+                        .as_string()
+                        .is_some_and(|name| normalize_name(name) == old_key)
+            }) else {
+                continue;
+            };
+            entry.value = XRecordValue::String(new_name.to_string());
+            xrecord.raw_data.clear();
+            xrecord.raw_dwg_data = None;
+        }
+    }
+
     /// Return every native layer state stored in the drawing.
     pub fn layer_states(&self) -> Vec<LayerState> {
         let Some(dictionary_handle) = self.layer_states_dictionary_handle() else {

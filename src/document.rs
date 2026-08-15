@@ -26,6 +26,7 @@ use crate::objects::{
 };
 use crate::tables::*;
 use crate::types::{DxfVersion, Color, Handle, Vector2, Vector3};
+use crate::xdata::XDataValue;
 use crate::Result;
 use std::collections::HashMap;
 
@@ -1354,6 +1355,101 @@ impl CadDocument {
         let mut doc = Self::new();
         doc.version = version;
         doc
+    }
+
+    /// Rename a layer and every name-based reference to it.
+    pub fn rename_layer(
+        &mut self,
+        old_name: &str,
+        new_name: &str,
+    ) -> std::result::Result<Handle, String> {
+        if old_name == new_name || !valid_symbol_table_name(new_name) {
+            return Err("Invalid layer rename".to_string());
+        }
+        let Some(source) = self.layers.get(old_name) else {
+            return Err(format!("Layer '{old_name}' does not exist"));
+        };
+        let source_name = source.name.clone();
+        let source_handle = source.handle;
+        let source_key = normalize_name(&source_name);
+        if source_key == "0"
+            || source_key == normalize_name("Defpoints")
+            || source_name.contains('|')
+        {
+            return Err(format!("Layer '{source_name}' cannot be renamed"));
+        }
+        let app_handles: HashMap<String, u64> = self
+            .app_ids
+            .iter()
+            .map(|app| (normalize_name(&app.name), app.handle.value()))
+            .collect();
+        let affected: Vec<Handle> = self
+            .entities
+            .iter()
+            .filter(|entity| {
+                let common = entity.common();
+                normalize_name(&common.layer) == source_key
+                    || common.extended_data.records().iter().any(|record| {
+                        record.values.iter().any(|value| {
+                            matches!(value, XDataValue::LayerName(name) if normalize_name(name) == source_key)
+                        })
+                    })
+            })
+            .map(|entity| entity.common().handle)
+            .collect();
+        let current = normalize_name(&self.header.current_layer_name) == source_key
+            || (source_handle.is_valid() && self.header.current_layer_handle == source_handle);
+
+        self.layers.rename(&source_name, new_name.to_string())?;
+        let needs_handle = self
+            .layers
+            .get(new_name)
+            .is_some_and(|layer| !layer.handle.is_valid());
+        let layer_handle = if needs_handle {
+            let handle = self.allocate_handle();
+            self.layers.get_mut(new_name).unwrap().handle = handle;
+            handle
+        } else {
+            self.layers.get(new_name).unwrap().handle
+        };
+        self.rename_layer_state_references(&source_key, new_name);
+        for handle in affected {
+            if let Some(entity) = self.get_entity_mut(handle) {
+                let common = entity.common_mut();
+                if normalize_name(&common.layer) == source_key {
+                    common.layer = new_name.to_string();
+                }
+                let mut changed_apps = Vec::new();
+                for record in common.extended_data.records_mut() {
+                    let mut changed = false;
+                    for value in &mut record.values {
+                        let XDataValue::LayerName(name) = value else {
+                            continue;
+                        };
+                        if normalize_name(name) == source_key {
+                            *name = new_name.to_string();
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        if let Some(handle) = app_handles.get(&normalize_name(&record.application_name)) {
+                            changed_apps.push(*handle);
+                        }
+                    }
+                }
+                if layer_handle != source_handle && !changed_apps.is_empty() {
+                    common
+                        .extended_data
+                        .raw_dwg_eed
+                        .retain(|(handle, _)| !changed_apps.contains(handle));
+                }
+            }
+        }
+        if current {
+            self.header.current_layer_name = new_name.to_string();
+            self.header.current_layer_handle = layer_handle;
+        }
+        Ok(layer_handle)
     }
 
     /// Whether writing this document to `target` would lose or corrupt data
@@ -4233,4 +4329,15 @@ impl Default for CadDocument {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn valid_symbol_table_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.chars().any(|character| {
+            character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | '/' | '\\' | '"' | ':' | ';' | '?' | '*' | '|' | ',' | '=' | '`'
+                )
+        })
 }

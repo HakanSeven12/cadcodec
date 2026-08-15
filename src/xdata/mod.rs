@@ -106,6 +106,10 @@ impl ExtendedData {
         &self.records
     }
 
+    pub(crate) fn records_mut(&mut self) -> &mut [ExtendedDataRecord] {
+        &mut self.records
+    }
+
     /// Get a record by application name
     pub fn get_record(&self, application_name: &str) -> Option<&ExtendedDataRecord> {
         self.records
@@ -157,5 +161,4 @@ mod tests {
         assert!(xdata.get_record("APP2").is_none());
     }
 }
-
 
