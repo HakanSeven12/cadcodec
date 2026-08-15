@@ -70,7 +70,7 @@ fn main() {
                     for attempt in 0..5 {
                         match std::fs::write(&out_path, &bytes) {
                             Ok(_) => { written = true; break; }
-                            Err(e) if attempt < 4 => {
+                            Err(_e) if attempt < 4 => {
                                 std::thread::sleep(std::time::Duration::from_millis(200));
                                 continue;
                             }
@@ -115,7 +115,7 @@ fn main() {
                     for attempt in 0..5 {
                         match std::fs::write(&out_path, &bytes) {
                             Ok(_) => { written = true; break; }
-                            Err(e) if attempt < 4 => {
+                            Err(_e) if attempt < 4 => {
                                 std::thread::sleep(std::time::Duration::from_millis(200));
                                 continue;
                             }

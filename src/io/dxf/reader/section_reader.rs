@@ -7819,15 +7819,6 @@ impl<'a> SectionReader<'a> {
                         layer.color = Color::from_true_color_value(v);
                     }
                 }
-                // True color (code 420): packed 24-bit RGB, overrides the ACI
-                // index in code 62 (which is 7 for a true-colour layer). Without
-                // this every RGB-coloured layer read back as Index(7)/white on
-                // DXF import while the DWG reader kept the RGB. (#223)
-                420 => {
-                    if let Some(v) = pair.as_i32() {
-                        layer.color = Color::from_true_color_value(v);
-                    }
-                }
                 6 => layer.line_type = pair.value_string.clone(),
                 70 => {
                     if let Some(flags) = pair.as_i16() {

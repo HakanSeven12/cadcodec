@@ -2473,22 +2473,14 @@ fn mleader_is_annotative(doc: &CadDocument) -> bool {
     use acadrust::objects::ObjectType;
     doc.objects
         .values()
-        .find_map(|o| match o {
-            ObjectType::MultiLeaderStyle(s) => Some(s.is_annotative),
-            _ => None,
-        })
-        .unwrap_or(false)
+        .any(|o| matches!(o, ObjectType::MultiLeaderStyle(s) if s.is_annotative))
 }
 
 fn table_is_annotative(doc: &CadDocument) -> bool {
     use acadrust::objects::ObjectType;
     doc.objects
         .values()
-        .find_map(|o| match o {
-            ObjectType::TableStyle(s) => Some(s.annotative),
-            _ => None,
-        })
-        .unwrap_or(false)
+        .any(|o| matches!(o, ObjectType::TableStyle(s) if s.annotative))
 }
 
 #[test]
