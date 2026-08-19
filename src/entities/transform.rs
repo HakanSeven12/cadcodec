@@ -299,6 +299,19 @@ pub(crate) fn transform_spline(e: &mut Spline, transform: &Transform) {
     for point in &mut e.fit_points {
         *point = transform.apply(*point);
     }
+    e.begin_tangent = transform.apply_rotation(e.begin_tangent);
+    e.end_tangent = transform.apply_rotation(e.end_tangent);
+
+    // These tolerances are distances in the drawing coordinate system. A
+    // scalar cannot express a non-uniformly transformed tolerance region, so
+    // use the largest axis scale as the conservative distance bound. Knot
+    // tolerance is parameter-space data and must not be scaled.
+    let distance_scale = [Vector3::UNIT_X, Vector3::UNIT_Y, Vector3::UNIT_Z]
+        .into_iter()
+        .map(|axis| transform.apply_rotation(axis).length())
+        .fold(0.0, f64::max);
+    e.control_tolerance *= distance_scale;
+    e.fit_tolerance *= distance_scale;
     e.normal = transform.apply_rotation(e.normal).normalize();
 }
 
