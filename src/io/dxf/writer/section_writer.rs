@@ -10923,9 +10923,5 @@ fn get_invisible_edge_bits(flags: &InvisibleEdgeFlags) -> u8 {
 
 /// Helper to extract boundary path flag bits
 fn get_boundary_path_bits(flags: &BoundaryPathFlags) -> u32 {
-    let mut bits = 0u32;
-    if flags.is_external() { bits |= 1; }
-    if flags.is_polyline() { bits |= 2; }
-    if flags.is_derived() { bits |= 4; }
-    bits
+    flags.bits()
 }
