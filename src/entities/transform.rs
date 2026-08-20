@@ -302,17 +302,30 @@ pub(crate) fn transform_spline(e: &mut Spline, transform: &Transform) {
     e.begin_tangent = transform.apply_rotation(e.begin_tangent);
     e.end_tangent = transform.apply_rotation(e.end_tangent);
 
-    // These tolerances are distances in the drawing coordinate system. A
-    // scalar cannot express a non-uniformly transformed tolerance region, so
-    // use the largest axis scale as the conservative distance bound. Knot
-    // tolerance is parameter-space data and must not be scaled.
-    let distance_scale = [Vector3::UNIT_X, Vector3::UNIT_Y, Vector3::UNIT_Z]
-        .into_iter()
-        .map(|axis| transform.apply_rotation(axis).length())
+    let axes = [Vector3::UNIT_X, Vector3::UNIT_Y, Vector3::UNIT_Z]
+        .map(|axis| transform.apply_rotation(axis));
+    let max_scale = axes
+        .iter()
+        .map(|axis| axis.length())
         .fold(0.0, f64::max);
+    let orthogonal = [(0, 1), (0, 2), (1, 2)]
+        .into_iter()
+        .all(|(left, right)| {
+            axes[left].dot(&axes[right]).abs() <= 1e-12 * max_scale.powi(2)
+        });
+    // Exact for orthogonal axes; conservative for sheared transforms.
+    let distance_scale = if orthogonal {
+        max_scale
+    } else {
+        axes
+            .iter()
+            .map(|axis| axis.length_squared())
+            .sum::<f64>()
+            .sqrt()
+    };
     e.control_tolerance *= distance_scale;
     e.fit_tolerance *= distance_scale;
-    e.normal = transform.apply_rotation(e.normal).normalize();
+    e.normal = transform_normal(transform, e.normal);
 }
 
 // ── Helix ────────────────────────────────────────────────────────────────────
