@@ -1406,6 +1406,8 @@ impl<'a> SectionReader<'a> {
                 "$TEXTSIZE" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.text_height = v; } } }
                 "$TRACEWID" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.trace_width = v; } } }
                 "$SKETCHINC" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.sketch_increment = v; } } }
+                "$SKPOLY" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_i16() { hdr.sketch_type = v.clamp(0, 2); } } }
+                "$SKTOLERANCE" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.sketch_tolerance = v.max(0.0); } } }
                 "$THICKNESS" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.thickness = v; } } }
                 "$PDSIZE" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.point_display_size = v; } } }
                 "$PLINEWID" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.polyline_width = v; } } }

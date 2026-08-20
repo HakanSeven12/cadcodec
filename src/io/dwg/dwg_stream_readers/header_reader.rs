@@ -291,7 +291,7 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
     }
 
     h.user_timer = r.read_bit();
-    let _ = r.read_bit(); // SKPOLY
+    h.sketch_type = if r.read_bit() { 1 } else { 0 }; // SKPOLY
     h.angle_direction = if r.read_bit() { 1 } else { 0 }; // ANGDIR
     h.spline_frame = r.read_bit(); // SPLFRAME
 

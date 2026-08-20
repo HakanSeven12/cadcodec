@@ -379,7 +379,10 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
     }
 
     w.write_bit(h.user_timer);
-    w.write_bit(false); // SKPOLY (no dedicated field — default false)
+    // The DWG header stores SKPOLY as a single bit. The documented spline
+    // value is representable in DXF but maps to the enabled/polyline bit in
+    // this binary header layout.
+    w.write_bit(h.sketch_type != 0); // SKPOLY
     w.write_bit(h.angle_direction != 0); // ANGDIR
     w.write_bit(h.spline_frame); // SPLFRAME
 
