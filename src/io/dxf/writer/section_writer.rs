@@ -10463,7 +10463,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     fn write_wipeout(&mut self, wipeout: &Wipeout, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("WIPEOUT")?;
         self.write_common_entity_data(&wipeout.common, owner)?;
-        self.writer.write_subclass("AcDbWipeout")?;
+        self.writer.write_subclass("AcDbRasterImage")?;
 
         // Class version
         self.writer.write_i32(90, wipeout.class_version)?;
@@ -10487,6 +10487,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_double(13, wipeout.size.x)?;
         self.writer.write_double(23, wipeout.size.y)?;
 
+        if let Some(handle) = wipeout.definition_handle {
+            self.writer.write_handle(340, handle)?;
+        }
+
         // Display flags
         self.writer.write_i16(70, wipeout.flags.bits())?;
 
@@ -10495,6 +10499,17 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_byte(281, wipeout.brightness)?;
         self.writer.write_byte(282, wipeout.contrast)?;
         self.writer.write_byte(283, wipeout.fade)?;
+
+        if let Some(handle) = wipeout.definition_reactor_handle {
+            self.writer.write_handle(360, handle)?;
+        }
+
+        if self.dxf_version >= DxfVersion::AC1024 {
+            self.writer.write_bool(
+                290,
+                wipeout.clip_mode == crate::entities::WipeoutClipMode::Inside,
+            )?;
+        }
 
         // Clip boundary type
         self.writer.write_i16(71, wipeout.clip_type as i16)?;

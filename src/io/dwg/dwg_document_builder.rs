@@ -4187,6 +4187,11 @@ impl DwgDocumentBuilder {
                     e.brightness = data.brightness;
                     e.contrast = data.contrast;
                     e.fade = data.fade;
+                    e.clip_mode = if data.clip_inverted {
+                        crate::entities::WipeoutClipMode::Inside
+                    } else {
+                        crate::entities::WipeoutClipMode::Outside
+                    };
                     e.clip_type = if data.clip_type == 1 {
                         crate::entities::WipeoutClipType::Rectangular
                     } else {

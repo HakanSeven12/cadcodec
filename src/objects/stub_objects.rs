@@ -694,7 +694,7 @@ pub struct RasterVariables {
     pub owner: Handle,
     /// Class version (code 90)
     pub class_version: i32,
-    /// Image frame display (code 70): 0 = no frame, 1 = display frame
+    /// Image frame mode (code 70): 0 = hidden, 1 = plotted, 2 = display only
     pub display_image_frame: i16,
     /// Image quality (code 71): 0 = draft, 1 = high
     pub image_quality: i16,
@@ -822,7 +822,8 @@ pub struct WipeoutVariables {
     pub handle: Handle,
     /// Owner handle
     pub owner: Handle,
-    /// Display image frame (code 70): 0 = no, 1 = yes
+    /// Wipeout frame mode (code 70): 0 = hidden, 1 = displayed and plotted,
+    /// 2 = displayed but not plotted.
     pub display_frame: i16,
 }
 
@@ -832,7 +833,7 @@ impl WipeoutVariables {
         WipeoutVariables {
             handle: Handle::NULL,
             owner: Handle::NULL,
-            display_frame: 0,
+            display_frame: 1,
         }
     }
 }

@@ -13752,9 +13752,46 @@ impl<'a> SectionReader<'a> {
                 10 | 20 | 30 => { insertion_point.add_coordinate(&pair); }
                 11 | 21 | 31 => { u_vector.add_coordinate(&pair); }
                 12 | 22 | 32 => { v_vector.add_coordinate(&pair); }
+                13 => { if let Some(v) = pair.as_double() { wipeout.size.x = v; } }
+                23 => { if let Some(v) = pair.as_double() { wipeout.size.y = v; } }
+                90 => { if let Some(v) = pair.as_i32() { wipeout.class_version = v; } }
+                340 => {
+                    let handle = parse_dxf_handle(&pair.value_string);
+                    if !handle.is_null() { wipeout.definition_handle = Some(handle); }
+                }
+                360 => {
+                    let handle = parse_dxf_handle(&pair.value_string);
+                    if !handle.is_null() { wipeout.definition_reactor_handle = Some(handle); }
+                }
+                70 => {
+                    if let Some(v) = pair.as_i16() {
+                        wipeout.flags = WipeoutDisplayFlags::from_bits_truncate(v);
+                    }
+                }
                 71 => {
                     if let Some(v) = pair.as_i16() {
                         wipeout.clip_type = crate::entities::wipeout::WipeoutClipType::from(v);
+                    }
+                }
+                280 => {
+                    if let Some(v) = pair.as_i16() { wipeout.clipping_enabled = v != 0; }
+                }
+                281 => {
+                    if let Some(v) = pair.as_i16() { wipeout.brightness = v.clamp(0, 100) as u8; }
+                }
+                282 => {
+                    if let Some(v) = pair.as_i16() { wipeout.contrast = v.clamp(0, 100) as u8; }
+                }
+                283 => {
+                    if let Some(v) = pair.as_i16() { wipeout.fade = v.clamp(0, 100) as u8; }
+                }
+                290 => {
+                    if let Some(v) = pair.as_bool() {
+                        wipeout.clip_mode = if v {
+                            crate::entities::wipeout::WipeoutClipMode::Inside
+                        } else {
+                            crate::entities::wipeout::WipeoutClipMode::Outside
+                        };
                     }
                 }
                 91 => {
