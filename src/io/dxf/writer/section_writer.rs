@@ -237,6 +237,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$ATTMODE", |w| w.write_i16(70, hdr.attribute_visibility))?;
         self.write_header_variable("$TEXTSIZE", |w| w.write_double(40, hdr.text_height))?;
         self.write_header_variable("$TRACEWID", |w| w.write_double(40, hdr.trace_width))?;
+        self.write_header_variable("$SKETCHINC", |w| w.write_double(40, hdr.sketch_increment))?;
+        self.write_header_variable("$SKPOLY", |w| w.write_i16(70, hdr.sketch_type.clamp(0, 2)))?;
+        let sketch_tolerance = if hdr.sketch_tolerance.is_finite() {
+            hdr.sketch_tolerance.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        self.write_header_variable("$SKTOLERANCE", |w| w.write_double(40, sketch_tolerance))?;
         self.write_header_variable("$TEXTSTYLE", |w| w.write_string(7, &hdr.current_text_style_name))?;
         self.write_header_variable("$CMLSTYLE", |w| w.write_string(2, &hdr.multiline_style))?;
         self.write_header_variable("$CTABLESTYLE", |w| w.write_string(2, &hdr.current_table_style_name))?;

@@ -379,7 +379,8 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
     }
 
     w.write_bit(h.user_timer);
-    w.write_bit(false); // SKPOLY (no dedicated field — default false)
+    // The legacy DWG header stores SKPOLY as one bit.
+    w.write_bit(h.sketch_type != 0); // SKPOLY
     w.write_bit(h.angle_direction != 0); // ANGDIR
     w.write_bit(h.spline_frame); // SPLFRAME
 
