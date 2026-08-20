@@ -223,8 +223,8 @@ impl Wipeout {
             size: Vector2::new(1.0, 1.0),
             clip_type: WipeoutClipType::Rectangular,
             clip_boundary_vertices: vec![
-                Vector2::new(0.0, 0.0),
-                Vector2::new(1.0, 1.0),
+                Vector2::new(-0.5, -0.5),
+                Vector2::new(0.5, 0.5),
             ],
             ..Self::new()
         }
@@ -266,13 +266,14 @@ impl Wipeout {
         let width = max_x - min_x;
         let height = max_y - min_y;
 
-        // Convert vertices to normalized coordinates (0-1 range)
+        // Clip coordinates are centred on the image. X grows right while Y
+        // grows down in raster space, hence the vertical inversion.
         let normalized: Vec<Vector2> = vertices
             .iter()
             .map(|v| {
                 Vector2::new(
-                    if width > 0.0 { (v.x - min_x) / width } else { 0.0 },
-                    if height > 0.0 { (v.y - min_y) / height } else { 0.0 },
+                    if width > 0.0 { (v.x - min_x) / width - 0.5 } else { 0.0 },
+                    if height > 0.0 { 0.5 - (v.y - min_y) / height } else { 0.0 },
                 )
             })
             .collect();
@@ -308,20 +309,20 @@ impl Wipeout {
             .iter()
             .map(|v| {
                 self.insertion_point
-                    + self.u_vector * v.x
-                    + self.v_vector * v.y
+                    + self.u_vector * (v.x + self.size.x * 0.5)
+                    + self.v_vector * (self.size.y * 0.5 - v.y)
             })
             .collect()
     }
 
     /// Returns the width in world units.
     pub fn width(&self) -> f64 {
-        self.u_vector.length()
+        self.u_vector.length() * self.size.x.abs()
     }
 
     /// Returns the height in world units.
     pub fn height(&self) -> f64 {
-        self.v_vector.length()
+        self.v_vector.length() * self.size.y.abs()
     }
 
     /// Returns the area in world units.
@@ -348,8 +349,9 @@ impl Wipeout {
             area -= verts[j].x * verts[i].y;
         }
 
-        // Normalize to world units
-        (area / 2.0).abs() * self.width() * self.height()
+        // Clip vertices are measured in pixels. Convert pixel area to world
+        // area using the parallelogram spanned by the per-pixel U/V vectors.
+        (area / 2.0).abs() * self.u_vector.cross(&self.v_vector).length()
     }
 
     /// Sets the size of the wipeout (width and height).
@@ -365,8 +367,10 @@ impl Wipeout {
             Vector3::UNIT_Y
         };
 
-        self.u_vector = u_dir * width;
-        self.v_vector = v_dir * height;
+        let pixel_width = self.size.x.abs().max(f64::EPSILON);
+        let pixel_height = self.size.y.abs().max(f64::EPSILON);
+        self.u_vector = u_dir * (width / pixel_width);
+        self.v_vector = v_dir * (height / pixel_height);
     }
 
     /// Rotates the wipeout around its insertion point.
@@ -426,16 +430,20 @@ impl Wipeout {
 
     /// Returns the center point in world coordinates.
     pub fn center(&self) -> Vector3 {
-        self.insertion_point + self.u_vector * 0.5 + self.v_vector * 0.5
+        self.insertion_point
+            + self.u_vector * (self.size.x * 0.5)
+            + self.v_vector * (self.size.y * 0.5)
     }
 
     /// Returns the four corners in world coordinates (for rectangular).
     pub fn corners(&self) -> [Vector3; 4] {
+        let u = self.u_vector * self.size.x;
+        let v = self.v_vector * self.size.y;
         [
             self.insertion_point,
-            self.insertion_point + self.u_vector,
-            self.insertion_point + self.u_vector + self.v_vector,
-            self.insertion_point + self.v_vector,
+            self.insertion_point + u,
+            self.insertion_point + u + v,
+            self.insertion_point + v,
         ]
     }
 
@@ -455,14 +463,18 @@ impl Wipeout {
 
         let u = (local.x * u_norm.x + local.y * u_norm.y + local.z * u_norm.z) / u_len;
         let v = (local.x * v_norm.x + local.y * v_norm.y + local.z * v_norm.z) / v_len;
+        let clip_point = Vector2::new(u - self.size.x * 0.5, self.size.y * 0.5 - v);
 
         if self.clip_type == WipeoutClipType::Rectangular {
             let min = &self.clip_boundary_vertices[0];
             let max = &self.clip_boundary_vertices[1];
-            u >= min.x && u <= max.x && v >= min.y && v <= max.y
+            clip_point.x >= min.x.min(max.x)
+                && clip_point.x <= min.x.max(max.x)
+                && clip_point.y >= min.y.min(max.y)
+                && clip_point.y <= min.y.max(max.y)
         } else {
             // Point-in-polygon test using ray casting
-            self.point_in_polygon(Vector2::new(u, v))
+            self.point_in_polygon(clip_point)
         }
     }
 

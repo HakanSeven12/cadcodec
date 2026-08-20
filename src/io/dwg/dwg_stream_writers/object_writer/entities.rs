@@ -3915,16 +3915,30 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_byte(e.fade);
 
         if self.version.r2010_plus() {
-            self.writer.write_bit(false);
+            self.writer.write_bit(e.clip_mode == crate::entities::WipeoutClipMode::Inside);
         }
 
         // Clip boundary
-        self.writer
-            .write_bit_short(e.clip_type as i16);
-        self.writer
-            .write_bit_long(e.clip_boundary_vertices.len() as i32);
-        for v in &e.clip_boundary_vertices {
-            self.writer.write_2raw_double(*v);
+        self.writer.write_bit_short(e.clip_type as i16);
+        match e.clip_type {
+            crate::entities::WipeoutClipType::Rectangular => {
+                let defaults = [Vector2::new(-0.5, -0.5), Vector2::new(0.5, 0.5)];
+                for index in 0..2 {
+                    self.writer.write_2raw_double(
+                        e.clip_boundary_vertices
+                            .get(index)
+                            .copied()
+                            .unwrap_or(defaults[index]),
+                    );
+                }
+            }
+            crate::entities::WipeoutClipType::Polygonal => {
+                self.writer
+                    .write_bit_long(e.clip_boundary_vertices.len() as i32);
+                for v in &e.clip_boundary_vertices {
+                    self.writer.write_2raw_double(*v);
+                }
+            }
         }
 
         // Definition + reactor handles
