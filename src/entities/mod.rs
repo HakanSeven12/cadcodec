@@ -65,6 +65,7 @@ pub mod translate;
 pub mod transform;
 pub mod mirror;
 pub mod embedded_entity;
+pub mod centerline;
 
 pub use point::Point;
 pub use line::Line;
@@ -155,6 +156,10 @@ pub use unknown_entity::UnknownEntity;
 pub use view_border::ViewBorder;
 pub use extended_entity::*;
 pub use embedded_entity::EmbeddedEntity;
+pub use centerline::{
+    CenterLineAssociation, CenterLineSource, CenterLineSourceKind,
+    CENTERLINE_XDATA_APPLICATION,
+};
 
 /// Base trait for all CAD entities
 pub trait Entity {
