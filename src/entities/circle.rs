@@ -1,7 +1,9 @@
 //! Circle entity
 
 use super::{Entity, EntityCommon};
-use crate::types::{BoundingBox3D, Color, Handle, LineWeight, Transform, Transparency, Vector3};
+use crate::types::{
+    BoundingBox3D, Color, Handle, LineWeight, Matrix3, Transform, Transparency, Vector3,
+};
 
 /// A circle entity
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +60,29 @@ impl Circle {
     /// Get the area of the circle
     pub fn area(&self) -> f64 {
         std::f64::consts::PI * self.radius * self.radius
+    }
+
+    /// Centre converted from the entity coordinate system to world space.
+    pub fn center_wcs(&self) -> Vector3 {
+        Matrix3::arbitrary_axis(self.normal) * self.center
+    }
+
+    /// Unit circle axes in world space.
+    pub fn axes_wcs(&self) -> (Vector3, Vector3) {
+        let basis = Matrix3::arbitrary_axis(self.normal);
+        (
+            basis * Vector3::new(1.0, 0.0, 0.0),
+            basis * Vector3::new(0.0, 1.0, 0.0),
+        )
+    }
+
+    /// Point at a circle angle converted to world space.
+    pub fn point_at_angle_wcs(&self, angle: f64) -> Vector3 {
+        let center = self.center_wcs();
+        let (axis_x, axis_y) = self.axes_wcs();
+        center
+            + axis_x * (self.radius * angle.cos())
+            + axis_y * (self.radius * angle.sin())
     }
 }
 
