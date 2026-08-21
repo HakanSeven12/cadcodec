@@ -158,7 +158,8 @@ pub use extended_entity::*;
 pub use embedded_entity::EmbeddedEntity;
 pub use centerline::{
     CenterLineAssociation, CenterLineSource, CenterLineSourceKind,
-    CENTERLINE_XDATA_APPLICATION,
+    CenterMarkAssociation, CenterMarkSource, CenterMarkSourceKind,
+    CENTERLINE_XDATA_APPLICATION, CENTERMARK_XDATA_APPLICATION,
 };
 
 /// Base trait for all CAD entities

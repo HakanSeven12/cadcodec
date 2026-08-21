@@ -8,7 +8,10 @@ use crate::xdata::{ExtendedData, ExtendedDataRecord, XDataValue};
 
 /// Registered application name used by centre-line association records.
 pub const CENTERLINE_XDATA_APPLICATION: &str = "OCS_CENTERLINE";
+/// Registered application name used by centre-mark association records.
+pub const CENTERMARK_XDATA_APPLICATION: &str = "OCS_CENTERMARK";
 const SIGNATURE: &str = "CENTERLINE_ASSOCIATION";
+const MARK_SIGNATURE: &str = "CENTERMARK_ASSOCIATION";
 const VERSION: i16 = 1;
 
 /// Kind of source geometry referenced by a centre line.
@@ -148,5 +151,161 @@ impl CenterLineAssociation {
     /// Remove only centre-line metadata, leaving other applications intact.
     pub fn remove(data: &mut ExtendedData) {
         data.remove_record(CENTERLINE_XDATA_APPLICATION);
+    }
+}
+
+/// Kind of circular source referenced by a centre mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum CenterMarkSourceKind {
+    Circle,
+    Arc,
+    LwPolylineArcSegment,
+    Polyline2DArcSegment,
+}
+
+impl CenterMarkSourceKind {
+    fn code(self) -> i16 {
+        match self {
+            Self::Circle => 0,
+            Self::Arc => 1,
+            Self::LwPolylineArcSegment => 2,
+            Self::Polyline2DArcSegment => 3,
+        }
+    }
+
+    fn from_code(code: i16) -> Option<Self> {
+        match code {
+            0 => Some(Self::Circle),
+            1 => Some(Self::Arc),
+            2 => Some(Self::LwPolylineArcSegment),
+            3 => Some(Self::Polyline2DArcSegment),
+            _ => None,
+        }
+    }
+}
+
+/// One selected circle, arc, or circular polyline segment.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CenterMarkSource {
+    pub handle: Handle,
+    pub kind: CenterMarkSourceKind,
+    pub segment_index: i32,
+    pub pick_point: Vector3,
+}
+
+/// Complete, versioned metadata required to regenerate a smart centre mark.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CenterMarkAssociation {
+    pub source: CenterMarkSource,
+    pub plane_origin: Vector3,
+    pub plane_x: Vector3,
+    pub plane_y: Vector3,
+    pub center: Vector3,
+    pub radius: f64,
+    pub cross_size: f64,
+    pub cross_gap: f64,
+    pub extension_length: f64,
+    pub length_adjustments: [f64; 4],
+    pub overshoots: [f64; 4],
+    pub show_extensions: bool,
+    pub associated: bool,
+}
+
+impl CenterMarkAssociation {
+    /// Decode association metadata, rejecting incomplete or future payloads.
+    pub fn read(data: &ExtendedData) -> Option<Self> {
+        let values = &data.get_record(CENTERMARK_XDATA_APPLICATION)?.values;
+        let [
+            XDataValue::String(signature),
+            XDataValue::Integer16(version),
+            XDataValue::Handle(source_handle),
+            XDataValue::Integer16(source_kind),
+            XDataValue::Integer32(segment_index),
+            XDataValue::Point3D(pick_point),
+            XDataValue::Point3D(plane_origin),
+            XDataValue::Direction3D(plane_x),
+            XDataValue::Direction3D(plane_y),
+            XDataValue::Point3D(center),
+            XDataValue::Distance(radius),
+            XDataValue::Distance(cross_size),
+            XDataValue::Distance(cross_gap),
+            XDataValue::Distance(extension_length),
+            XDataValue::Distance(length_0),
+            XDataValue::Distance(length_1),
+            XDataValue::Distance(length_2),
+            XDataValue::Distance(length_3),
+            XDataValue::Distance(overshoot_0),
+            XDataValue::Distance(overshoot_1),
+            XDataValue::Distance(overshoot_2),
+            XDataValue::Distance(overshoot_3),
+            XDataValue::Integer16(flags),
+        ] = values.as_slice()
+        else {
+            return None;
+        };
+        if signature != MARK_SIGNATURE || *version != VERSION {
+            return None;
+        }
+        Some(Self {
+            source: CenterMarkSource {
+                handle: *source_handle,
+                kind: CenterMarkSourceKind::from_code(*source_kind)?,
+                segment_index: *segment_index,
+                pick_point: *pick_point,
+            },
+            plane_origin: *plane_origin,
+            plane_x: *plane_x,
+            plane_y: *plane_y,
+            center: *center,
+            radius: *radius,
+            cross_size: *cross_size,
+            cross_gap: *cross_gap,
+            extension_length: *extension_length,
+            length_adjustments: [*length_0, *length_1, *length_2, *length_3],
+            overshoots: [*overshoot_0, *overshoot_1, *overshoot_2, *overshoot_3],
+            show_extensions: flags & 1 != 0,
+            associated: flags & 2 != 0,
+        })
+    }
+
+    /// Replace the association payload without disturbing unrelated XDATA.
+    pub fn write(&self, data: &mut ExtendedData) {
+        let mut record = ExtendedDataRecord::new(CENTERMARK_XDATA_APPLICATION);
+        record.values = vec![
+            XDataValue::String(MARK_SIGNATURE.to_owned()),
+            XDataValue::Integer16(VERSION),
+            XDataValue::Handle(self.source.handle),
+            XDataValue::Integer16(self.source.kind.code()),
+            XDataValue::Integer32(self.source.segment_index),
+            XDataValue::Point3D(self.source.pick_point),
+            XDataValue::Point3D(self.plane_origin),
+            XDataValue::Direction3D(self.plane_x),
+            XDataValue::Direction3D(self.plane_y),
+            XDataValue::Point3D(self.center),
+            XDataValue::Distance(self.radius),
+            XDataValue::Distance(self.cross_size),
+            XDataValue::Distance(self.cross_gap),
+            XDataValue::Distance(self.extension_length),
+            XDataValue::Distance(self.length_adjustments[0]),
+            XDataValue::Distance(self.length_adjustments[1]),
+            XDataValue::Distance(self.length_adjustments[2]),
+            XDataValue::Distance(self.length_adjustments[3]),
+            XDataValue::Distance(self.overshoots[0]),
+            XDataValue::Distance(self.overshoots[1]),
+            XDataValue::Distance(self.overshoots[2]),
+            XDataValue::Distance(self.overshoots[3]),
+            XDataValue::Integer16(
+                i16::from(self.show_extensions) | (i16::from(self.associated) << 1),
+            ),
+        ];
+        data.upsert_record(record);
+    }
+
+    /// Remove only centre-mark metadata, leaving other applications intact.
+    pub fn remove(data: &mut ExtendedData) {
+        data.remove_record(CENTERMARK_XDATA_APPLICATION);
     }
 }
