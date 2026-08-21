@@ -149,16 +149,18 @@ impl Entity for Circle {
             self.radius * axis_x.y.hypot(axis_y.y),
             self.radius * axis_x.z.hypot(axis_y.z),
         );
+        let extrusion = self.normal.normalize() * self.thickness;
+        let opposite = center + extrusion;
         BoundingBox3D::new(
             Vector3::new(
-                center.x - extent.x,
-                center.y - extent.y,
-                center.z - extent.z,
+                (center.x - extent.x).min(opposite.x - extent.x),
+                (center.y - extent.y).min(opposite.y - extent.y),
+                (center.z - extent.z).min(opposite.z - extent.z),
             ),
             Vector3::new(
-                center.x + extent.x,
-                center.y + extent.y,
-                center.z + extent.z,
+                (center.x + extent.x).max(opposite.x + extent.x),
+                (center.y + extent.y).max(opposite.y + extent.y),
+                (center.z + extent.z).max(opposite.z + extent.z),
             ),
         )
     }
