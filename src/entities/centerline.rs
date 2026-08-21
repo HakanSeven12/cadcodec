@@ -207,6 +207,8 @@ pub struct CenterMarkAssociation {
     pub radius: f64,
     pub cross_size: f64,
     pub cross_gap: f64,
+    pub cross_size_relative: bool,
+    pub cross_gap_relative: bool,
     pub extension_length: f64,
     pub length_adjustments: [f64; 4],
     pub overshoots: [f64; 4],
@@ -268,6 +270,8 @@ impl CenterMarkAssociation {
             overshoots: [*overshoot_0, *overshoot_1, *overshoot_2, *overshoot_3],
             show_extensions: flags & 1 != 0,
             associated: flags & 2 != 0,
+            cross_size_relative: flags & 4 != 0,
+            cross_gap_relative: flags & 8 != 0,
         })
     }
 
@@ -298,7 +302,10 @@ impl CenterMarkAssociation {
             XDataValue::Distance(self.overshoots[2]),
             XDataValue::Distance(self.overshoots[3]),
             XDataValue::Integer16(
-                i16::from(self.show_extensions) | (i16::from(self.associated) << 1),
+                i16::from(self.show_extensions)
+                    | (i16::from(self.associated) << 1)
+                    | (i16::from(self.cross_size_relative) << 2)
+                    | (i16::from(self.cross_gap_relative) << 3),
             ),
         ];
         data.upsert_record(record);
