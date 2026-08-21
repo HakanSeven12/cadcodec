@@ -37,6 +37,12 @@ pub struct RegisteredClassObject {
     pub properties: Vec<SemanticProperty>,
     pub payload: ProxyPayload,
     pub object_ids: Vec<ProxyObjectReference>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_dwg_data: Option<Vec<u8>>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub raw_dwg_handle_bits: i64,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_dwg_version: Option<crate::types::DxfVersion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

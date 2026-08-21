@@ -4446,9 +4446,14 @@ impl DwgDocumentBuilder {
                         .unwrap_or("");
                     match cpp_class {
                         "CAcLayoutPrintConfig" => {
-                            let data = entities::read_layout_print_config(
+                            let mut data = entities::read_layout_print_config(
                                 &mut reader,
                             );
+                            if let ExtendedEntityData::LayoutPrintConfig(value) = &mut data {
+                                value.raw_dwg_data = Some(reader.raw_merged_data());
+                                value.raw_dwg_handle_bits = reader.get_handle_bits();
+                                value.raw_dwg_version = Some(document.version);
+                            }
                             let _ = document.add_entity(EntityType::Extended(
                                 ExtendedEntity {
                                     common: entity_common,
@@ -5362,6 +5367,9 @@ impl DwgDocumentBuilder {
                                 properties: envelope.properties,
                                 payload: envelope.payload,
                                 object_ids,
+                                raw_dwg_data: None,
+                                raw_dwg_handle_bits: 0,
+                                raw_dwg_version: None,
                             },
                         )
                     } else {
@@ -5942,6 +5950,9 @@ impl DwgDocumentBuilder {
                                         properties: Vec::new(),
                                         payload,
                                         object_ids,
+                                        raw_dwg_data: Some(reader.raw_merged_data()),
+                                        raw_dwg_handle_bits: reader.get_handle_bits(),
+                                        raw_dwg_version: Some(document.version),
                                     },
                                 ),
                             );

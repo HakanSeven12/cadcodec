@@ -838,6 +838,9 @@ pub fn read_layout_print_config(
     ExtendedEntityData::LayoutPrintConfig(LayoutPrintConfigData {
         class_version: reader.read_bit_short(),
         flag: reader.read_bit_short(),
+        raw_dwg_data: None,
+        raw_dwg_handle_bits: 0,
+        raw_dwg_version: None,
     })
 }
 

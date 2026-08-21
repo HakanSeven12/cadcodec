@@ -1170,6 +1170,9 @@ pub fn read_class_object_data(
         "CSACDOCUMENTOPTIONS" => {
             ClassObjectData::CsacDocumentOptions(CsacDocumentOptions {
                 class_version: reader.read_bit_short(),
+                raw_dwg_data: Some(reader.raw_merged_data()),
+                raw_dwg_handle_bits: reader.get_handle_bits(),
+                raw_dwg_version: Some(dxf_version),
             })
         }
         _ => return None,

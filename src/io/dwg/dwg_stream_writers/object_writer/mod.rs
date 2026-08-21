@@ -278,10 +278,17 @@ impl<'a> DwgObjectWriter<'a> {
             common::OBJ_VPORT_CONTROL,
             &self.document.vports.iter().map(|v| v.handle).collect::<Vec<_>>(),
         );
+        let mut appid_handles: Vec<_> = self
+            .document
+            .app_ids
+            .iter()
+            .map(|a| (a.name.eq_ignore_ascii_case("ACAD"), a.handle))
+            .collect();
+        appid_handles.sort_by_key(|(is_acad, _)| !*is_acad);
         self.write_table_control(
             self.document.app_ids.handle(),
             common::OBJ_APPID_CONTROL,
-            &self.document.app_ids.iter().map(|a| a.handle).collect::<Vec<_>>(),
+            &appid_handles.into_iter().map(|(_, handle)| handle).collect::<Vec<_>>(),
         );
         self.write_dimstyle_control();
 
@@ -1285,12 +1292,13 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_appid_entries(&mut self) {
-        let entries: Vec<_> = self
+        let mut entries: Vec<_> = self
             .document
             .app_ids
             .iter()
             .map(|a| a.clone())
             .collect();
+        entries.sort_by_key(|app| !app.name.eq_ignore_ascii_case("ACAD"));
         for app in &entries {
             self.write_appid(app);
         }

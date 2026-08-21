@@ -602,6 +602,12 @@ pub struct AcMeStateManager {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CsacDocumentOptions {
     pub class_version: i16,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_dwg_data: Option<Vec<u8>>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub raw_dwg_handle_bits: i64,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_dwg_version: Option<crate::types::DxfVersion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

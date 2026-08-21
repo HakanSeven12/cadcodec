@@ -69,16 +69,21 @@ impl<'a> DwgObjectWriter<'a> {
             EntityType::SectionSymbol(e) => self.write_section_symbol(e),
             EntityType::ViewBorder(e) => self.write_view_border(e),
             EntityType::Extended(e) => {
-                if let ExtendedEntityData::Format(data) = &e.data {
-                    if let Some(raw) = &data.raw_dwg_data {
-                        if self.raw_passthrough_compatible(data.raw_dwg_version) {
-                            self.register_raw_object(
-                                e.common.handle,
-                                raw,
-                                data.raw_dwg_handle_bits,
-                            );
-                            return;
-                        }
+                let raw = match &e.data {
+                    ExtendedEntityData::Format(data) => data.raw_dwg_data.as_ref().map(|raw| {
+                        (raw, data.raw_dwg_handle_bits, data.raw_dwg_version)
+                    }),
+                    ExtendedEntityData::LayoutPrintConfig(data) => {
+                        data.raw_dwg_data.as_ref().map(|raw| {
+                            (raw, data.raw_dwg_handle_bits, data.raw_dwg_version)
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some((raw, handle_bits, version)) = raw {
+                    if self.raw_passthrough_compatible(version) {
+                        self.register_raw_object(e.common.handle, raw, handle_bits);
+                        return;
                     }
                 }
                 self.write_extended_entity(e);
