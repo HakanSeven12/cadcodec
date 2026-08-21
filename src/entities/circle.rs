@@ -142,19 +142,25 @@ impl Entity for Circle {
     }
 
     fn bounding_box(&self) -> BoundingBox3D {
+        let center = self.center_wcs();
+        let (axis_x, axis_y) = self.axes_wcs();
+        let extent = Vector3::new(
+            self.radius * axis_x.x.hypot(axis_y.x),
+            self.radius * axis_x.y.hypot(axis_y.y),
+            self.radius * axis_x.z.hypot(axis_y.z),
+        );
         BoundingBox3D::new(
             Vector3::new(
-                self.center.x - self.radius,
-                self.center.y - self.radius,
-                self.center.z,
+                center.x - extent.x,
+                center.y - extent.y,
+                center.z - extent.z,
             ),
             Vector3::new(
-                self.center.x + self.radius,
-                self.center.y + self.radius,
-                self.center.z,
+                center.x + extent.x,
+                center.y + extent.y,
+                center.z + extent.z,
             ),
         )
-        .ocs_to_wcs(self.normal)
     }
 
     fn translate(&mut self, offset: Vector3) {
