@@ -84,25 +84,37 @@ impl Solid {
         }
     }
 
+    /// Get the corners in boundary order.
+    ///
+    /// The on-disk order stores the last two corners in Z order. Walking the
+    /// visible boundary therefore uses first, second, fourth, third. Keeping
+    /// that rule here gives area, explode, and application renderers one
+    /// canonical interpretation without guessing from the shape.
+    pub fn boundary_corners(&self) -> Vec<Vector3> {
+        if self.is_triangle() {
+            vec![self.first_corner, self.second_corner, self.third_corner]
+        } else {
+            vec![
+                self.first_corner,
+                self.second_corner,
+                self.fourth_corner,
+                self.third_corner,
+            ]
+        }
+    }
+
     /// Calculate the area of the solid
     pub fn area(&self) -> f64 {
-        if self.is_triangle() {
-            // Triangle area using cross product
-            let v1 = self.second_corner - self.first_corner;
-            let v2 = self.third_corner - self.first_corner;
-            v1.cross(&v2).length() * 0.5
-        } else {
-            // Quadrilateral area (sum of two triangles)
-            let v1 = self.second_corner - self.first_corner;
-            let v2 = self.third_corner - self.first_corner;
-            let area1 = v1.cross(&v2).length() * 0.5;
-
-            let v3 = self.third_corner - self.first_corner;
-            let v4 = self.fourth_corner - self.first_corner;
-            let area2 = v3.cross(&v4).length() * 0.5;
-
-            area1 + area2
-        }
+        let corners = self.boundary_corners();
+        let first = corners[0];
+        corners[1..]
+            .windows(2)
+            .map(|pair| {
+                let first_edge = pair[0] - first;
+                let second_edge = pair[1] - first;
+                first_edge.cross(&second_edge).length() * 0.5
+            })
+            .sum()
     }
 }
 

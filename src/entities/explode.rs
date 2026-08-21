@@ -288,7 +288,7 @@ fn explode_ellipse(ellipse: &Ellipse) -> Vec<EntityType> {
 fn explode_solid(solid: &Solid) -> Vec<EntityType> {
     // Explode a filled solid into its edge lines.
     let common = &solid.common;
-    let corners = solid.corners();
+    let corners = solid.boundary_corners();
     let n = corners.len();
     let mut result = Vec::with_capacity(n);
     for i in 0..n {
