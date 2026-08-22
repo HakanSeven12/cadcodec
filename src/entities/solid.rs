@@ -84,26 +84,21 @@ impl Solid {
         }
     }
 
-    /// Calculate the area of the solid
-    pub fn area(&self) -> f64 {
+    /// Get corners in visible boundary order.
+    /// Stored quadrilaterals use first, second, fourth, third.
+    pub fn boundary_corners(&self) -> Vec<Vector3> {
         if self.is_triangle() {
-            // Triangle area using cross product
-            let v1 = self.second_corner - self.first_corner;
-            let v2 = self.third_corner - self.first_corner;
-            v1.cross(&v2).length() * 0.5
+            vec![self.first_corner, self.second_corner, self.third_corner]
         } else {
-            // Quadrilateral area (sum of two triangles)
-            let v1 = self.second_corner - self.first_corner;
-            let v2 = self.third_corner - self.first_corner;
-            let area1 = v1.cross(&v2).length() * 0.5;
-
-            let v3 = self.third_corner - self.first_corner;
-            let v4 = self.fourth_corner - self.first_corner;
-            let area2 = v3.cross(&v4).length() * 0.5;
-
-            area1 + area2
+            vec![
+                self.first_corner,
+                self.second_corner,
+                self.fourth_corner,
+                self.third_corner,
+            ]
         }
     }
+
 }
 
 impl Entity for Solid {

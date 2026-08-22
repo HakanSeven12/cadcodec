@@ -288,7 +288,7 @@ fn explode_ellipse(ellipse: &Ellipse) -> Vec<EntityType> {
 fn explode_solid(solid: &Solid) -> Vec<EntityType> {
     // Explode a filled solid into its edge lines.
     let common = &solid.common;
-    let corners = solid.corners();
+    let corners = solid.boundary_corners();
     let n = corners.len();
     let mut result = Vec::with_capacity(n);
     for i in 0..n {
@@ -926,17 +926,30 @@ mod tests {
 
     #[test]
     fn test_explode_solid_quad() {
+        let first = Vector3::new(0.0, 0.0, 0.0);
+        let second = Vector3::new(10.0, 0.0, 0.0);
+        let third = Vector3::new(0.0, 10.0, 0.0);
+        let fourth = Vector3::new(10.0, 10.0, 0.0);
         let solid = Solid::new(
-            Vector3::new(0.0, 0.0, 0.0),
-            Vector3::new(10.0, 0.0, 0.0),
-            Vector3::new(10.0, 10.0, 0.0),
-            Vector3::new(0.0, 10.0, 0.0),
+            first,
+            second,
+            third,
+            fourth,
         );
         let entity = EntityType::Solid(solid);
         let parts = entity.explode();
-        assert_eq!(parts.len(), 4); // 4 edge lines
-        for part in &parts {
-            assert!(matches!(part, EntityType::Line(_)));
+        let expected = [
+            (first, second),
+            (second, fourth),
+            (fourth, third),
+            (third, first),
+        ];
+        assert_eq!(parts.len(), expected.len());
+        for (part, (start, end)) in parts.iter().zip(expected) {
+            let EntityType::Line(line) = part else {
+                panic!("expected line")
+            };
+            assert_eq!((line.start, line.end), (start, end));
         }
     }
 
