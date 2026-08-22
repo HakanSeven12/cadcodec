@@ -409,6 +409,8 @@ pub struct MLine {
 }
 
 impl MLine {
+    const GEOMETRY_EPSILON_SQUARED: f64 = 1.0e-20;
+
     /// Creates a new MLine with default settings.
     pub fn new() -> Self {
         Self {
@@ -443,44 +445,139 @@ impl MLine {
 
     /// Adds a vertex at the given position.
     pub fn add_vertex(&mut self, position: Vector3) -> &mut MLineVertex {
-        // Calculate direction from previous vertex
-        let direction = if let Some(last) = self.vertices.last() {
-            (position - last.position).normalize()
-        } else {
-            Vector3::new(1.0, 0.0, 0.0)
-        };
-
-        // Update start point if this is the first vertex
-        if self.vertices.is_empty() {
-            self.start_point = position;
+        if self
+            .vertices
+            .last()
+            .is_some_and(|last| (position - last.position).length_squared() <= Self::GEOMETRY_EPSILON_SQUARED)
+        {
+            return self.vertices.last_mut().unwrap();
         }
 
-        let mut vertex = MLineVertex::with_direction(position, direction);
+        let mut vertex = MLineVertex::new(position);
         vertex.init_segments(self.style_element_count);
         self.vertices.push(vertex);
-
-        // Update previous vertex's direction
-        if self.vertices.len() > 1 {
-            let len = self.vertices.len();
-            let dir = self.vertices[len - 1].direction;
-            let prev = &mut self.vertices[len - 2];
-            // Average the direction at joints
-            let new_dir = (prev.direction + dir).normalize();
-            prev.direction = new_dir;
-            prev.miter = Vector3::new(-new_dir.y, new_dir.x, 0.0).normalize();
-        }
+        self.rebuild_geometry();
 
         self.vertices.last_mut().unwrap()
     }
 
+    /// Recalculates vertex directions and miter vectors from the current path.
+    ///
+    /// Segment parameter arrays are deliberately preserved: they carry element
+    /// offsets and break data loaded from the drawing. Callers that change the
+    /// style, scale, or justification can rebuild those values independently
+    /// after this topology-only update.
+    pub fn rebuild_geometry(&mut self) {
+        let count = self.vertices.len();
+        self.flags.set(MLineFlags::HAS_VERTICES, count > 0);
+        if count == 0 {
+            self.start_point = Vector3::ZERO;
+            return;
+        }
+
+        self.start_point = self.vertices[0].position;
+        let positions: Vec<Vector3> = self.vertices.iter().map(|vertex| vertex.position).collect();
+        let closed = self.is_closed() && count >= 3;
+        let normal = if self.normal.length_squared() > Self::GEOMETRY_EPSILON_SQUARED {
+            self.normal.normalize()
+        } else {
+            Vector3::UNIT_Z
+        };
+
+        let direction_after = |index: usize| -> Option<Vector3> {
+            let attempts = if closed { count - 1 } else { count.saturating_sub(index + 1) };
+            for step in 1..=attempts {
+                let next = if closed { (index + step) % count } else { index + step };
+                let delta = positions[next] - positions[index];
+                if delta.length_squared() > Self::GEOMETRY_EPSILON_SQUARED {
+                    return Some(delta.normalize());
+                }
+            }
+            None
+        };
+        let direction_before = |index: usize| -> Option<Vector3> {
+            let attempts = if closed { count - 1 } else { index };
+            for step in 1..=attempts {
+                let previous = if closed {
+                    (index + count - (step % count)) % count
+                } else {
+                    index - step
+                };
+                let delta = positions[index] - positions[previous];
+                if delta.length_squared() > Self::GEOMETRY_EPSILON_SQUARED {
+                    return Some(delta.normalize());
+                }
+            }
+            None
+        };
+
+        for index in 0..count {
+            let before = direction_before(index);
+            let after = direction_after(index);
+            let direction = after.or(before).unwrap_or(Vector3::UNIT_X);
+            let before_normal = before.map(|value| normal.cross(&value).normalize());
+            let after_normal = after.map(|value| normal.cross(&value).normalize());
+            let miter = match (before_normal, after_normal) {
+                (Some(a), Some(b)) => {
+                    let sum = a + b;
+                    if sum.length_squared() > Self::GEOMETRY_EPSILON_SQUARED {
+                        sum.normalize()
+                    } else {
+                        b
+                    }
+                }
+                (Some(value), None) | (None, Some(value)) => value,
+                (None, None) => Vector3::UNIT_Y,
+            };
+            self.vertices[index].direction = direction;
+            self.vertices[index].miter = miter;
+        }
+    }
+
+    /// Moves one vertex and rebuilds the dependent direction/miter data.
+    pub fn set_vertex_position(&mut self, index: usize, position: Vector3) -> bool {
+        let Some(vertex) = self.vertices.get_mut(index) else {
+            return false;
+        };
+        vertex.position = position;
+        self.rebuild_geometry();
+        true
+    }
+
+    /// Inserts a vertex while keeping the element segment layout consistent.
+    pub fn insert_vertex(&mut self, index: usize, position: Vector3) -> bool {
+        if index > self.vertices.len() {
+            return false;
+        }
+        let mut vertex = MLineVertex::new(position);
+        vertex.init_segments(self.style_element_count);
+        self.vertices.insert(index, vertex);
+        self.rebuild_geometry();
+        true
+    }
+
+    /// Removes a vertex. A drawable multiline always retains at least two.
+    pub fn remove_vertex(&mut self, index: usize) -> bool {
+        if self.vertices.len() <= 2 || index >= self.vertices.len() {
+            return false;
+        }
+        self.vertices.remove(index);
+        self.rebuild_geometry();
+        true
+    }
+
     /// Closes the MLine.
     pub fn close(&mut self) {
-        self.flags |= MLineFlags::CLOSED;
+        if self.vertices.len() >= 3 {
+            self.flags |= MLineFlags::CLOSED;
+            self.rebuild_geometry();
+        }
     }
 
     /// Opens the MLine.
     pub fn open(&mut self) {
         self.flags &= !MLineFlags::CLOSED;
+        self.rebuild_geometry();
     }
 
     /// Returns true if the MLine is closed.
@@ -568,24 +665,7 @@ impl MLine {
     /// Reverses the vertex order.
     pub fn reverse(&mut self) {
         self.vertices.reverse();
-        if let Some(first) = self.vertices.first() {
-            self.start_point = first.position;
-        }
-
-        // Recalculate directions
-        for i in 0..self.vertices.len() {
-            let direction = if i + 1 < self.vertices.len() {
-                (self.vertices[i + 1].position - self.vertices[i].position).normalize()
-            } else if self.is_closed() && !self.vertices.is_empty() {
-                (self.vertices[0].position - self.vertices[i].position).normalize()
-            } else if i > 0 {
-                self.vertices[i - 1].direction
-            } else {
-                Vector3::new(1.0, 0.0, 0.0)
-            };
-            self.vertices[i].direction = direction;
-            self.vertices[i].miter = Vector3::new(-direction.y, direction.x, 0.0).normalize();
-        }
+        self.rebuild_geometry();
     }
 }
 
