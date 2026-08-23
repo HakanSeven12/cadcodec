@@ -264,6 +264,7 @@ impl SatToken {
     pub fn as_integer(&self) -> Option<i64> {
         match self {
             SatToken::Integer(v) => Some(*v),
+            SatToken::Float(v) => exact_integer(*v),
             SatToken::Sab { tag: 0x02, data } if data.len() == 1 => {
                 Some(i8::from_le_bytes([data[0]]) as i64)
             }
@@ -275,6 +276,15 @@ impl SatToken {
             }
             SatToken::Sab { tag: 0x17, data } if data.len() == 8 => {
                 Some(i64::from_le_bytes([
+                    data[0], data[1], data[2], data[3],
+                    data[4], data[5], data[6], data[7],
+                ]))
+            }
+            SatToken::Sab { tag: 0x05, data } if data.len() == 4 => {
+                exact_integer(f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
+            }
+            SatToken::Sab { tag: 0x06, data } if data.len() == 8 => {
+                exact_integer(f64::from_le_bytes([
                     data[0], data[1], data[2], data[3],
                     data[4], data[5], data[6], data[7],
                 ]))
@@ -335,6 +345,14 @@ impl SatToken {
             _ => None,
         }
     }
+}
+
+fn exact_integer(value: f64) -> Option<i64> {
+    (value.is_finite()
+        && value.fract() == 0.0
+        && value >= i64::MIN as f64
+        && value <= i64::MAX as f64)
+        .then_some(value as i64)
 }
 
 fn sab_string_bytes(tag: u8, data: &[u8]) -> Option<&[u8]> {
