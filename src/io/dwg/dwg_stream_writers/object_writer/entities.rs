@@ -2267,7 +2267,8 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_byte(flags_byte);
 
         // User text TV 1
-        self.writer.write_variable_text(&base.text);
+        self.writer
+            .write_variable_text(base.text_override().unwrap_or(""));
 
         // Text rot BD 53
         self.writer.write_bit_double(base.text_rotation);
