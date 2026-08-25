@@ -1668,19 +1668,7 @@ impl<'a> DwgObjectWriter<'a> {
             // for an xref block (see the `is_xref` guards in the header).
             let is_xref = br.flags.is_xref || br.flags.is_xref_overlay;
 
-            // The block header's owned-handle list MUST match the objects the
-            // entity loop below actually writes (br.entity_handles + their
-            // sub-entities). Compute that set first.
-            //
-            // A live editing session can leave DANGLING handles in the block's
-            // chain: deleting an entity removes it from the document but its
-            // handle may stay listed here until the chain is next rebuilt. A
-            // header that promises more owned objects than the entity loop
-            // writes makes AutoCAD stop reading the block at the first
-            // dangling handle — the file opens EMPTY (issue: model space with
-            // 40 claimed / 16 real entities). Keep only handles that resolve
-            // to a live entity; the entity loop below uses the same list so
-            // header and stream always agree.
+            // Keep only live entities directly owned by the block header.
             let live_handles: Vec<Handle> = br
                 .entity_handles
                 .iter()
@@ -1690,28 +1678,21 @@ impl<'a> DwgObjectWriter<'a> {
             let entity_handles_for_header = if is_xref {
                 Vec::new()
             } else {
-                let expanded = self.expand_entity_handles(&live_handles);
-                // Prefer the original DWG-binary order/handles when available,
-                // but only when they describe exactly the same set — otherwise
-                // the file had entities added or removed since it was read and
-                // the stored list is stale, leaving the header pointing at
-                // handles that are never written. AutoCAD stops reading a
-                // block's contents at the first such dangling owned handle,
-                // silently dropping every entity after it. Drop stale entries
-                // and fall back to the live set.
+                // Preserve the original order when it still matches the live set.
                 match self.document.block_entity_handles.get(&br.handle) {
                     Some(orig) => {
                         use std::collections::HashSet;
-                        let valid: HashSet<u64> = expanded.iter().map(|h| h.value()).collect();
+                        let valid: HashSet<u64> =
+                            live_handles.iter().map(|h| h.value()).collect();
                         let filtered: Vec<Handle> =
                             orig.iter().copied().filter(|h| valid.contains(&h.value())).collect();
-                        if filtered.len() == expanded.len() {
+                        if filtered.len() == live_handles.len() {
                             filtered
                         } else {
-                            expanded
+                            live_handles.clone()
                         }
                     }
-                    None => expanded,
+                    None => live_handles.clone(),
                 }
             };
             self.write_block_header_with_handles(br, &entity_handles_for_header);
@@ -1887,51 +1868,6 @@ impl<'a> DwgObjectWriter<'a> {
         );
         self.object_queue.extend(batch.object_queue);
         self.registered_handles.extend(batch.registered_handles);
-    }
-
-    /// Expand entity_handles to include sub-entity handles (vertices, faces,
-    /// SEQENDs, ATTRIBs) that are children of compound entities.
-    fn expand_entity_handles(&self, handles: &[Handle]) -> Vec<Handle> {
-        let mut expanded = Vec::new();
-        for &eh in handles {
-            expanded.push(eh);
-            if let Some(&idx) = self.document.entity_index.get(&eh) {
-                let entity = self.document.entities[idx].as_ref();
-                match entity {
-                    EntityType::PolyfaceMesh(e) => {
-                        for v in &e.vertices {
-                            if !v.common.handle.is_null() { expanded.push(v.common.handle); }
-                        }
-                        for f in &e.faces {
-                            if !f.common.handle.is_null() { expanded.push(f.common.handle); }
-                        }
-                        if let Some(sh) = e.seqend_handle {
-                            if !sh.is_null() { expanded.push(sh); }
-                        }
-                    }
-                    EntityType::Polyline3D(e) => {
-                        for v in &e.vertices {
-                            if !v.handle.is_null() { expanded.push(v.handle); }
-                        }
-                    }
-                    EntityType::PolygonMesh(e) => {
-                        for v in &e.vertices {
-                            if !v.common.handle.is_null() { expanded.push(v.common.handle); }
-                        }
-                    }
-                    EntityType::Insert(e) if e.has_attributes() => {
-                        for att in &e.attributes {
-                            if !att.common.handle.is_null() { expanded.push(att.common.handle); }
-                        }
-                        if let Some(sh) = e.seqend_handle {
-                            if !sh.is_null() { expanded.push(sh); }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        expanded
     }
 
     /// Write a BLOCK_HEADER (block record) object with explicit entity handles.

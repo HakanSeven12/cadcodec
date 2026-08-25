@@ -1135,11 +1135,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // R2004+: owned object count when has_attribs
         let (attrib_handles, seqend_handle) = if e.has_attributes() {
-            // Preserve each attribute's original handle. The owning block's
-            // owned-entity list references these handles, so re-allocating them
-            // leaves dangling references (AutoCAD: eUnknownHandle on the space).
-            // Only allocate a fresh handle when one is missing (e.g. an
-            // attribute created programmatically with a null handle).
+            // Preserve existing attribute handles and allocate only missing ones.
             let ahs: Vec<Handle> = e.attributes.iter()
                 .map(|a| if a.common.handle.is_null() {
                     self.alloc_handle()
