@@ -2361,8 +2361,10 @@ pub fn read_dimension_radius(
     dxf_version: DxfVersion,
 ) -> DimensionRadiusData {
     let common = read_common_dimension_data(reader, version, dxf_version);
-    let definition_point = reader.read_3bit_double();
+    // The radial payload stores the centre (_10) before the chord/leader
+    // attachment point (_15).
     let angle_vertex = reader.read_3bit_double();
+    let definition_point = reader.read_3bit_double();
     let leader_length = reader.read_bit_double();
     DimensionRadiusData {
         common,

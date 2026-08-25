@@ -12349,7 +12349,9 @@ impl<'a> SectionReader<'a> {
         let mut text_rotation = 0.0f64;
         let mut ext_line_rotation = 0.0f64;
         let mut ordinate_is_x = true;
-        let mut actual_measurement = 0.0;
+        // Group 42 is optional. Keep absence distinct from a real zero so each
+        // dimension constructor can retain its geometry-derived measurement.
+        let mut actual_measurement = None;
         let mut leader_length = 0.0;
         let mut line_spacing_factor = 1.0f64;
         let mut normal = PointReader::new();
@@ -12429,7 +12431,7 @@ impl<'a> SectionReader<'a> {
                 }
                 42 => {
                     if let Some(measurement) = pair.as_double() {
-                        actual_measurement = measurement;
+                        actual_measurement = Some(measurement);
                     }
                 }
                 40 => {
@@ -12460,7 +12462,9 @@ impl<'a> SectionReader<'a> {
                 dim.base.common.line_weight = line_weight;
                 dim.base.text = text;
                 dim.base.style_name = style_name;
-                dim.base.actual_measurement = actual_measurement;
+                if let Some(measurement) = actual_measurement {
+                    dim.base.actual_measurement = measurement;
+                }
                 dim.ext_line_rotation = ext_line_rotation;
                 if let Some(def_pt) = definition_point.get_point() {
                     dim.definition_point = def_pt;
@@ -12474,7 +12478,9 @@ impl<'a> SectionReader<'a> {
                 dim.base.common.line_weight = line_weight;
                 dim.base.text = text;
                 dim.base.style_name = style_name;
-                dim.base.actual_measurement = actual_measurement;
+                if let Some(measurement) = actual_measurement {
+                    dim.base.actual_measurement = measurement;
+                }
                 dim.ext_line_rotation = ext_line_rotation;
                 if let Some(def_pt) = definition_point.get_point() {
                     dim.definition_point = def_pt;
@@ -12482,17 +12488,19 @@ impl<'a> SectionReader<'a> {
                 Dimension::Linear(dim)
             }
             DimensionType::Radius => {
-                // Writer emits the centre as code 15 (angle_vertex) and the
-                // point on the arc as the base definition point (code 10).
-                let center = pt3;
-                let chord_point = definition_point.get_point().unwrap_or(Vector3::zero());
+                // A radial dimension stores its centre in common group 10 and
+                // its leader attachment point on the circle/arc in group 15.
+                let center = definition_point.get_point().unwrap_or(Vector3::zero());
+                let chord_point = pt3;
                 let mut dim = DimensionRadius::new(center, chord_point);
                 dim.base.common.layer = layer;
                 dim.base.common.color = color;
                 dim.base.common.line_weight = line_weight;
                 dim.base.text = text;
                 dim.base.style_name = style_name;
-                dim.base.actual_measurement = actual_measurement;
+                if let Some(measurement) = actual_measurement {
+                    dim.base.actual_measurement = measurement;
+                }
                 dim.leader_length = leader_length;
                 Dimension::Radius(dim)
             }
@@ -12505,7 +12513,9 @@ impl<'a> SectionReader<'a> {
                 dim.base.common.line_weight = line_weight;
                 dim.base.text = text;
                 dim.base.style_name = style_name;
-                dim.base.actual_measurement = actual_measurement;
+                if let Some(measurement) = actual_measurement {
+                    dim.base.actual_measurement = measurement;
+                }
                 Dimension::Diameter(dim)
             }
             DimensionType::Angular => {
@@ -12522,7 +12532,9 @@ impl<'a> SectionReader<'a> {
                 dim.base.common.line_weight = line_weight;
                 dim.base.text = text;
                 dim.base.style_name = style_name;
-                dim.base.actual_measurement = actual_measurement;
+                if let Some(measurement) = actual_measurement {
+                    dim.base.actual_measurement = measurement;
+                }
                 Dimension::Angular2Ln(dim)
             }
             DimensionType::Angular3Point => {
@@ -12540,7 +12552,9 @@ impl<'a> SectionReader<'a> {
                 dim.base.common.line_weight = line_weight;
                 dim.base.text = text;
                 dim.base.style_name = style_name;
-                dim.base.actual_measurement = actual_measurement;
+                if let Some(measurement) = actual_measurement {
+                    dim.base.actual_measurement = measurement;
+                }
                 Dimension::Angular3Pt(dim)
             }
             DimensionType::Ordinate => {
@@ -12555,7 +12569,9 @@ impl<'a> SectionReader<'a> {
                 dim.base.common.line_weight = line_weight;
                 dim.base.text = text;
                 dim.base.style_name = style_name;
-                dim.base.actual_measurement = actual_measurement;
+                if let Some(measurement) = actual_measurement {
+                    dim.base.actual_measurement = measurement;
+                }
                 Dimension::Ordinate(dim)
             }
             DimensionType::ArcLength => Dimension::Arc(DimensionArc::default()),
@@ -12584,8 +12600,12 @@ impl<'a> SectionReader<'a> {
             }
         }
 
-        if let Some(point) = definition_point.get_point() {
-            dimension.set_definition_point(point);
+        // Group 10 is the centre for a radial dimension, not its dimension
+        // definition/chord point. Other dimension types keep the common rule.
+        if !matches!(dimension, Dimension::Radius(_)) {
+            if let Some(point) = definition_point.get_point() {
+                dimension.set_definition_point(point);
+            }
         }
 
         Ok(Some(dimension))
