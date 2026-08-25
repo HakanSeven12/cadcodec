@@ -3670,7 +3670,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_angular_2line(&mut self, dim: &DimensionAngular2Ln, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, dim.definition_point, 2, owner)?; // Angular = 2
+        self.write_dimension_base(&dim.base, dim.dimension_arc, 2, owner)?; // Angular = 2
         self.writer.write_subclass("AcDb2LineAngularDimension")?;
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;

@@ -433,15 +433,15 @@ impl Default for DimensionDiameter {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DimensionAngular2Ln {
     pub base: DimensionBase,
-    /// Arc definition point (dimension arc location) - in WCS
+    /// Dimension arc location - in WCS
     pub dimension_arc: Vector3,
     /// First point (line 1 start) - in WCS
     pub first_point: Vector3,
-    /// Second point (line 1 end / angle vertex for line 1) - in WCS
+    /// First line end - in WCS
     pub second_point: Vector3,
-    /// Angle vertex (line 2 vertex) - in WCS
+    /// Second line start - in WCS
     pub angle_vertex: Vector3,
-    /// Definition point (line 2 point defining angle) - in WCS
+    /// Second line end - in WCS
     pub definition_point: Vector3,
 }
 
@@ -459,18 +459,32 @@ impl DimensionAngular2Ln {
         Self {
             base,
             dimension_arc: Vector3::ZERO,
-            first_point,
-            second_point,
+            first_point: vertex,
+            second_point: first_point,
             angle_vertex: vertex,
-            definition_point: Vector3::ZERO,
+            definition_point: second_point,
         }
     }
 
     /// Get the angle measurement in radians
     pub fn measurement_radians(&self) -> f64 {
-        let v1 = (self.first_point - self.angle_vertex).normalize();
-        let v2 = (self.second_point - self.angle_vertex).normalize();
-        v1.dot(&v2).acos()
+        let first_direction = self.second_point - self.first_point;
+        let second_direction = self.definition_point - self.angle_vertex;
+        let Some(vertex) = line_intersection_2d(
+            self.first_point,
+            first_direction,
+            self.angle_vertex,
+            second_direction,
+        ) else {
+            return minor_angle_radians(first_direction, second_direction);
+        };
+        let arc_point = if (self.dimension_arc - vertex).length_squared() > f64::EPSILON {
+            self.dimension_arc
+        } else {
+            self.base.definition_point
+        };
+        selected_line_sector_radians(vertex, first_direction, second_direction, arc_point)
+            .unwrap_or_else(|| minor_angle_radians(first_direction, second_direction))
     }
 
     /// Get the angle measurement in degrees
@@ -534,9 +548,15 @@ impl DimensionAngular3Pt {
 
     /// Get the angle measurement in radians
     pub fn measurement_radians(&self) -> f64 {
-        let v1 = (self.first_point - self.angle_vertex).normalize();
-        let v2 = (self.second_point - self.angle_vertex).normalize();
-        v1.dot(&v2).acos()
+        let first_direction = self.first_point - self.angle_vertex;
+        let second_direction = self.second_point - self.angle_vertex;
+        selected_line_sector_radians(
+            self.angle_vertex,
+            first_direction,
+            second_direction,
+            self.definition_point,
+        )
+        .unwrap_or_else(|| minor_angle_radians(first_direction, second_direction))
     }
 
     /// Get the angle measurement in degrees
@@ -559,6 +579,80 @@ impl Default for DimensionAngular3Pt {
 
 /// Type alias for backward compatibility
 pub type DimensionAngular3Point = DimensionAngular3Pt;
+
+fn minor_angle_radians(first: Vector3, second: Vector3) -> f64 {
+    let first_length = first.length();
+    let second_length = second.length();
+    if first_length <= f64::EPSILON || second_length <= f64::EPSILON {
+        return 0.0;
+    }
+    (first.dot(&second) / (first_length * second_length))
+        .clamp(-1.0, 1.0)
+        .acos()
+}
+
+fn line_intersection_2d(
+    first_origin: Vector3,
+    first_direction: Vector3,
+    second_origin: Vector3,
+    second_direction: Vector3,
+) -> Option<Vector3> {
+    let cross = first_direction.x * second_direction.y
+        - first_direction.y * second_direction.x;
+    if !cross.is_finite() || cross.abs() <= 1.0e-12 {
+        return None;
+    }
+    let offset = second_origin - first_origin;
+    let t = (offset.x * second_direction.y - offset.y * second_direction.x) / cross;
+    Some(first_origin + first_direction * t)
+}
+
+fn selected_line_sector_radians(
+    vertex: Vector3,
+    first_direction: Vector3,
+    second_direction: Vector3,
+    arc_point: Vector3,
+) -> Option<f64> {
+    if first_direction.length_squared() <= f64::EPSILON
+        || second_direction.length_squared() <= f64::EPSILON
+    {
+        return None;
+    }
+    let arc_direction = arc_point - vertex;
+    if arc_direction.length_squared() <= f64::EPSILON {
+        return None;
+    }
+
+    let normalize_angle = |angle: f64| angle.rem_euclid(std::f64::consts::TAU);
+    let first = normalize_angle(first_direction.y.atan2(first_direction.x));
+    let second = normalize_angle(second_direction.y.atan2(second_direction.x));
+    let selected = normalize_angle(arc_direction.y.atan2(arc_direction.x));
+    let mut boundaries = [
+        first,
+        normalize_angle(first + std::f64::consts::PI),
+        second,
+        normalize_angle(second + std::f64::consts::PI),
+    ];
+    boundaries.sort_by(f64::total_cmp);
+
+    for index in 0..boundaries.len() {
+        let start = boundaries[index];
+        let end = if index + 1 < boundaries.len() {
+            boundaries[index + 1]
+        } else {
+            boundaries[0] + std::f64::consts::TAU
+        };
+        let selected = if selected + 1.0e-12 < start {
+            selected + std::f64::consts::TAU
+        } else {
+            selected
+        };
+        if selected >= start - 1.0e-12 && selected <= end + 1.0e-12 {
+            return Some((end - start).clamp(0.0, std::f64::consts::PI));
+        }
+    }
+    None
+}
 
 /// Ordinate dimension entity
 ///
@@ -757,7 +851,7 @@ impl Dimension {
             Dimension::Linear(d) => d.definition_point,
             Dimension::Radius(d) => d.definition_point,
             Dimension::Diameter(d) => d.definition_point,
-            Dimension::Angular2Ln(d) => d.definition_point,
+            Dimension::Angular2Ln(d) => d.dimension_arc,
             Dimension::Angular3Pt(d) => d.definition_point,
             Dimension::Ordinate(d) => d.definition_point,
             Dimension::Arc(d) => d.definition_point,
@@ -772,7 +866,7 @@ impl Dimension {
             Dimension::Linear(d) => d.definition_point = point,
             Dimension::Radius(d) => d.definition_point = point,
             Dimension::Diameter(d) => d.definition_point = point,
-            Dimension::Angular2Ln(d) => d.definition_point = point,
+            Dimension::Angular2Ln(d) => d.dimension_arc = point,
             Dimension::Angular3Pt(d) => d.definition_point = point,
             Dimension::Ordinate(d) => d.definition_point = point,
             Dimension::Arc(d) => d.definition_point = point,
