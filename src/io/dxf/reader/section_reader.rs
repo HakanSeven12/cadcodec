@@ -12509,9 +12509,7 @@ impl<'a> SectionReader<'a> {
                 Dimension::Diameter(dim)
             }
             DimensionType::Angular => {
-                // Assign by DXF code, not through new() (whose argument order is
-                // vertex,first,second and would scramble the points): 13=first,
-                // 14=second, 15=angle_vertex, 16=arc location.
+                // 13-14 and 10-15 define the lines; 16 locates the arc.
                 let mut dim = DimensionAngular2Ln::default();
                 dim.first_point = pt1;
                 dim.second_point = pt2;

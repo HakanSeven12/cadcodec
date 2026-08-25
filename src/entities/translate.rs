@@ -142,6 +142,7 @@ pub(crate) fn translate_dimension(e: &mut Dimension, offset: Vector3) {
         }
         Dimension::Angular2Ln(d) => {
             d.base.text_middle_point = d.base.text_middle_point + offset;
+            d.dimension_arc = d.dimension_arc + offset;
             d.angle_vertex = d.angle_vertex + offset;
             d.first_point = d.first_point + offset;
             d.second_point = d.second_point + offset;

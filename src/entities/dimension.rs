@@ -433,15 +433,15 @@ impl Default for DimensionDiameter {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DimensionAngular2Ln {
     pub base: DimensionBase,
-    /// Arc definition point (dimension arc location) - in WCS
+    /// Dimension arc location (group 16).
     pub dimension_arc: Vector3,
     /// First point (line 1 start) - in WCS
     pub first_point: Vector3,
-    /// Second point (line 1 end / angle vertex for line 1) - in WCS
+    /// First line end (group 14).
     pub second_point: Vector3,
-    /// Angle vertex (line 2 vertex) - in WCS
+    /// Second line start (group 15).
     pub angle_vertex: Vector3,
-    /// Definition point (line 2 point defining angle) - in WCS
+    /// Second line end (group 10).
     pub definition_point: Vector3,
 }
 
@@ -459,18 +459,33 @@ impl DimensionAngular2Ln {
         Self {
             base,
             dimension_arc: Vector3::ZERO,
-            first_point,
-            second_point,
+            first_point: vertex,
+            second_point: first_point,
             angle_vertex: vertex,
-            definition_point: Vector3::ZERO,
+            definition_point: second_point,
         }
     }
 
     /// Get the angle measurement in radians
     pub fn measurement_radians(&self) -> f64 {
-        let v1 = (self.first_point - self.angle_vertex).normalize();
-        let v2 = (self.second_point - self.angle_vertex).normalize();
-        v1.dot(&v2).acos()
+        let first_direction = self.second_point - self.first_point;
+        let second_direction = self.definition_point - self.angle_vertex;
+        let Some(vertex) = line_intersection(
+            self.first_point,
+            first_direction,
+            self.angle_vertex,
+            second_direction,
+        ) else {
+            return minor_angle_radians(first_direction, second_direction);
+        };
+        selected_line_sector_radians(
+            vertex,
+            first_direction,
+            second_direction,
+            self.dimension_arc,
+            self.base.normal,
+        )
+        .unwrap_or_else(|| minor_angle_radians(first_direction, second_direction))
     }
 
     /// Get the angle measurement in degrees
@@ -534,9 +549,16 @@ impl DimensionAngular3Pt {
 
     /// Get the angle measurement in radians
     pub fn measurement_radians(&self) -> f64 {
-        let v1 = (self.first_point - self.angle_vertex).normalize();
-        let v2 = (self.second_point - self.angle_vertex).normalize();
-        v1.dot(&v2).acos()
+        let first_direction = self.first_point - self.angle_vertex;
+        let second_direction = self.second_point - self.angle_vertex;
+        selected_line_sector_radians(
+            self.angle_vertex,
+            first_direction,
+            second_direction,
+            self.definition_point,
+            self.base.normal,
+        )
+        .unwrap_or_else(|| minor_angle_radians(first_direction, second_direction))
     }
 
     /// Get the angle measurement in degrees
@@ -559,6 +581,107 @@ impl Default for DimensionAngular3Pt {
 
 /// Type alias for backward compatibility
 pub type DimensionAngular3Point = DimensionAngular3Pt;
+
+fn minor_angle_radians(first: Vector3, second: Vector3) -> f64 {
+    let first_length = first.length();
+    let second_length = second.length();
+    if first_length <= f64::EPSILON || second_length <= f64::EPSILON {
+        return 0.0;
+    }
+    (first.dot(&second) / (first_length * second_length))
+        .clamp(-1.0, 1.0)
+        .acos()
+}
+
+fn line_intersection(
+    first_origin: Vector3,
+    first_direction: Vector3,
+    second_origin: Vector3,
+    second_direction: Vector3,
+) -> Option<Vector3> {
+    let cross = first_direction.cross(&second_direction);
+    let denominator = cross.length_squared();
+    let direction_scale = first_direction.length_squared() * second_direction.length_squared();
+    if !denominator.is_finite() || denominator <= direction_scale * 1.0e-24 {
+        return None;
+    }
+    let offset = second_origin - first_origin;
+    let first_parameter = offset.cross(&second_direction).dot(&cross) / denominator;
+    let second_parameter = offset.cross(&first_direction).dot(&cross) / denominator;
+    let first_point = first_origin + first_direction * first_parameter;
+    let second_point = second_origin + second_direction * second_parameter;
+    let scale = first_point.length().max(second_point.length()).max(1.0);
+    (first_point.distance(&second_point) <= scale * 1.0e-9)
+        .then_some((first_point + second_point) * 0.5)
+}
+
+fn selected_line_sector_radians(
+    vertex: Vector3,
+    first_direction: Vector3,
+    second_direction: Vector3,
+    arc_point: Vector3,
+    preferred_normal: Vector3,
+) -> Option<f64> {
+    if first_direction.length_squared() <= f64::EPSILON
+        || second_direction.length_squared() <= f64::EPSILON
+    {
+        return None;
+    }
+    let arc_direction = arc_point - vertex;
+    if arc_direction.length_squared() <= f64::EPSILON {
+        return None;
+    }
+
+    let cross = first_direction.cross(&second_direction);
+    let preferred_scale = preferred_normal.length()
+        * first_direction.length().max(second_direction.length());
+    let preferred_is_normal = preferred_normal.length_squared() > f64::EPSILON
+        && preferred_normal.dot(&first_direction).abs() <= preferred_scale * 1.0e-9
+        && preferred_normal.dot(&second_direction).abs() <= preferred_scale * 1.0e-9;
+    let normal = if preferred_is_normal {
+        preferred_normal.normalize()
+    } else if cross.length_squared() > f64::EPSILON {
+        cross.normalize()
+    } else {
+        return None;
+    };
+    let axis_x = first_direction.normalize();
+    let axis_y = normal.cross(&axis_x).normalize();
+    let normalize_angle = |vector: Vector3| {
+        vector
+            .dot(&axis_y)
+            .atan2(vector.dot(&axis_x))
+            .rem_euclid(std::f64::consts::TAU)
+    };
+    let first = normalize_angle(first_direction);
+    let second = normalize_angle(second_direction);
+    let selected = normalize_angle(arc_direction);
+    let mut boundaries = [
+        first,
+        (first + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU),
+        second,
+        (second + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU),
+    ];
+    boundaries.sort_by(f64::total_cmp);
+
+    for index in 0..boundaries.len() {
+        let start = boundaries[index];
+        let end = if index + 1 < boundaries.len() {
+            boundaries[index + 1]
+        } else {
+            boundaries[0] + std::f64::consts::TAU
+        };
+        let selected = if selected + 1.0e-12 < start {
+            selected + std::f64::consts::TAU
+        } else {
+            selected
+        };
+        if selected >= start - 1.0e-12 && selected <= end + 1.0e-12 {
+            return Some((end - start).clamp(0.0, std::f64::consts::PI));
+        }
+    }
+    None
+}
 
 /// Ordinate dimension entity
 ///
@@ -853,7 +976,14 @@ impl super::Entity for Dimension {
             Dimension::Linear(d) => BoundingBox3D::from_points(&[d.first_point, d.second_point, d.definition_point]).unwrap_or_default(),
             Dimension::Radius(d) => BoundingBox3D::from_points(&[d.angle_vertex, d.definition_point]).unwrap_or_default(),
             Dimension::Diameter(d) => BoundingBox3D::from_points(&[d.angle_vertex, d.definition_point]).unwrap_or_default(),
-            Dimension::Angular2Ln(d) => BoundingBox3D::from_points(&[d.angle_vertex, d.first_point, d.second_point, d.definition_point]).unwrap_or_default(),
+            Dimension::Angular2Ln(d) => BoundingBox3D::from_points(&[
+                d.dimension_arc,
+                d.angle_vertex,
+                d.first_point,
+                d.second_point,
+                d.definition_point,
+            ])
+            .unwrap_or_default(),
             Dimension::Angular3Pt(d) => BoundingBox3D::from_points(&[d.angle_vertex, d.first_point, d.second_point, d.definition_point]).unwrap_or_default(),
             Dimension::Ordinate(d) => BoundingBox3D::from_points(&[d.feature_location, d.leader_endpoint, d.definition_point]).unwrap_or_default(),
             Dimension::Arc(d) => BoundingBox3D::from_points(&[d.definition_point, d.first_extension_point, d.second_extension_point, d.center_point, d.first_leader_point, d.second_leader_point]).unwrap_or_default(),

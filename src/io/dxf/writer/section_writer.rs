@@ -3675,7 +3675,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;
         self.writer.write_point3d(15, dim.angle_vertex)?;
-        self.writer.write_point3d(16, dim.definition_point)?;
+        self.writer.write_point3d(16, dim.dimension_arc)?;
         Ok(())
     }
 
