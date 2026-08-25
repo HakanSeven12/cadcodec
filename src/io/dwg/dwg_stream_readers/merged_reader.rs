@@ -199,11 +199,10 @@ impl DwgMergedReader {
     ///
     /// Called after the caller reads the RL (total_size_bits) from the main stream.
     /// The RL is written by `save_position_for_size` in the writer.
-    /// It stores **one past** the text-present flag bit position (same convention
-    /// as per-object records): flag is at RL − 1, handles start at the next
-    /// byte boundary after RL.
+    /// It stores one past the text-present flag bit position. The flag is at
+    /// RL − 1 and the handle stream starts at RL.
     ///
-    /// Layout: `[RL][main_data...][text...][modular_short][flag@RL-1][pad][handles...]`
+    /// Layout: `[RL][main_data...][text...][modular_short][flag@RL-1][handles...]`
     pub fn setup_text_and_handle(&mut self, total_size_bits: i64) {
         if let Some(ref data) = self.raw_data {
             let dwg = DwgVersion::from_dxf_version(self.dxf_version)
@@ -221,15 +220,14 @@ impl DwgMergedReader {
                 text_reader.set_position_by_flag(total_size_bits - 1);
             self.text = Some(text_reader);
 
-            // Handle reader — starts at the next byte boundary after the flag bit.
-            let handle_start = ((total_size_bits + 1 + 7) / 8) * 8;
+            self.handle_start_bit = total_size_bits;
             let mut handle_reader = DwgBitReader::with_encoding(
                 data.clone(),
                 dwg,
                 self.dxf_version,
                 self.encoding,
             );
-            handle_reader.set_position_in_bits(handle_start);
+            handle_reader.set_position_in_bits(self.handle_start_bit);
             self.handle = Some(handle_reader);
         }
     }

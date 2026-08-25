@@ -427,7 +427,7 @@ impl DwgMergedWriter {
     ///
     /// The reader computes:
     /// - flag at RL − 1 (per-object) or at RL (section)
-    /// - handles at the next byte boundary after the flag bit
+    /// - handles immediately after the flag bit
     ///
     /// 1. Record main and text bit sizes
     /// 2. If saved position: compute total bits, patch size field
@@ -436,7 +436,7 @@ impl DwgMergedWriter {
     ///    b. Write text-size flag at the text boundary (set_position_by_flag)
     ///    c. Write `true` bit (text present flag)
     /// 4. If text not present: write `false` bit
-    /// 5. Byte-align, then append handle stream
+    /// 5. Append the handle stream
     fn merge_three_stream(&mut self) -> Vec<u8> {
         let main_size_bits = self.main.position_in_bits();
         let text_size_bits = self.text.position_in_bits();
@@ -449,8 +449,6 @@ impl DwgMergedWriter {
             let saved_pos = self.position_in_bits;
 
             // RL = mainSizeBits + textSizeBits + 1 (flag bit) + flag_words.
-            // This matches C# ACadSharp DwgMergedStreamWriter.WriteSpearShift()
-            // which uses the same formula for both per-object and section records.
             let mut total_bits = main_size_bits + text_size_bits + 1;
             if text_size_bits > 0 {
                 total_bits += 16;
@@ -480,7 +478,6 @@ impl DwgMergedWriter {
 
             // Byte-align after text bytes — ensures the buffer is large
             // enough before we seek back to write flag words.
-            // ACadSharp: this.Main.WriteSpearShift() after WriteBytes.
             self.main.write_spear_shift();
 
             // The text data occupies bits [main_size_bits .. main_size_bits + text_size_bits).
@@ -493,9 +490,6 @@ impl DwgMergedWriter {
         } else {
             self.main.write_bit(false); // no text
         }
-
-        // C# ACadSharp: handles are appended immediately after the flag bit
-        // with NO extra byte-alignment. The handle stream itself is padded.
 
         // Record handle start position.
         self.handle.write_spear_shift();

@@ -2584,6 +2584,13 @@ impl DwgDocumentBuilder {
             }
         }
 
+        document.header.current_layer_name = document
+            .layers
+            .iter()
+            .find(|layer| layer.handle == document.header.current_layer_handle)
+            .map(|layer| layer.name.clone())
+            .unwrap_or_default();
+
         // ── Post-pass: guarantee the mandatory *Model_Space / *Paper_Space ──
         // block records exist and enumerate their geometry.
         //
