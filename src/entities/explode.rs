@@ -491,13 +491,10 @@ fn explode_dimension(dim: &Dimension) -> Vec<EntityType> {
     let base = dim.base();
     let common = &base.common;
 
-    let text_value = if !base.text.is_empty() {
-        base.text.clone()
-    } else if let Some(ref ut) = base.user_text {
-        ut.clone()
-    } else {
-        format!("{:.4}", base.actual_measurement)
-    };
+    let text_value = base
+        .text_override()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{:.4}", base.actual_measurement));
 
     let mut result = Vec::new();
 

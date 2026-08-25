@@ -2267,7 +2267,8 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_byte(flags_byte);
 
         // User text TV 1
-        self.writer.write_variable_text(&base.text);
+        self.writer
+            .write_variable_text(base.text_override().unwrap_or(""));
 
         // Text rot BD 53
         self.writer.write_bit_double(base.text_rotation);
@@ -3541,6 +3542,10 @@ impl<'a> DwgObjectWriter<'a> {
         if flags & 0x0001 != 0 {
             self.writer
                 .write_bit(value.title_suppressed.unwrap_or(false));
+        }
+        if flags & 0x0002 != 0 {
+            self.writer
+                .write_bit(value.header_suppressed.unwrap_or(false));
         }
         if flags & 0x0004 != 0 {
             self.writer

@@ -3822,6 +3822,9 @@ fn read_legacy_table_style_override(
     if flags & 0x0001 != 0 {
         value.title_suppressed = Some(reader.read_bit());
     }
+    if flags & 0x0002 != 0 {
+        value.header_suppressed = Some(reader.read_bit());
+    }
     if flags & 0x0004 != 0 {
         value.flow_direction = Some(reader.read_bit_short());
     }

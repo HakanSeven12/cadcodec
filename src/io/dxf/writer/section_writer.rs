@@ -3533,7 +3533,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
     }
 
-    fn write_dimension_base(&mut self, base: &DimensionBase, type_flags: i16, owner: Handle) -> Result<()> {
+    fn write_dimension_base(
+        &mut self,
+        base: &DimensionBase,
+        definition_point: Vector3,
+        type_flags: i16,
+        owner: Handle,
+    ) -> Result<()> {
         self.writer.write_handle(5, base.common.handle)?;
         self.writer.write_handle(330, owner)?;
 
@@ -3587,7 +3593,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         self.writer.write_subclass("AcDbDimension")?;
         self.writer.write_string(2, &base.block_name)?;
-        self.writer.write_point3d(10, base.definition_point)?;
+        self.writer.write_point3d(10, definition_point)?;
         self.writer.write_point3d(11, base.text_middle_point)?;
         // Bit 0x80 marks text positioned at a user-defined location.
         let type_flags = if base.text_user_positioned {
@@ -3599,8 +3605,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // DXF angles are in degrees; internal representation is radians.
         self.writer.write_double(53, base.text_rotation.to_degrees())?;
         self.writer.write_string(3, &base.style_name)?;
-        if !base.text.is_empty() {
-            self.writer.write_string(1, &base.text)?;
+        if let Some(text) = base.text_override() {
+            self.writer.write_string(1, text)?;
         }
         if (base.line_spacing_factor - 1.0).abs() > 1e-10 {
             self.writer.write_double(44, base.line_spacing_factor)?;
@@ -3617,7 +3623,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_aligned(&mut self, dim: &DimensionAligned, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 1, owner)?; // Aligned = 1
+        self.write_dimension_base(&dim.base, dim.definition_point, 1, owner)?; // Aligned = 1
         self.writer.write_subclass("AcDbAlignedDimension")?;
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;
@@ -3630,7 +3636,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_linear(&mut self, dim: &DimensionLinear, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 0, owner)?; // Linear = 0
+        self.write_dimension_base(&dim.base, dim.definition_point, 0, owner)?; // Linear = 0
         self.writer.write_subclass("AcDbAlignedDimension")?;
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;
@@ -3646,7 +3652,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_radius(&mut self, dim: &DimensionRadius, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 4, owner)?; // Radius = 4
+        self.write_dimension_base(&dim.base, dim.definition_point, 4, owner)?; // Radius = 4
         self.writer.write_subclass("AcDbRadialDimension")?;
         self.writer.write_point3d(15, dim.angle_vertex)?;
         self.writer.write_double(40, dim.leader_length)?;
@@ -3655,7 +3661,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_diameter(&mut self, dim: &DimensionDiameter, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 3, owner)?; // Diameter = 3
+        self.write_dimension_base(&dim.base, dim.definition_point, 3, owner)?; // Diameter = 3
         self.writer.write_subclass("AcDbDiametricDimension")?;
         self.writer.write_point3d(15, dim.angle_vertex)?;
         self.writer.write_double(40, dim.leader_length)?;
@@ -3664,7 +3670,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_angular_2line(&mut self, dim: &DimensionAngular2Ln, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 2, owner)?; // Angular = 2
+        self.write_dimension_base(&dim.base, dim.definition_point, 2, owner)?; // Angular = 2
         self.writer.write_subclass("AcDb2LineAngularDimension")?;
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;
@@ -3675,7 +3681,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_angular_3point(&mut self, dim: &DimensionAngular3Pt, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 5, owner)?; // 3-point angular = 5
+        self.write_dimension_base(&dim.base, dim.definition_point, 5, owner)?; // 3-point angular = 5
         self.writer.write_subclass("AcDb3PointAngularDimension")?;
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;
@@ -3688,7 +3694,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Bit 0x40 marks the X datum; clear = Y. (0x80 is reserved for the
         // text-user-positioned flag and must not be reused here.)
         let type_flags = if dim.is_ordinate_type_x { 0x40 } else { 0 };
-        self.write_dimension_base(&dim.base, 6 | type_flags, owner)?;
+        self.write_dimension_base(&dim.base, dim.definition_point, 6 | type_flags, owner)?;
         self.writer.write_subclass("AcDbOrdinateDimension")?;
         self.writer.write_point3d(13, dim.feature_location)?;
         self.writer.write_point3d(14, dim.leader_endpoint)?;
@@ -3697,7 +3703,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_arc(&mut self, dim: &DimensionArc, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("ARC_DIMENSION")?;
-        self.write_dimension_base(&dim.base, 8, owner)?;
+        self.write_dimension_base(&dim.base, dim.definition_point, 8, owner)?;
         self.writer.write_subclass("AcDbArcDimension")?;
         self.writer.write_point3d(13, dim.first_extension_point)?;
         self.writer.write_point3d(14, dim.second_extension_point)?;
@@ -3717,7 +3723,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         owner: Handle,
     ) -> Result<()> {
         self.writer.write_entity_type("LARGE_RADIAL_DIMENSION")?;
-        self.write_dimension_base(&dim.base, 4, owner)?;
+        self.write_dimension_base(&dim.base, dim.definition_point, 4, owner)?;
         self.writer.write_subclass("AcDbRadialDimensionLarge")?;
         self.writer.write_point3d(13, dim.jog_point)?;
         self.writer.write_point3d(14, dim.override_center)?;

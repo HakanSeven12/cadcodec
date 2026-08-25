@@ -12576,15 +12576,16 @@ impl<'a> SectionReader<'a> {
             }
             dc.text_rotation = text_rotation;
             dc.text_user_positioned = text_user_positioned;
-            if let Some(pt) = definition_point.get_point() {
-                dc.definition_point = pt;
-            }
             if line_spacing_factor != 1.0 {
                 dc.line_spacing_factor = line_spacing_factor;
             }
             if let Some(n) = normal.get_point() {
                 dc.normal = n;
             }
+        }
+
+        if let Some(point) = definition_point.get_point() {
+            dimension.set_definition_point(point);
         }
 
         Ok(Some(dimension))

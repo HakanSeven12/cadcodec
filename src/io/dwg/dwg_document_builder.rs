@@ -3679,6 +3679,7 @@ impl DwgDocumentBuilder {
                     dim.second_point = data.second_point;
                     dim.angle_vertex = data.angle_vertex;
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Angular2Ln(dim)));
                 }
                 OBJ_DIMENSION_ANG_3PT => {
@@ -3694,6 +3695,7 @@ impl DwgDocumentBuilder {
                     dim.second_point = data.second_point;
                     dim.angle_vertex = data.angle_vertex;
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Angular3Pt(dim)));
                 }
                 OBJ_DIMENSION_ORDINATE => {
@@ -3710,6 +3712,7 @@ impl DwgDocumentBuilder {
                     dim.base.common = entity_common;
                     map_dimension_common(&mut dim.base, &data.common, &maps);
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Ordinate(dim)));
                 }
                 OBJ_ARC_DIMENSION => {
@@ -3722,6 +3725,7 @@ impl DwgDocumentBuilder {
                     dim.base.common = entity_common;
                     map_dimension_common(&mut dim.base, &data.common, &maps);
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
                     dim.first_extension_point = data.first_extension_point;
                     dim.second_extension_point = data.second_extension_point;
                     dim.center_point = data.center_point;
@@ -3743,6 +3747,7 @@ impl DwgDocumentBuilder {
                     dim.base.common = entity_common;
                     map_dimension_common(&mut dim.base, &data.common, &maps);
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
                     dim.chord_point = data.chord_point;
                     dim.jog_angle = data.jog_angle;
                     dim.override_center = data.override_center;

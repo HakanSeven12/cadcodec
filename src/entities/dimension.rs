@@ -135,8 +135,21 @@ impl DimensionBase {
 
     /// Builder: Set the text override
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
-        self.text = text.into();
+        self.set_text_override(Some(text.into()));
         self
+    }
+
+    /// Returns the effective user text override.
+    pub fn text_override(&self) -> Option<&str> {
+        self.user_text
+            .as_deref()
+            .or_else(|| (!self.text.is_empty()).then_some(self.text.as_str()))
+    }
+
+    /// Sets or clears the user text override.
+    pub fn set_text_override(&mut self, text: Option<String>) {
+        self.text = text.clone().unwrap_or_default();
+        self.user_text = text;
     }
 
     /// Builder: Set the style name
@@ -287,11 +300,13 @@ impl DimensionLinear {
 
     /// Get the measurement value (projected onto rotation axis)
     pub fn measurement(&self) -> f64 {
-        let angle_vec = Vector3::new(self.rotation.cos(), self.rotation.sin(), 0.0);
         let diff = self.second_point - self.first_point;
-        let normalized = diff.normalize();
-        let dot = angle_vec.dot(&normalized).abs();
-        self.first_point.distance(&self.second_point) * dot
+        let projected = diff.x * self.rotation.cos() + diff.y * self.rotation.sin();
+        if projected.is_finite() {
+            projected.abs()
+        } else {
+            0.0
+        }
     }
 
     /// Set the offset distance
@@ -733,6 +748,37 @@ impl Dimension {
             Dimension::Arc(d) => &mut d.base,
             Dimension::LargeRadial(d) => &mut d.base,
         }
+    }
+
+    /// Get the authoritative definition point for this dimension subtype.
+    pub fn definition_point(&self) -> Vector3 {
+        match self {
+            Dimension::Aligned(d) => d.definition_point,
+            Dimension::Linear(d) => d.definition_point,
+            Dimension::Radius(d) => d.definition_point,
+            Dimension::Diameter(d) => d.definition_point,
+            Dimension::Angular2Ln(d) => d.definition_point,
+            Dimension::Angular3Pt(d) => d.definition_point,
+            Dimension::Ordinate(d) => d.definition_point,
+            Dimension::Arc(d) => d.definition_point,
+            Dimension::LargeRadial(d) => d.definition_point,
+        }
+    }
+
+    /// Update the subtype and compatibility copy of the definition point.
+    pub fn set_definition_point(&mut self, point: Vector3) {
+        match self {
+            Dimension::Aligned(d) => d.definition_point = point,
+            Dimension::Linear(d) => d.definition_point = point,
+            Dimension::Radius(d) => d.definition_point = point,
+            Dimension::Diameter(d) => d.definition_point = point,
+            Dimension::Angular2Ln(d) => d.definition_point = point,
+            Dimension::Angular3Pt(d) => d.definition_point = point,
+            Dimension::Ordinate(d) => d.definition_point = point,
+            Dimension::Arc(d) => d.definition_point = point,
+            Dimension::LargeRadial(d) => d.definition_point = point,
+        }
+        self.base_mut().definition_point = point;
     }
 
     /// Get the measurement value
