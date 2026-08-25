@@ -3652,9 +3652,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_radius(&mut self, dim: &DimensionRadius, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, dim.definition_point, 4, owner)?; // Radius = 4
+        // Group 10 is the centre; group 15 is the chord point.
+        self.write_dimension_base(&dim.base, dim.angle_vertex, 4, owner)?; // Radius = 4
         self.writer.write_subclass("AcDbRadialDimension")?;
-        self.writer.write_point3d(15, dim.angle_vertex)?;
+        self.writer.write_point3d(15, dim.definition_point)?;
         self.writer.write_double(40, dim.leader_length)?;
         Ok(())
     }
