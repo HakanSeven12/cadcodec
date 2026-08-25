@@ -12503,9 +12503,10 @@ impl<'a> SectionReader<'a> {
                 Dimension::Radius(dim)
             }
             DimensionType::Diameter => {
-                let center = pt3;
-                let point_on_arc = definition_point.get_point().unwrap_or(Vector3::zero());
-                let mut dim = DimensionDiameter::new(center, point_on_arc);
+                // Group 15 is the first chord; group 10 is its opposite.
+                let chord_point = pt3;
+                let far_chord_point = definition_point.get_point().unwrap_or(Vector3::zero());
+                let mut dim = DimensionDiameter::new(chord_point, far_chord_point);
                 dim.base.common.layer = layer;
                 dim.base.common.color = color;
                 dim.base.common.line_weight = line_weight;

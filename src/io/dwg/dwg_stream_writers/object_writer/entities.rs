@@ -2360,9 +2360,9 @@ impl<'a> DwgObjectWriter<'a> {
     fn write_dimension_diameter(&mut self, d: &DimensionDiameter) {
         self.write_common_dimension_data(common::OBJ_DIMENSION_DIAMETER, &d.base);
         self.writer
-            .write_3bit_double(d.definition_point);
-        self.writer
             .write_3bit_double(d.angle_vertex);
+        self.writer
+            .write_3bit_double(d.definition_point);
         self.writer.write_bit_double(d.leader_length);
         self.register_object(d.base.common.handle);
     }
