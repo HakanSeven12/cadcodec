@@ -2396,7 +2396,9 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_dimension_ordinate(&mut self, d: &DimensionOrdinate) {
-        self.write_common_dimension_data(common::OBJ_DIMENSION_ORDINATE, &d.base);
+        let mut base = d.base.clone();
+        base.actual_measurement = d.measurement();
+        self.write_common_dimension_data(common::OBJ_DIMENSION_ORDINATE, &base);
         self.writer
             .write_3bit_double(d.definition_point);
         self.writer

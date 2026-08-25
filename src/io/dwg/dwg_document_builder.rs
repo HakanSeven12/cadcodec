@@ -3713,6 +3713,7 @@ impl DwgDocumentBuilder {
                     map_dimension_common(&mut dim.base, &data.common, &maps);
                     dim.definition_point = data.definition_point;
                     dim.base.definition_point = data.definition_point;
+                    dim.refresh_measurement();
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Ordinate(dim)));
                 }
                 OBJ_ARC_DIMENSION => {

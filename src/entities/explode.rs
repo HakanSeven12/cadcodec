@@ -494,7 +494,7 @@ fn explode_dimension(dim: &Dimension) -> Vec<EntityType> {
     let text_value = base
         .text_override()
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("{:.4}", base.actual_measurement));
+        .unwrap_or_else(|| format!("{:.4}", dim.measurement()));
 
     let mut result = Vec::new();
 
@@ -526,7 +526,12 @@ fn explode_dimension(dim: &Dimension) -> Vec<EntityType> {
             result.push(line_entity(d.angle_vertex, d.second_point, 0.0, base.normal, common));
         }
         Dimension::Ordinate(d) => {
-            result.push(line_entity(d.feature_location, d.leader_endpoint, 0.0, base.normal, common));
+            let points = d.leader_polyline(0.0, 0.0, None);
+            for pair in points.windows(2) {
+                if (pair[1] - pair[0]).length() > 1e-12 {
+                    result.push(line_entity(pair[0], pair[1], 0.0, base.normal, common));
+                }
+            }
         }
         Dimension::Arc(d) => {
             result.push(line_entity(d.center_point, d.first_extension_point, 0.0, base.normal, common));

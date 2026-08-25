@@ -3602,14 +3602,22 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             type_flags
         };
         self.writer.write_i16(70, type_flags)?;
+        self.writer.write_double(42, base.actual_measurement)?;
         // DXF angles are in degrees; internal representation is radians.
         self.writer.write_double(53, base.text_rotation.to_degrees())?;
+        if base.horizontal_direction.abs() > 1e-12 {
+            self.writer
+                .write_double(51, base.horizontal_direction.to_degrees())?;
+        }
+        self.writer
+            .write_i16(71, base.attachment_point as i16)?;
+        self.writer.write_i16(72, base.line_spacing_style)?;
         self.writer.write_string(3, &base.style_name)?;
         if let Some(text) = base.text_override() {
             self.writer.write_string(1, text)?;
         }
         if (base.line_spacing_factor - 1.0).abs() > 1e-10 {
-            self.writer.write_double(44, base.line_spacing_factor)?;
+            self.writer.write_double(41, base.line_spacing_factor)?;
         }
         // Normal vector (extrusion direction) — only write if not default (0,0,1)
         let n = base.normal;
@@ -3695,7 +3703,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Bit 0x40 marks the X datum; clear = Y. (0x80 is reserved for the
         // text-user-positioned flag and must not be reused here.)
         let type_flags = if dim.is_ordinate_type_x { 0x40 } else { 0 };
-        self.write_dimension_base(&dim.base, dim.definition_point, 6 | type_flags, owner)?;
+        let mut base = dim.base.clone();
+        base.actual_measurement = dim.measurement();
+        self.write_dimension_base(&base, dim.definition_point, 6 | type_flags, owner)?;
         self.writer.write_subclass("AcDbOrdinateDimension")?;
         self.writer.write_point3d(13, dim.feature_location)?;
         self.writer.write_point3d(14, dim.leader_endpoint)?;

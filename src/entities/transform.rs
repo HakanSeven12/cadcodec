@@ -1118,12 +1118,7 @@ impl EntityType {
             EntityType::MText(e) => transform_mtext(e, transform),
             EntityType::Spline(e) => transform_spline(e, transform),
             EntityType::Helix(e) => transform_helix(e, transform),
-            EntityType::Dimension(_) => {
-                // Dimension uses the default Entity trait implementation
-                let origin = Vector3::ZERO;
-                let translated = transform.apply(origin);
-                self.as_entity_mut().translate(translated);
-            }
+            EntityType::Dimension(e) => e.apply_transform(transform),
             EntityType::Hatch(e) => transform_hatch(e, transform),
             EntityType::Solid(e) => transform_solid(e, transform),
             EntityType::Face3D(e) => transform_face3d(e, transform),
