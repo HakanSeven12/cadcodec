@@ -382,9 +382,9 @@ impl Default for DimensionRadius {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DimensionDiameter {
     pub base: DimensionBase,
-    /// Definition point (opposite side of diameter) - in WCS
+    /// Far chord point (the point opposite `angle_vertex`) - in WCS
     pub definition_point: Vector3,
-    /// Point on arc/circle (in WCS)
+    /// Chord point where the dimension line meets the arc/circle - in WCS
     pub angle_vertex: Vector3,
     /// Leader length
     pub leader_length: f64,
@@ -392,21 +392,22 @@ pub struct DimensionDiameter {
 
 impl DimensionDiameter {
     /// Create a new diameter dimension
-    pub fn new(center: Vector3, point_on_arc: Vector3) -> Self {
+    pub fn new(chord_point: Vector3, far_chord_point: Vector3) -> Self {
         let mut base = DimensionBase::new(DimensionType::Diameter);
-        base.actual_measurement = center.distance(&point_on_arc) * 2.0;
+        base.definition_point = far_chord_point;
+        base.actual_measurement = chord_point.distance(&far_chord_point);
 
         Self {
             base,
-            definition_point: point_on_arc,
-            angle_vertex: center,
+            definition_point: far_chord_point,
+            angle_vertex: chord_point,
             leader_length: 0.0,
         }
     }
 
     /// Get the diameter measurement
     pub fn measurement(&self) -> f64 {
-        self.definition_point.distance(&self.angle_vertex) * 2.0
+        self.definition_point.distance(&self.angle_vertex)
     }
 
     /// Get the center point

@@ -2378,8 +2378,10 @@ pub fn read_dimension_diameter(
     dxf_version: DxfVersion,
 ) -> DimensionDiameterData {
     let common = read_common_dimension_data(reader, version, dxf_version);
-    let definition_point = reader.read_3bit_double();
+    // Diametric data stores the chord point (DXF 15) before the
+    // diametrically-opposite far chord point (DXF 10).
     let angle_vertex = reader.read_3bit_double();
+    let definition_point = reader.read_3bit_double();
     let leader_length = reader.read_bit_double();
     DimensionDiameterData {
         common,
