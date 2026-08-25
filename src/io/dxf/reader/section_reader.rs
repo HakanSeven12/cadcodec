@@ -12347,11 +12347,14 @@ impl<'a> SectionReader<'a> {
         let mut line_weight = LineWeight::ByLayer;
         let mut rotation = 0.0;
         let mut text_rotation = 0.0f64;
+        let mut horizontal_direction = 0.0f64;
         let mut ext_line_rotation = 0.0f64;
         let mut ordinate_is_x = true;
         let mut actual_measurement = 0.0;
         let mut leader_length = 0.0;
         let mut line_spacing_factor = 1.0f64;
+        let mut line_spacing_style = 1i16;
+        let mut attachment_point = AttachmentPointType::MiddleCenter;
         let mut normal = PointReader::new();
         let mut common = EntityCommon::new();
 
@@ -12422,11 +12425,30 @@ impl<'a> SectionReader<'a> {
                         text_rotation = v.to_radians();
                     }
                 }
-                44 => {
+                51 => {
+                    if let Some(v) = pair.as_double() {
+                        horizontal_direction = v.to_radians();
+                    }
+                }
+                41 => {
                     if let Some(lsf) = pair.as_double() {
                         line_spacing_factor = lsf;
                     }
                 }
+                71 => {
+                    attachment_point = match pair.as_i16().unwrap_or(5) {
+                        1 => AttachmentPointType::TopLeft,
+                        2 => AttachmentPointType::TopCenter,
+                        3 => AttachmentPointType::TopRight,
+                        4 => AttachmentPointType::MiddleLeft,
+                        6 => AttachmentPointType::MiddleRight,
+                        7 => AttachmentPointType::BottomLeft,
+                        8 => AttachmentPointType::BottomCenter,
+                        9 => AttachmentPointType::BottomRight,
+                        _ => AttachmentPointType::MiddleCenter,
+                    };
+                }
+                72 => line_spacing_style = pair.as_i16().unwrap_or(1),
                 42 => {
                     if let Some(measurement) = pair.as_double() {
                         actual_measurement = measurement;
@@ -12545,10 +12567,10 @@ impl<'a> SectionReader<'a> {
             }
             DimensionType::Ordinate => {
                 // 13=feature_location, 14=leader_endpoint; X vs Y datum from the
-                // group-70 0x40 bit; the leader elbow is the base def point (10).
+                // group-70 0x40 bit; group 10 is the datum origin.
                 let mut dim = DimensionOrdinate::new(pt1, pt2, ordinate_is_x);
-                if let Some(elbow) = definition_point.get_point() {
-                    dim.definition_point = elbow;
+                if let Some(origin) = definition_point.get_point() {
+                    dim.definition_point = origin;
                 }
                 dim.base.common.layer = layer;
                 dim.base.common.color = color;
@@ -12575,7 +12597,10 @@ impl<'a> SectionReader<'a> {
                 dc.text_middle_point = pt;
             }
             dc.text_rotation = text_rotation;
+            dc.horizontal_direction = horizontal_direction;
             dc.text_user_positioned = text_user_positioned;
+            dc.attachment_point = attachment_point;
+            dc.line_spacing_style = line_spacing_style;
             if line_spacing_factor != 1.0 {
                 dc.line_spacing_factor = line_spacing_factor;
             }
@@ -12586,6 +12611,9 @@ impl<'a> SectionReader<'a> {
 
         if let Some(point) = definition_point.get_point() {
             dimension.set_definition_point(point);
+        }
+        if let Dimension::Ordinate(value) = &mut dimension {
+            value.refresh_measurement();
         }
 
         Ok(Some(dimension))

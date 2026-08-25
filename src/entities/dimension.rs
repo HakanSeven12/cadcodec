@@ -1,7 +1,7 @@
 //! Dimension entity types
 
 use crate::entities::EntityCommon;
-use crate::types::Vector3;
+use crate::types::{Matrix3, Transform, Vector3};
 
 /// Dimension type flags
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -580,20 +580,15 @@ pub struct DimensionOrdinate {
 impl DimensionOrdinate {
     /// Create a new ordinate dimension
     pub fn new(feature_location: Vector3, leader_endpoint: Vector3, is_x_type: bool) -> Self {
-        let mut base = DimensionBase::new(DimensionType::Ordinate);
-        base.actual_measurement = if is_x_type {
-            feature_location.x
-        } else {
-            feature_location.y
-        };
-
-        Self {
-            base,
+        let mut value = Self {
+            base: DimensionBase::new(DimensionType::Ordinate),
             definition_point: Vector3::ZERO,
             feature_location,
             leader_endpoint,
             is_ordinate_type_x: is_x_type,
-        }
+        };
+        value.refresh_measurement();
+        value
     }
 
     /// Create a new X-ordinate dimension
@@ -608,11 +603,65 @@ impl DimensionOrdinate {
 
     /// Get the ordinate measurement
     pub fn measurement(&self) -> f64 {
-        if self.is_ordinate_type_x {
-            self.feature_location.x
+        let delta = self.feature_location - self.definition_point;
+        let wcs_to_ocs = Matrix3::arbitrary_axis(self.base.normal).transpose();
+        let delta = wcs_to_ocs * delta;
+        let angle = -self.base.horizontal_direction;
+        let (sin, cos) = angle.sin_cos();
+        let projected = if self.is_ordinate_type_x {
+            delta.x * cos + delta.y * sin
         } else {
-            self.feature_location.y
-        }
+            -delta.x * sin + delta.y * cos
+        };
+        projected.abs()
+    }
+
+    /// Recompute the cached measurement after changing datum, feature, normal,
+    /// or horizontal direction.
+    pub fn refresh_measurement(&mut self) {
+        self.base.actual_measurement = self.measurement();
+    }
+
+    /// Return the dimension-local X and Y axes in world coordinates.
+    pub fn local_axes(&self) -> (Vector3, Vector3) {
+        let basis = Matrix3::arbitrary_axis(self.base.normal);
+        let angle = -self.base.horizontal_direction;
+        let (sin, cos) = angle.sin_cos();
+        (
+            basis * Vector3::new(cos, sin, 0.0),
+            basis * Vector3::new(-sin, cos, 0.0),
+        )
+    }
+
+    /// Derive the visible ordinate leader from stored feature and leader points.
+    /// The datum origin affects the measurement only and is never an elbow.
+    pub fn leader_polyline(
+        &self,
+        dogleg_length: f64,
+        extension_offset: f64,
+        fixed_extension_length: Option<f64>,
+    ) -> [Vector3; 4] {
+        let (x_axis, y_axis) = self.local_axes();
+        let (main_axis, landing_axis) = if self.is_ordinate_type_x {
+            (y_axis, x_axis)
+        } else {
+            (x_axis, y_axis)
+        };
+        let delta = self.leader_endpoint - self.feature_location;
+        let signed = |value: f64| if value < 0.0 { -1.0 } else { 1.0 };
+        let main_direction = main_axis * signed(delta.dot(&main_axis));
+        let landing_direction = landing_axis * signed(delta.dot(&landing_axis));
+        let main_distance = delta.dot(&main_direction).abs();
+        let dogleg = dogleg_length.max(0.0);
+        let first_leg = (main_distance - 2.0 * dogleg).max(dogleg);
+        let elbow = self.feature_location + main_direction * first_leg;
+        let landing_start = self.leader_endpoint - landing_direction * dogleg;
+        let extension_start = if let Some(length) = fixed_extension_length {
+            elbow - main_direction * length.max(0.0)
+        } else {
+            self.feature_location + main_direction * extension_offset.max(0.0)
+        };
+        [extension_start, elbow, landing_start, self.leader_endpoint]
     }
 }
 
@@ -855,7 +904,7 @@ impl super::Entity for Dimension {
             Dimension::Diameter(d) => BoundingBox3D::from_points(&[d.angle_vertex, d.definition_point]).unwrap_or_default(),
             Dimension::Angular2Ln(d) => BoundingBox3D::from_points(&[d.angle_vertex, d.first_point, d.second_point, d.definition_point]).unwrap_or_default(),
             Dimension::Angular3Pt(d) => BoundingBox3D::from_points(&[d.angle_vertex, d.first_point, d.second_point, d.definition_point]).unwrap_or_default(),
-            Dimension::Ordinate(d) => BoundingBox3D::from_points(&[d.feature_location, d.leader_endpoint, d.definition_point]).unwrap_or_default(),
+            Dimension::Ordinate(d) => BoundingBox3D::from_points(&[d.feature_location, d.leader_endpoint]).unwrap_or_default(),
             Dimension::Arc(d) => BoundingBox3D::from_points(&[d.definition_point, d.first_extension_point, d.second_extension_point, d.center_point, d.first_leader_point, d.second_leader_point]).unwrap_or_default(),
             Dimension::LargeRadial(d) => BoundingBox3D::from_points(&[d.definition_point, d.chord_point, d.override_center, d.jog_point]).unwrap_or_default(),
         }
@@ -863,6 +912,44 @@ impl super::Entity for Dimension {
 
     fn translate(&mut self, offset: Vector3) {
         super::translate::translate_dimension(self, offset);
+    }
+
+    fn apply_transform(&mut self, transform: &Transform) {
+        let Dimension::Ordinate(d) = self else {
+            let translated = transform.apply(Vector3::ZERO);
+            self.translate(translated);
+            return;
+        };
+
+        let old_normal = d.base.normal;
+        let old_basis = Matrix3::arbitrary_axis(old_normal);
+        let old_axis_angle = -d.base.horizontal_direction;
+        let old_axis = old_basis
+            * Vector3::new(old_axis_angle.cos(), old_axis_angle.sin(), 0.0);
+        let old_text_axis = old_basis
+            * Vector3::new(d.base.text_rotation.cos(), d.base.text_rotation.sin(), 0.0);
+
+        d.definition_point = transform.apply(d.definition_point);
+        d.feature_location = transform.apply(d.feature_location);
+        d.leader_endpoint = transform.apply(d.leader_endpoint);
+        d.base.definition_point = d.definition_point;
+        d.base.text_middle_point = transform.apply(d.base.text_middle_point);
+        d.base.insertion_point = transform.apply(d.base.insertion_point);
+
+        let transformed_normal = transform.apply_rotation(old_normal);
+        if transformed_normal.length() > 1e-12 {
+            d.base.normal = transformed_normal.normalize();
+        }
+        let new_wcs_to_ocs = Matrix3::arbitrary_axis(d.base.normal).transpose();
+        let transformed_axis = new_wcs_to_ocs * transform.apply_rotation(old_axis);
+        if transformed_axis.length() > 1e-12 {
+            d.base.horizontal_direction = -transformed_axis.y.atan2(transformed_axis.x);
+        }
+        let transformed_text_axis = new_wcs_to_ocs * transform.apply_rotation(old_text_axis);
+        if transformed_text_axis.length() > 1e-12 {
+            d.base.text_rotation = transformed_text_axis.y.atan2(transformed_text_axis.x);
+        }
+        d.refresh_measurement();
     }
 
     fn entity_type(&self) -> &'static str {
