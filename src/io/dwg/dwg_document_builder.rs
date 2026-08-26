@@ -1741,6 +1741,38 @@ impl DwgDocumentBuilder {
             }
         }
 
+        // TOLERANCE stores its dimension style as a handle in DWG, while the
+        // public entity model also exposes the resolved name used by property
+        // editors and DXF output. Table entries and entities are decoded in
+        // separate passes, so restore the name only after the DIMSTYLE table is
+        // complete. Keep the handle authoritative and leave unresolved values
+        // untouched for lossless round-tripping.
+        {
+            let style_names: HashMap<Handle, String> = document
+                .dim_styles
+                .iter()
+                .map(|style| (style.handle, style.name.clone()))
+                .collect();
+            if !style_names.is_empty() {
+                for entity in &mut document.entities {
+                    let style_name = match entity.as_ref() {
+                        EntityType::Tolerance(tolerance) => tolerance
+                            .dimension_style_handle
+                            .and_then(|handle| style_names.get(&handle))
+                            .cloned(),
+                        _ => None,
+                    };
+                    if let Some(style_name) = style_name {
+                        if let EntityType::Tolerance(tolerance) =
+                            std::sync::Arc::make_mut(entity)
+                        {
+                            tolerance.dimension_style_name = style_name;
+                        }
+                    }
+                }
+            }
+        }
+
         // GROUP names live in the owning dictionary; the GROUP body only
         // carries a separate unnamed flag. Restore the public name without
         // using it to synthesize or overwrite that flag.
