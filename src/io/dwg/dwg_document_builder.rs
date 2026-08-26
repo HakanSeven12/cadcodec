@@ -3376,6 +3376,7 @@ impl DwgDocumentBuilder {
                     e.direction = data.direction;
                     e.normal = data.normal;
                     e.dimension_style_handle = Some(Handle::from(data.dimstyle_handle));
+                    e.dimension_style_name.clear();
                     e.dwg_unknown_short = data.unknown_short;
                     e.text_height = data.text_height;
                     e.dimension_gap = data.dimgap;
