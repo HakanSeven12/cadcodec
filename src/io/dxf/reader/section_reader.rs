@@ -10478,7 +10478,14 @@ impl<'a> SectionReader<'a> {
                 50 => {
                     if let Some(value) = pair.as_double() {
                         if reading_columns {
-                            mtext.column_data.heights.push(value);
+                            let columns = &mut mtext.column_data;
+                            let height_count = columns.column_count.max(0) as usize;
+                            if columns.column_type == 2
+                                && !columns.auto_height
+                                && columns.heights.len() < height_count
+                            {
+                                columns.heights.push(value);
+                            }
                         } else {
                             mtext.rotation = value.to_radians();
                         }
