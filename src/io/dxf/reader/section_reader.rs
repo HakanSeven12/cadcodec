@@ -13738,6 +13738,7 @@ impl<'a> SectionReader<'a> {
         let mut tolerance = Tolerance::new();
         let mut insertion_point = PointReader::new();
         let mut direction = PointReader::new();
+        let mut normal = PointReader::new();
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
@@ -13756,12 +13757,16 @@ impl<'a> SectionReader<'a> {
                 3 => tolerance.dimension_style_name = pair.value_string.clone(),
                 10 | 20 | 30 => { insertion_point.add_coordinate(&pair); }
                 11 | 21 | 31 => { direction.add_coordinate(&pair); }
+                210 | 220 | 230 => { normal.add_coordinate(&pair); }
                 _ => { self.try_read_common_entity_code(&pair, &mut tolerance.common)?; }
             }
         }
 
         tolerance.insertion_point = insertion_point.get_point().unwrap_or(Vector3::zero());
         tolerance.direction = direction.get_point().unwrap_or(Vector3::new(1.0, 0.0, 0.0));
+        if let Some(normal) = normal.get_point() {
+            tolerance.normal = normal;
+        }
 
         Ok(Some(tolerance))
     }
