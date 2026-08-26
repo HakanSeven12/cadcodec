@@ -821,7 +821,22 @@ pub struct DimensionArc {
 impl DimensionArc {
     pub fn measurement(&self) -> f64 {
         let radius = self.center_point.distance(&self.first_extension_point);
-        radius * (self.arc_end_parameter - self.arc_start_parameter).abs()
+        let raw_sweep = self.arc_end_parameter - self.arc_start_parameter;
+        let mut sweep = raw_sweep.rem_euclid(std::f64::consts::TAU);
+        // A complete turn is congruent to zero after normalization. Preserve
+        // that explicit full-circle intent while still treating identical
+        // start/end parameters as an empty measurement.
+        if sweep <= 1.0e-12 && raw_sweep.abs() > 1.0e-12 {
+            sweep = std::f64::consts::TAU;
+        }
+        if sweep <= 1.0e-12 && raw_sweep.abs() <= 1.0e-12 {
+            let start = (self.first_extension_point.y - self.center_point.y)
+                .atan2(self.first_extension_point.x - self.center_point.x);
+            let end = (self.second_extension_point.y - self.center_point.y)
+                .atan2(self.second_extension_point.x - self.center_point.x);
+            sweep = (end - start).rem_euclid(std::f64::consts::TAU);
+        }
+        radius * sweep
     }
 }
 
