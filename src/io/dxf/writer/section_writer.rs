@@ -3417,6 +3417,43 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_i32(441, mtext.background_transparency)?;
             }
         }
+        // Standard DXF MTEXT column layout. Rotation is emitted above before
+        // the first column marker because code 50 is reused for column heights.
+        if mtext.column_data.column_type != 0 {
+            self.writer
+                .write_i16(75, mtext.column_data.column_type)?;
+            let manual_heights = mtext.column_data.column_type == 2
+                && !mtext.column_data.auto_height;
+            let column_count = if manual_heights {
+                mtext.column_data.heights.len().min(i16::MAX as usize) as i16
+            } else {
+                mtext
+                    .column_data
+                    .column_count
+                    .clamp(0, i16::MAX as i32) as i16
+            };
+            self.writer.write_i16(76, column_count)?;
+            self.writer.write_i16(
+                78,
+                i16::from(mtext.column_data.flow_reversed),
+            )?;
+            self.writer.write_i16(
+                79,
+                i16::from(mtext.column_data.auto_height),
+            )?;
+            self.writer.write_double(48, mtext.column_data.width)?;
+            self.writer.write_double(49, mtext.column_data.gutter)?;
+            if manual_heights {
+                for height in mtext
+                    .column_data
+                    .heights
+                    .iter()
+                    .take(column_count as usize)
+                {
+                    self.writer.write_double(50, *height)?;
+                }
+            }
+        }
         self.write_normal(mtext.normal)?;
         Ok(())
     }

@@ -10430,6 +10430,7 @@ impl<'a> SectionReader<'a> {
         let mut insertion = PointReader::new();
         let mut normal = PointReader::new();
         let mut x_direction = PointReader::new();
+        let mut reading_columns = false;
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
@@ -10475,8 +10476,19 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 50 => {
-                    if let Some(rotation) = pair.as_double() {
-                        mtext.rotation = rotation.to_radians();
+                    if let Some(value) = pair.as_double() {
+                        if reading_columns {
+                            let columns = &mut mtext.column_data;
+                            let height_count = columns.column_count.max(0) as usize;
+                            if columns.column_type == 2
+                                && !columns.auto_height
+                                && columns.heights.len() < height_count
+                            {
+                                columns.heights.push(value);
+                            }
+                        } else {
+                            mtext.rotation = value.to_radians();
+                        }
                     }
                 }
                 71 => {
@@ -10506,6 +10518,39 @@ impl<'a> SectionReader<'a> {
                 44 => {
                     if let Some(lsf) = pair.as_double() {
                         mtext.line_spacing_factor = lsf;
+                    }
+                }
+                // Standard DXF column data. These codes follow 75 and reuse
+                // numbers that mean something else earlier in AcDbMText.
+                75 => {
+                    if let Some(value) = pair.as_i16() {
+                        mtext.column_data.column_type = value;
+                        reading_columns = value != 0;
+                    }
+                }
+                76 if reading_columns => {
+                    if let Some(value) = pair.as_i16() {
+                        mtext.column_data.column_count = value as i32;
+                    }
+                }
+                78 if reading_columns => {
+                    if let Some(value) = pair.as_i16() {
+                        mtext.column_data.flow_reversed = value != 0;
+                    }
+                }
+                79 if reading_columns => {
+                    if let Some(value) = pair.as_i16() {
+                        mtext.column_data.auto_height = value != 0;
+                    }
+                }
+                48 if reading_columns => {
+                    if let Some(value) = pair.as_double() {
+                        mtext.column_data.width = value;
+                    }
+                }
+                49 if reading_columns => {
+                    if let Some(value) = pair.as_double() {
+                        mtext.column_data.gutter = value;
                     }
                 }
                 73 => {
@@ -10559,7 +10604,10 @@ impl<'a> SectionReader<'a> {
                 // R2018+ column/layout companion — its codes shadow the
                 // entity's own, so it must not fall through this match. The
                 // embedded object carries the MTEXT column layout.
-                101 => { mtext.column_data = self.read_mtext_embedded_object()?; }
+                101 => {
+                    mtext.column_data = self.read_mtext_embedded_object()?;
+                    reading_columns = false;
+                }
                 _ => { self.try_read_common_entity_code(&pair, &mut mtext.common)?; }
             }
         }
