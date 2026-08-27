@@ -326,7 +326,7 @@ pub struct HeaderVariables {
     pub xedit: bool,
     /// EXTNAMES - Extended symbol names (R2000+)
     pub extended_names: bool,
-    /// PSTYLEMODE - Plot style mode (0=color, 1=named)
+    /// PSTYLEMODE - Plot style mode (0=named, 1=color-dependent)
     pub plotstyle_mode: bool,
     /// OLESTARTUP - OLE startup
     pub ole_startup: bool,
