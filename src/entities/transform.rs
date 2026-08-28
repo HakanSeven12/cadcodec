@@ -331,10 +331,22 @@ pub(crate) fn transform_spline(e: &mut Spline, transform: &Transform) {
 // ── Helix ────────────────────────────────────────────────────────────────────
 
 pub(crate) fn transform_helix(e: &mut Helix, transform: &Transform) {
+    let old_axis = e.axis_vector.normalize();
+    let old_base = e.axis_base_point;
+    let old_start = e.start_point;
+    let transformed_axis = transform.apply_rotation(old_axis);
+    let transformed_base = transform.apply(old_base);
+    let transformed_start = transform.apply(old_start);
+
     transform_spline(&mut e.spline, transform);
-    e.axis_base_point = transform.apply(e.axis_base_point);
-    e.start_point = transform.apply(e.start_point);
-    e.axis_vector = transform.apply_rotation(e.axis_vector).normalize();
+    e.axis_base_point = transformed_base;
+    e.start_point = transformed_start;
+    e.axis_vector = transformed_axis.normalize();
+    e.radius = (transformed_start - transformed_base).length();
+    e.turn_height *= transformed_axis.length();
+    if is_reflecting(transform) {
+        e.handedness = !e.handedness;
+    }
 }
 
 // ── Dimension ────────────────────────────────────────────────────────────────
