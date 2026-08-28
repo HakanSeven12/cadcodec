@@ -335,6 +335,7 @@ pub(crate) fn transform_helix(e: &mut Helix, transform: &Transform) {
     let old_base = e.axis_base_point;
     let old_start = e.start_point;
     let transformed_axis = transform.apply_rotation(old_axis);
+    let transformed_radial = transform.apply_rotation(old_start - old_base);
     let transformed_base = transform.apply(old_base);
     let transformed_start = transform.apply(old_start);
 
@@ -342,7 +343,7 @@ pub(crate) fn transform_helix(e: &mut Helix, transform: &Transform) {
     e.axis_base_point = transformed_base;
     e.start_point = transformed_start;
     e.axis_vector = transformed_axis.normalize();
-    e.radius = (transformed_start - transformed_base).length();
+    e.radius = transformed_radial.length();
     e.turn_height *= transformed_axis.length();
     if is_reflecting(transform) {
         e.handedness = !e.handedness;
@@ -413,25 +414,9 @@ pub(crate) fn transform_hatch(e: &mut Hatch, transform: &Transform) {
                     line.end = transform_ocs_point(line.end);
                 }
                 BoundaryEdge::CircularArc(arc) => {
-                    // Stored-angle convention for boundary arcs, verified
-                    // against real AutoCAD output:
-                    //
-                    // 1. A clockwise (ccw = false) edge stores MIRRORED angles —
-                    //    the true point is `center + r·(cos(-θ), sin(-θ))`
-                    //    (endpoint continuity with adjacent edges: Δ = 0.0).
-                    // 2. The stored sweep is ALWAYS forward: `end - start ≥ 0`.
-                    //    When the arc crosses the 0 axis, AutoCAD writes `end`
-                    //    ABOVE 2π (e.g. start 5.81 → end 6.64). Normalizing the
-                    //    angles into [0, 2π) silently turns that 0.83 rad arc
-                    //    into its 5.46 rad complement — the giant wrong-way
-                    //    arcs this function used to produce via
-                    //    `transform_ocs_angle`'s atan2 normalization.
-                    //
-                    // So: transform only the START angle (one point, modulo is
-                    // fine) in TRUE angle space, and carry the stored sweep over
-                    // unchanged. The sweep is invariant under both rotation and
-                    // flip: a flip negates the true sweep AND mirrors the stored
-                    // space, which cancel.
+                    // Clockwise angles are mirrored and their forward sweep is
+                    // stored without normalization. Transform the geometric start
+                    // angle and preserve that sweep.
                     let to_true = |a: f64, ccw: bool| if ccw { a } else { -a };
                     let norm = |a: f64| a.rem_euclid(2.0 * std::f64::consts::PI);
                     let stored_sweep = arc.end_angle - arc.start_angle;
@@ -1233,12 +1218,7 @@ mod tests {
         }
     }
 
-    // Mirroring a hatch must keep its boundary arc edges continuous with the
-    // adjacent line edges. DXF stores CW (ccw=false) arc-edge angles MIRRORED
-    // — the true point is center + r·(cos(-θ), sin(-θ)) — verified against
-    // AutoCAD output by endpoint continuity. The old code stored geometric
-    // angles after a flip, so hatches inside mirrored INSERTs swept the wrong
-    // way and covered the complementary region.
+    // Mirrored boundary arcs must remain continuous with adjacent lines.
     #[test]
     fn test_mirror_hatch_arc_edge_stays_continuous() {
         use crate::entities::hatch::{BoundaryEdge, BoundaryPath, CircularArcEdge, LineEdge};
@@ -1314,12 +1294,7 @@ mod tests {
         );
     }
 
-    // The stored sweep of a boundary arc is always forward (end - start ≥ 0)
-    // and AutoCAD encodes a wrap through 0 by writing `end` ABOVE 2π
-    // (e.g. start 5.81 → end 6.64 for a 0.83 rad arc). Any normalization of
-    // the angles into [0, 2π) flips such an arc into its huge complement —
-    // the regression seen in real survey DWGs. Translation must keep the
-    // angles bit-identical; a mirror must preserve the sweep magnitude.
+    // Wrapped boundary sweeps stay unnormalized through transforms.
     #[test]
     fn test_hatch_arc_wrap_sweep_survives_transform() {
         use crate::entities::hatch::{BoundaryEdge, BoundaryPath, CircularArcEdge};
