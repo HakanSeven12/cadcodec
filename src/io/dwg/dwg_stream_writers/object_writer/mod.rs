@@ -2035,7 +2035,7 @@ impl<'a> DwgObjectWriter<'a> {
                     None
                 }
             })
-            .unwrap_or(crate::types::Vector3::ZERO);
+            .unwrap_or(record.base_point);
         self.writer.write_3bit_double(base_pt);
 
         // Xref path
