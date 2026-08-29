@@ -6266,15 +6266,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             // the drawing's FIELDLIST. Writing them as soft pointers (350)
             // makes CAD applications treat the targets as erasable orphans
             // and reject the file on save.
-            let forced_hard_owner = dict.is_entry_hard_owner(key) || matches!(
-                key.to_ascii_uppercase().as_str(),
-                "ACAD_LAYOUT"
-                    | "ACAD_PLOTSTYLENAME"
-                    | "ACAD_FIELD"
-                    | "ACAD_SORTENTS"
-                    | "ACAD_FILTER"
-                    | "SPATIAL"
-            );
+            let forced_hard_owner = dict.is_entry_hard_owner(key)
+                || Dictionary::is_canonical_hard_owner_key(key);
             self.writer.write_handle(
                 if dict.hard_owner || forced_hard_owner {
                     360

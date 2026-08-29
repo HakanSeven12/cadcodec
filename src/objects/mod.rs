@@ -190,6 +190,23 @@ impl Dictionary {
             .any(|name| name.eq_ignore_ascii_case(key))
     }
 
+    /// Named-object-dictionary keys that AutoCAD/ODA write as hard-owner
+    /// references (DXF code 360) even when the dictionary-wide hard-owner
+    /// flag is clear. Reader and writer both canonicalize these keys so
+    /// write→read→write cycles stay stable (issue #51) and DWG→DXF
+    /// conversion keeps the genuine encoding (issue #63).
+    pub fn is_canonical_hard_owner_key(key: &str) -> bool {
+        matches!(
+            key.to_ascii_uppercase().as_str(),
+            "ACAD_LAYOUT"
+                | "ACAD_PLOTSTYLENAME"
+                | "ACAD_FIELD"
+                | "ACAD_SORTENTS"
+                | "ACAD_FILTER"
+                | "SPATIAL"
+        )
+    }
+
     /// Get a handle by key
     pub fn get(&self, key: &str) -> Option<Handle> {
         self.entries
