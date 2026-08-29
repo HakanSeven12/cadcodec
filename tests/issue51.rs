@@ -408,3 +408,125 @@ fn surviving_default_entries_are_rehandled_on_read() {
         standard_handle.value()
     );
 }
+
+#[test]
+fn visualstyle_record_carries_code_291() {
+    // Issue #51 comment (Apicqq): round-tripped files failed to load because
+    // a written VISUALSTYLE was missing group code 291. Every version the
+    // writer supports must emit it inside the VISUALSTYLE record.
+    for version in [
+        DxfVersion::AC1015,
+        DxfVersion::AC1018,
+        DxfVersion::AC1021,
+        DxfVersion::AC1024,
+        DxfVersion::AC1027,
+        DxfVersion::AC1032,
+    ] {
+        let mut doc = CadDocument::with_version(version);
+        let mut style = acadrust::objects::VisualStyle::new();
+        style.handle = doc.allocate_handle();
+        doc.objects
+            .insert(style.handle, ObjectType::VisualStyle(style));
+
+        let text = String::from_utf8(write_dxf(&doc)).unwrap();
+        let lines: Vec<&str> = text.split("\r\n").collect();
+        let mut found = false;
+        for i in 0..lines.len().saturating_sub(1) {
+            if lines[i] == "VISUALSTYLE" && lines[i + 1].trim() == "5" {
+                let record_end = lines[i..]
+                    .iter()
+                    .position(|l| *l == "ENDSEC" || (*l == "DICTIONARY" || *l == "XRECORD"))
+                    .unwrap_or(lines.len() - i);
+                found = lines[i..i + record_end]
+                    .windows(2)
+                    .any(|w| w[0].trim() == "291");
+                break;
+            }
+        }
+        assert!(
+            found,
+            "{version:?}: VISUALSTYLE record is missing group code 291"
+        );
+    }
+}
+
+#[test]
+fn handle_less_records_receive_handles_on_read() {
+    // Issue #51 comment (Apicqq): files without handle records (R12 and
+    // earlier) left table entries and objects with NULL handles, so the
+    // writer emitted invalid `5 / 0` handle records. resolve_references()
+    // must assign handles to everything that arrived without one.
+    let mut doc = CadDocument::with_version(DxfVersion::AC1012);
+    doc.add_entity(EntityType::Line(Line::from_coords(0.0, 0.0, 0.0, 1.0, 1.0, 0.0)))
+        .unwrap();
+
+    let mut layer = acadrust::tables::Layer::new("NULL_LAYER");
+    layer.handle = Handle::NULL;
+    doc.layers.add(layer).unwrap();
+    let mut style = acadrust::tables::TextStyle::new("NULL_STYLE");
+    style.handle = Handle::NULL;
+    doc.text_styles.add(style).unwrap();
+    let mut dimstyle = acadrust::tables::DimStyle::new("NULL_DIM");
+    dimstyle.handle = Handle::NULL;
+    doc.dim_styles.add(dimstyle).unwrap();
+    let mut vport = acadrust::tables::VPort::new("NULL_VPORT");
+    vport.handle = Handle::NULL;
+    doc.vports.add(vport).unwrap();
+    let mut appid = acadrust::tables::AppId::new("NULL_APPID");
+    appid.handle = Handle::NULL;
+    doc.app_ids.add(appid).unwrap();
+
+    let mut xrecord = XRecord::new();
+    xrecord.handle = Handle::NULL;
+    doc.objects
+        .insert(Handle::NULL, ObjectType::XRecord(xrecord));
+    // A dictionary whose map key is valid but whose record handle is NULL.
+    let mut dict = Dictionary::new();
+    dict.handle = Handle::NULL;
+    doc.objects
+        .insert(Handle::new(0x7001), ObjectType::Dictionary(dict));
+
+    // The reader runs resolve_references() after parsing; do the same.
+    doc.resolve_references();
+
+    for entry in doc.layers.iter() {
+        assert!(!entry.handle.is_null(), "layer {:?} still has no handle", entry.name);
+    }
+    for entry in doc.text_styles.iter() {
+        assert!(!entry.handle.is_null(), "text style {:?} still has no handle", entry.name);
+    }
+    for entry in doc.dim_styles.iter() {
+        assert!(!entry.handle.is_null(), "dim style {:?} still has no handle", entry.name);
+    }
+    for entry in doc.vports.iter() {
+        assert!(!entry.handle.is_null(), "vport {:?} still has no handle", entry.name);
+    }
+    for entry in doc.app_ids.iter() {
+        assert!(!entry.handle.is_null(), "appid {:?} still has no handle", entry.name);
+    }
+    for (handle, _) in doc.objects.iter() {
+        assert!(!handle.is_null(), "object still stored under the NULL handle key");
+    }
+
+    // The written output must not contain a single handle-valued 0.
+    let output = String::from_utf8(write_dxf(&doc)).unwrap();
+    let lines: Vec<&str> = output.split("\r\n").collect();
+    let mut invalid = Vec::new();
+    let mut current_record = String::new();
+    for i in 0..lines.len().saturating_sub(1) {
+        if lines[i] == "  0" {
+            current_record = lines.get(i + 1).copied().unwrap_or("?").to_string();
+        }
+        let code = lines[i].trim();
+        if matches!(code, "5" | "105" | "340" | "350" | "360")
+            && lines.get(i + 1).map(|v| v.trim()) == Some("0")
+        {
+            invalid.push(format!("{} in {}", code, current_record));
+        }
+    }
+    assert!(
+        invalid.is_empty(),
+        "invalid handle value 0 written: {:?}",
+        invalid
+    );
+}
