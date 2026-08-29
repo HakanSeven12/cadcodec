@@ -48,6 +48,24 @@ pub(crate) fn polyline2d_downsaves_to_lwpolyline(polyline: &Polyline2D) -> bool 
         && polyline.vertices.iter().all(|v| v.flags.bits() == 0)
 }
 
+/// Associative-framework object classes that CAD applications cannot
+/// restore from the raw records this writer produces (the dependency
+/// payloads need data the DWG reader does not capture). Writing them makes
+/// applications flag the file for recovery while skipping the objects
+/// anyway, which also leaves dangling dictionary entries behind. Dropping
+/// them keeps round-tripped files clean (issue #51 BricsCAD audit).
+fn is_unrestorable_assoc_object(type_name: &str) -> bool {
+    matches!(
+        type_name.to_ascii_uppercase().as_str(),
+        "ACDBASSOCDEPENDENCY"
+            | "ACDBASSOCVALUEDEPENDENCY"
+            | "ACDBASSOCGEOMDEPENDENCY"
+            | "ACDBASSOCVARIABLE"
+            | "ACDBASSOC2DCONSTRAINTGROUP"
+            | "ACDBDYNAMICBLOCKPURGEPREVENTER"
+    )
+}
+
 /// Writes all DXF sections
 pub struct SectionWriter<'a, W: DxfStreamWriter> {
     writer: &'a mut W,
@@ -111,12 +129,28 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // have no DXF representation (Unknown with no raw_dxf_codes):
         // write_unknown_object skips those, so any reference to them would
         // dangle and must be filtered out, or strict CAD readers reject the
-        // file on audit.
+        // file on audit. Unknown associative-framework objects are excluded
+        // as well: applications cannot restore them from the records this
+        // writer produces and audit-skip them, which would leave dangling
+        // dictionary entries behind (issue #51 BricsCAD audit).
         for (h, obj) in document.objects.iter() {
-            if let ObjectType::Unknown { raw_dxf_codes, .. } = obj {
-                if raw_dxf_codes.is_none() {
-                    continue;
+            match obj {
+                ObjectType::Unknown { raw_dxf_codes, type_name, .. } => {
+                    if raw_dxf_codes.is_none() || is_unrestorable_assoc_object(type_name) {
+                        continue;
+                    }
                 }
+                ObjectType::Associative(assoc) => {
+                    if is_unrestorable_assoc_object(&assoc.dxf_name) {
+                        continue;
+                    }
+                }
+                ObjectType::DynamicBlock(dynamic) => {
+                    if is_unrestorable_assoc_object(&dynamic.dxf_name) {
+                        continue;
+                    }
+                }
+                _ => {}
             }
             set.insert(*h);
         }
@@ -972,7 +1006,22 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         let table_handle = document.app_ids.handle();
         self.write_table_header("APPID", document.app_ids.len(), table_handle, document)?;
 
+        // The ACAD RegApp record must be the table's first entry: CAD
+        // applications map XDATA applications by table index and require
+        // ACAD at index 0 (issue #51 BricsCAD audit: "RegApp ACAD has
+        // invalid index 1").
+        let mut wrote_acad = false;
         for appid in document.app_ids.iter() {
+            if appid.name().eq_ignore_ascii_case("ACAD") {
+                self.write_appid_entry(appid, table_handle, document)?;
+                wrote_acad = true;
+                break;
+            }
+        }
+        for appid in document.app_ids.iter() {
+            if wrote_acad && appid.name().eq_ignore_ascii_case("ACAD") {
+                continue;
+            }
             self.write_appid_entry(appid, table_handle, document)?;
         }
 
@@ -4756,9 +4805,20 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                     self.write_block_visibility_parameter(obj)?
                 }
                 ObjectType::DynamicBlock(obj) => {
+                    // The purge preventer is unrestorable (see
+                    // is_unrestorable_assoc_object) and gets audit-skipped.
+                    if is_unrestorable_assoc_object(&obj.dxf_name) {
+                        continue;
+                    }
                     self.write_dynamic_block_object_dxf(obj)?
                 }
                 ObjectType::Associative(obj) => {
+                    // Unrestorable associative-framework objects are not
+                    // written (see is_unrestorable_assoc_object); they were
+                    // already excluded from valid_handles.
+                    if is_unrestorable_assoc_object(&obj.dxf_name) {
+                        continue;
+                    }
                     self.write_associative_object_dxf(obj)?
                 }
                 ObjectType::ClassObject(obj) => self.write_class_object_dxf(obj)?,
@@ -4775,6 +4835,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                     self.write_proxy_object_dxf(obj)?
                 }
                 ObjectType::Unknown { type_name, handle, owner, raw_dxf_codes, .. } => {
+                    // Unrestorable associative-framework objects are not
+                    // written (see is_unrestorable_assoc_object); they were
+                    // already excluded from valid_handles.
+                    if is_unrestorable_assoc_object(type_name) {
+                        continue;
+                    }
                     self.write_unknown_object(type_name, *handle, *owner, raw_dxf_codes.as_deref())?;
                 }
             }
@@ -8233,6 +8299,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_handle(5, obj.handle)?;
         self.writer.write_handle(330, obj.owner)?;
         self.writer.write_subclass("AcDbDictionary")?;
+        // The hard-owner flag (280) belongs between the AcDbDictionary
+        // subclass and the cloning flag; omitting it shifts every following
+        // field and makes the whole record unparseable (issue #51 BricsCAD
+        // audit: every layer's PlotStyleName Id was rejected).
+        self.writer.write_bool(280, obj.hard_owner)?;
         self.writer.write_i16(281, obj.duplicate_cloning)?;
         for (key, handle) in &obj.entries {
             if !objects.contains_key(handle) {

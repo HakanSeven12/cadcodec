@@ -283,31 +283,6 @@ fn objects_maps_are_content_comparable() {
 }
 
 #[test]
-fn debug_mls_text() {
-    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
-    let mut style = acadrust::objects::MLineStyle::new("T");
-    style.handle = Handle::new(0x501);
-    style.start_angle = std::f64::consts::FRAC_PI_2;
-    style.end_angle = std::f64::consts::FRAC_PI_4;
-    doc.objects.insert(style.handle, ObjectType::MLineStyle(style));
-    let bytes = DxfWriter::new(&doc).write_to_vec().unwrap();
-    let text = String::from_utf8(bytes.clone()).unwrap();
-    let lines: Vec<&str> = text.split("\r\n").collect();
-    for i in 0..lines.len() - 1 {
-        if lines[i] == "MLINESTYLE" && lines[i + 1].trim() == "5" {
-            for l in &lines[i..i + 24] {
-                println!("[{}]", l);
-            }
-            break;
-        }
-    }
-    let doc1 = DxfReader::from_reader(Cursor::new(bytes)).unwrap().read().unwrap();
-    for o in doc1.objects.values() {
-        if let ObjectType::MLineStyle(s) = o {
-            println!("PARSED start={} end={}", s.start_angle, s.end_angle);
-        }
-    }
-}
 
 #[test]
 fn remaps_dictionary_with_default_handle() {
@@ -528,5 +503,95 @@ fn handle_less_records_receive_handles_on_read() {
         invalid.is_empty(),
         "invalid handle value 0 written: {:?}",
         invalid
+    );
+}
+
+#[test]
+fn dictionary_with_default_record_carries_hard_owner_flag() {
+    // Issue #51 BricsCAD audit: the ACDBDICTIONARYWDFLT record omitted the
+    // hard-owner flag (280), shifting every following field and making the
+    // record unparseable - every layer's PlotStyleName Id was rejected.
+    let doc = CadDocument::with_version(DxfVersion::AC1032);
+    let text = String::from_utf8(write_dxf(&doc)).unwrap();
+    let lines: Vec<&str> = text.split("\r\n").collect();
+    for i in 0..lines.len() - 2 {
+        if lines[i] == "ACDBDICTIONARYWDFLT" {
+            // Walk the record to the AcDbDictionary subclass marker; the
+            // very next code must be the 280 hard-owner flag.
+            let mut j = i + 1;
+            while j < lines.len() - 1 && lines[j] != "AcDbDictionary" {
+                j += 1;
+            }
+            assert_eq!(
+                lines[j + 1].trim(),
+                "280",
+                "ACDBDICTIONARYWDFLT record is missing group code 280"
+            );
+        }
+    }
+}
+
+#[test]
+fn acad_regapp_record_is_written_first() {
+    // Issue #51 BricsCAD audit: "RegApp ACAD has invalid index 1". CAD
+    // applications map XDATA applications by table index and require the
+    // ACAD record at index 0, regardless of the document's internal order.
+    for version in [DxfVersion::AC1015, DxfVersion::AC1032] {
+        let doc = sample_document(version);
+        let text = String::from_utf8(write_dxf(&doc)).unwrap();
+        let lines: Vec<&str> = text.split("\r\n").collect();
+        let mut first_appid_name = None;
+        for i in 0..lines.len() - 9 {
+            if lines[i] == "  0" && lines[i + 1] == "APPID" {
+                for j in i + 2..(i + 20).min(lines.len() - 1) {
+                    if lines[j] == "  2" {
+                        first_appid_name = Some(lines[j + 1].to_string());
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        assert_eq!(
+            first_appid_name.as_deref(),
+            Some("ACAD"),
+            "{version:?}: ACAD must be the first APPID record"
+        );
+    }
+}
+
+#[test]
+fn unrestorable_assoc_objects_are_not_written() {
+    // Issue #51 BricsCAD audit: the associative-framework objects written
+    // from raw records could not be restored by CAD applications, which
+    // audit-skipped them and left dangling dictionary entries behind. The
+    // writer must drop them together with every entry pointing at them.
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    doc.add_entity(EntityType::Line(Line::from_coords(0.0, 0.0, 0.0, 1.0, 1.0, 0.0)))
+        .unwrap();
+
+    let nod_handle = doc.header.named_objects_dict_handle;
+    let assoc_handle = doc.allocate_handle();
+    let mut assoc = acadrust::objects::AssociativeObject::new(
+        "ACDBASSOCVARIABLE",
+        "AcDbAssocVariable",
+    );
+    assoc.handle = assoc_handle;
+    assoc.owner = nod_handle;
+    doc.objects
+        .insert(assoc_handle, ObjectType::Associative(assoc));
+
+    if let Some(ObjectType::Dictionary(nod)) = doc.objects.get_mut(&nod_handle) {
+        nod.add_entry("ACDBASSOC2DCONSTRAINTGROUP", assoc_handle);
+    }
+
+    let text = String::from_utf8(write_dxf(&doc)).unwrap();
+    assert!(
+        !text.contains("\r\nACDBASSOCVARIABLE\r\n  5\r\n"),
+        "unrestorable assoc object must not be written"
+    );
+    assert!(
+        !text.contains("  3\r\nACDBASSOC2DCONSTRAINTGROUP\r\n"),
+        "dictionary entries pointing at dropped assoc objects must be filtered"
     );
 }

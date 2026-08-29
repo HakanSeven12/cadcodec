@@ -3302,6 +3302,26 @@ impl CadDocument {
             }
         }
 
+        // --- 1a-bis. The ACAD RegApp record must be the first APPID entry ---
+        // Applications map XDATA applications by table index and require the
+        // ACAD record at index 0 (issue #51 BricsCAD audit: "RegApp ACAD has
+        // invalid index 1").
+        if !self
+            .app_ids
+            .iter()
+            .next()
+            .is_some_and(|entry| entry.name().eq_ignore_ascii_case("ACAD"))
+            && self.app_ids.get("ACAD").is_some()
+        {
+            let acad = self.app_ids.remove("ACAD").unwrap();
+            let previous = std::mem::take(&mut self.app_ids);
+            self.app_ids.set_handle(previous.handle());
+            self.app_ids.add_or_replace(acad);
+            for entry in previous.iter() {
+                self.app_ids.add_or_replace(entry.clone());
+            }
+        }
+
         // --- 1b. Resolve table handle collisions ---
         // Collect ALL handles used by entries, entities, and objects so we can
         // detect when a table control handle collides with ANY of them.
