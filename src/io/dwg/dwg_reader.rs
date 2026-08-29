@@ -1351,7 +1351,9 @@ impl<R: Read + Seek> DwgReader<R> {
     /// Section numbers: 0=Header, 1=Classes, 2=Handles,
     /// 3=ObjFreeSpace, 4=Template, 5=AuxHeader.
     /// AcDbObjects is not in the locator table — its position is
-    /// inferred from the gap between AuxHeader end and Handles start.
+    /// inferred from the gap between the Classes section end and the
+    /// Handles section start (see the calculation below for why the
+    /// AuxHeader position is only used as a legacy fallback).
     fn read_file_header_ac15(&mut self, info: &mut DwgFileHeaderInfo) -> Result<(), DxfError> {
         use crate::io::dwg::file_headers::section_definition::names;
 
@@ -1393,6 +1395,7 @@ impl<R: Read + Seek> DwgReader<R> {
 
         let mut handles_seeker: i64 = 0;
         let mut aux_header_end: i64 = 0;
+        let mut classes_end: i64 = 0;
 
         for _ in 0..record_count.min(6) {
             let number = self.stream.read_u8()?;
@@ -1403,6 +1406,10 @@ impl<R: Read + Seek> DwgReader<R> {
             info.section_locators.insert(name.to_string(), (seeker, size));
 
             // Track offsets for AcDbObjects position calculation
+            if number == 1 {
+                // Classes section
+                classes_end = seeker + size;
+            }
             if number == 2 {
                 // Handles section
                 handles_seeker = seeker;
@@ -1413,36 +1420,57 @@ impl<R: Read + Seek> DwgReader<R> {
             }
         }
 
-        // Calculate AcDbObjects position:
-        // It occupies the space between AuxHeader end and Handles start.
-        // If AuxHeader is missing (seeker=0, size=0), fall back to
-        // computing from the file header size + other section sizes.
-        if aux_header_end == 0 {
-            // Fallback: objects start at 0x61 + sum of all known sections before it
-            let file_header_size: i64 = 0x61;
-            let mut offset = file_header_size;
-            for &sect in &[names::HEADER, names::CLASSES, names::OBJ_FREE_SPACE, names::TEMPLATE, names::AUX_HEADER] {
-                if let Some(&(_, size)) = info.section_locators.get(sect) {
-                    offset += size;
+        // Calculate AcDbObjects position.
+        //
+        // AcDbObjects is not in the locator table. It occupies the gap between
+        // the end of the Classes section and the start of the Handles section,
+        // regardless of where Template/AuxHeader are physically placed: many
+        // real-world R2000 files store Template/AuxHeader *after* Handles (and
+        // acadrust's own R13/R14 writer places ObjFreeSpace/Template after
+        // Handles too), so inferring the region from the AuxHeader end yields
+        // a negative size and an empty document (issue #55).
+        //
+        // Handle-map offsets are absolute file positions, so starting the
+        // region at classes_end is always safe: the buffer may then include a
+        // few leading non-object bytes (e.g. ObjFreeSpace/Template), but those
+        // are never referenced by any handle offset.
+        let objects_start: i64;
+        let objects_size: i64;
+        if classes_end > 0 && handles_seeker > classes_end {
+            objects_start = classes_end;
+            objects_size = handles_seeker - classes_end;
+        } else {
+            // Malformed Classes locator — fall back to the legacy inference:
+            // objects start right after the AuxHeader, or, when AuxHeader is
+            // missing (R13/R14 layout), at 0x61 + the sum of all known
+            // sections that precede it.
+            if aux_header_end == 0 {
+                let file_header_size: i64 = 0x61;
+                let mut offset = file_header_size;
+                for &sect in &[names::HEADER, names::CLASSES, names::OBJ_FREE_SPACE, names::TEMPLATE, names::AUX_HEADER] {
+                    if let Some(&(_, size)) = info.section_locators.get(sect) {
+                        offset += size;
+                    }
                 }
+                aux_header_end = offset;
             }
-            aux_header_end = offset;
+            objects_start = aux_header_end;
+            objects_size = handles_seeker - aux_header_end;
         }
 
-        let objects_size = handles_seeker - aux_header_end;
         if objects_size > 0 {
             info.section_locators.insert(
                 names::ACDB_OBJECTS.to_string(),
-                (aux_header_end, objects_size),
+                (objects_start, objects_size),
             );
-            info.objects_base_offset = aux_header_end;
+            info.objects_base_offset = objects_start;
         }
 
         self.notifications.notify(
             NotificationType::Warning,
             format!(
                 "AC15 file header: {} locator records, objects at offset {}, size {}",
-                record_count, aux_header_end, objects_size
+                record_count, objects_start, objects_size
             ),
         );
 
