@@ -12,7 +12,7 @@ Supports DXF (ASCII & Binary) and DWG (R13–R2018) files.
 
 ```toml
 [dependencies]
-acadrust = "0.4.1"
+acadrust = "0.5.0"
 ```
 
 ```rust
@@ -145,6 +145,23 @@ Full API docs: [docs.rs/acadrust](https://docs.rs/acadrust)
 ---
 
 ## Changelog
+
+
+### 0.5.0
+
+- **BricsCAD / AutoCAD 2026 compatibility** — Round-tripped DXF files now open without the recovery prompt: EED handles are decoded/encoded big-endian, `$PSTYLEMODE` is written as a boolean (290) so layer plot-style references validate, the ACAD RegApp record is emitted first, built-in materials use the minimal form, unrestorable associative-framework objects and empty map file names are dropped, dictionary-with-default records match BricsCAD's export, and `$CELWEIGHT` is sanitized to a valid lineweight.
+
+- **DXF read/write cycle stability** — Handle-less records (R12-era files) receive handles, colliding defaults are re-handled, `DictionaryWithDefault::default_handle` follows remapped objects, MLINESTYLE angles round-trip in degrees/radians symmetrically, and NOD entry ownership matches what the writer emits. Duplicate handles and dangling references that made CAD applications discard drawings are gone.
+
+- **DWG decoding fixes** — AC15 (R13–R2000) files whose AuxHeader sits behind the Handles section now read fully (AcDbObjects inferred from the Classes-to-Handles gap); code-page strings and MIF `\U+XXXX` escapes decode correctly, with unmappable characters written as MIF escapes.
+
+- **AC1032 writer fixes (issue #45)** — `$ACADMAINTVER` uses group code 90, manually added layers get real non-zero handles below `$HANDSEED`, and LAYER records carry the required 390 plot-style pointer.
+
+- **LWPOLYLINE down-save** — Plain 2D polylines are written as LWPOLYLINE for R2000+ output instead of the legacy POLYLINE/VERTEX/SEQEND form, matching what CAD applications expect (issue #63 follow-up).
+
+- **DXF hard-owner alignment (issue #63)** — `ACAD_FIELD` is written as a hard owner (360) so applications no longer erase it; remaining NOD entries match BricsCAD's own export.
+
+- **Community contributions** — Solid history graph management, exact ACIS spline topology, lump/shell chain traversal, block record base points, viewport shadow layer normalization, case-insensitive space records, entity extension-dictionary remapping, large mesh face stream preservation, and dimension definition point fixes.
 
 
 ### 0.4.1
