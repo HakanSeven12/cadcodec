@@ -13,8 +13,9 @@
 
 use std::io::Cursor;
 
-use acadrust::entities::{Circle, EntityType, Line};
-use acadrust::types::DxfVersion;
+use acadrust::entities::{Circle, EntityType, Line, Text};
+use acadrust::tables::Layer;
+use acadrust::types::{Color, DxfVersion, Vector3};
 use acadrust::{CadDocument, DwgReader, DwgWriter};
 
 fn sample_document() -> CadDocument {
@@ -94,4 +95,92 @@ fn r2000_with_template_and_aux_header_after_handles_reads_fully() {
         expected,
         "entities lost after relocating Template/AuxHeader behind Handles"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Secondary issue: legacy string encoding (code page + MIF escapes)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Pre-Unicode DWG (R13–R2004) strings are stored in the code page recorded
+// in the file header (e.g. ANSI_936 / GBK), and characters outside that code
+// page are stored as MIF `\U+XXXX` escapes. The reader must apply both; the
+// writer must emit MIF escapes rather than `&#NNNNN;` references.
+
+fn text_document(code_page: &str, value: &str) -> CadDocument {
+    let mut doc = CadDocument::with_version(DxfVersion::AC1015);
+    doc.header.code_page = code_page.to_string();
+    doc.add_entity(EntityType::Text(Text::with_value(value, Vector3::new(0.0, 0.0, 0.0))))
+        .unwrap();
+    doc
+}
+
+fn first_text_value(doc: &CadDocument) -> String {
+    for entity in doc.entities() {
+        if let EntityType::Text(t) = entity {
+            return t.value.clone();
+        }
+    }
+    panic!("no TEXT entity in document");
+}
+
+#[test]
+fn gbk_codepage_text_roundtrip() {
+    // Chinese text with the GBK code page decodes back to the same characters.
+    let doc = text_document("ANSI_936", "中文文本");
+    let rt = read_dwg(DwgWriter::write_to_vec(&doc).unwrap());
+    assert_eq!(first_text_value(&rt), "中文文本");
+    assert_eq!(rt.header.code_page, "GB2312");
+}
+
+#[test]
+fn mif_escapes_in_dwg_strings_are_decoded() {
+    // A file whose strings contain literal MIF \U+XXXX sequences (ASCII-safe
+    // for any code page) must decode them into the actual characters.
+    let doc = text_document("ANSI_936", "\\U+4E2D\\U+6587");
+    let rt = read_dwg(DwgWriter::write_to_vec(&doc).unwrap());
+    assert_eq!(first_text_value(&rt), "中文");
+}
+
+#[test]
+fn unmappable_text_is_written_as_mif_escapes() {
+    // Characters outside the (western) code page must be stored as MIF
+    // escapes — not encoding_rs' HTML `&#NNNNN;` references — and must
+    // decode back to the original text on read.
+    let doc = text_document("ANSI_1252", "中文A");
+    let bytes = DwgWriter::write_to_vec(&doc).unwrap();
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    assert!(text.contains("\\U+4E2D"), "expected MIF escape in output");
+    assert!(!text.contains("&#"), "HTML character references are not valid DWG");
+
+    let rt = read_dwg(bytes);
+    assert_eq!(first_text_value(&rt), "中文A");
+}
+
+#[test]
+fn gbk_layer_names_roundtrip() {
+    // Layer table records carry their names as legacy text too.
+    let mut doc = CadDocument::with_version(DxfVersion::AC1015);
+    doc.header.code_page = "ANSI_936".to_string();
+    for name in ["ASCII_LAYER", "图层一", "图层二"] {
+        let mut layer = Layer::new(name);
+        layer.handle = doc.allocate_handle();
+        layer.color = Color::from_index(1);
+        doc.layers.add(layer).unwrap();
+    }
+    let mut text = Text::with_value("文本", Vector3::new(0.0, 0.0, 0.0));
+    text.common.layer = "图层一".to_string();
+    doc.add_entity(EntityType::Text(text)).unwrap();
+
+    let rt = read_dwg(DwgWriter::write_to_vec(&doc).unwrap());
+    for name in ["ASCII_LAYER", "图层一", "图层二"] {
+        assert!(
+            rt.layers.get(name).is_some(),
+            "layer {name:?} missing after DWG round-trip"
+        );
+    }
+    for entity in rt.entities() {
+        if let EntityType::Text(t) = entity {
+            assert_eq!(t.common.layer, "图层一", "entity layer assignment lost");
+        }
+    }
 }
