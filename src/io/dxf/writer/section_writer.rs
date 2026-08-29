@@ -35,6 +35,19 @@ fn sanitize_symbol_name(name: &str) -> String {
         .collect()
 }
 
+/// Whether a 2D heavy polyline can be down-saved as LWPOLYLINE.
+///
+/// LWPOLYLINE cannot represent 3D polylines, polygon/polyface meshes or
+/// curve-/spline-fitted polylines (fit data and vertex flags have no
+/// light equivalent), so those keep the legacy POLYLINE/VERTEX/SEQEND
+/// form. Plain 2D polylines only carry the CLOSED (1) and PLINEGEN (128)
+/// flags, which LWPOLYLINE maps 1:1.
+pub(crate) fn polyline2d_downsaves_to_lwpolyline(polyline: &Polyline2D) -> bool {
+    (polyline.flags.bits() & !0x81) == 0
+        && polyline.smooth_surface == SmoothSurfaceType::None
+        && polyline.vertices.iter().all(|v| v.flags.bits() == 0)
+}
+
 /// Writes all DXF sections
 pub struct SectionWriter<'a, W: DxfStreamWriter> {
     writer: &'a mut W,
@@ -3195,6 +3208,15 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     /// Write POLYLINE entity (2D polyline)
     fn write_polyline2d(&mut self, polyline: &Polyline2D, owner: Handle) -> Result<()> {
+        // Down-save plain 2D polylines to LWPOLYLINE for R2000+ output.
+        // Writing every heavy polyline back as POLYLINE/VERTEX/SEQEND is a
+        // large structural divergence from the source drawing, and some CAD
+        // applications flag the resurrected VERTEX owner wiring on save.
+        if self.dxf_version >= DxfVersion::AC1015
+            && polyline2d_downsaves_to_lwpolyline(polyline)
+        {
+            return self.write_polyline2d_as_lwpolyline(polyline, owner);
+        }
         self.writer.write_entity_type("POLYLINE")?;
         self.write_common_entity_data(&polyline.common, owner)?;
         self.writer.write_subclass("AcDb2dPolyline")?;
@@ -3260,6 +3282,64 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_subclass("AcDbEntity")?;
         self.writer.write_string(8, &polyline.common.layer)?;
 
+        Ok(())
+    }
+
+    /// Down-save a plain 2D heavy polyline as LWPOLYLINE (R2000+ output).
+    ///
+    /// Per-vertex widths are baked in: a VERTEX without codes 40/41 inherits
+    /// the POLYLINE default width, and LWPOLYLINE has no default-width slot —
+    /// the same baking the DXF reader applies when it reads a heavy polyline.
+    fn write_polyline2d_as_lwpolyline(
+        &mut self,
+        polyline: &Polyline2D,
+        owner: Handle,
+    ) -> Result<()> {
+        self.writer.write_entity_type("LWPOLYLINE")?;
+        self.write_common_entity_data(&polyline.common, owner)?;
+        self.writer.write_subclass("AcDbPolyline")?;
+        self.writer.write_i32(90, polyline.vertices.len() as i32)?;
+
+        let mut flags: i16 = 0;
+        if polyline.flags.is_closed() {
+            flags |= 1;
+        }
+        if polyline.flags.bits() & 128 != 0 {
+            flags |= 128;
+        }
+        self.writer.write_i16(70, flags)?;
+
+        self.writer.write_double(38, polyline.elevation)?;
+        if polyline.thickness != 0.0 {
+            self.writer.write_double(39, polyline.thickness)?;
+        }
+
+        for vertex in &polyline.vertices {
+            self.writer.write_double(10, vertex.location.x)?;
+            self.writer.write_double(20, vertex.location.y)?;
+            let start_width = if vertex.start_width != 0.0 {
+                vertex.start_width
+            } else {
+                polyline.start_width
+            };
+            let end_width = if vertex.end_width != 0.0 {
+                vertex.end_width
+            } else {
+                polyline.end_width
+            };
+            self.writer.write_double(40, start_width)?;
+            self.writer.write_double(41, end_width)?;
+            self.writer.write_double(42, vertex.bulge)?;
+            if vertex.id != 0 {
+                self.writer.write_i32(91, vertex.id)?;
+            }
+        }
+
+        self.write_normal(polyline.normal)?;
+
+        // XDATA precedes the child records in the legacy form; LWPOLYLINE has
+        // no child records, so it goes at the end of the entity's own codes.
+        self.write_xdata(&polyline.common.extended_data)?;
         Ok(())
     }
 
@@ -6181,10 +6261,19 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_string(3, key)?;
             // These dictionary keys are hard-owner entries by definition even
             // when the dictionary-wide hard-owner flag is clear. AutoCAD,
-            // ODA and LibreDWG all emit code 360 for them.
+            // ODA and LibreDWG all emit code 360 for them. ACAD_LAYOUT and
+            // ACAD_PLOTSTYLENAME own their sub-dictionaries; ACAD_FIELD owns
+            // the drawing's FIELDLIST. Writing them as soft pointers (350)
+            // makes CAD applications treat the targets as erasable orphans
+            // and reject the file on save.
             let forced_hard_owner = dict.is_entry_hard_owner(key) || matches!(
                 key.to_ascii_uppercase().as_str(),
-                "ACAD_SORTENTS" | "ACAD_FILTER" | "SPATIAL"
+                "ACAD_LAYOUT"
+                    | "ACAD_PLOTSTYLENAME"
+                    | "ACAD_FIELD"
+                    | "ACAD_SORTENTS"
+                    | "ACAD_FILTER"
+                    | "SPATIAL"
             );
             self.writer.write_handle(
                 if dict.hard_owner || forced_hard_owner {
