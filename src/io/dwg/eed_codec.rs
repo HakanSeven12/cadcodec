@@ -92,7 +92,8 @@ pub(crate) fn encode_values_with_encoding(
             }
             XDataValue::LayerName(name) => {
                 b.push(3);
-                b.extend_from_slice(&layer_handle(name).to_le_bytes());
+                // Layer handles use the same big-endian form as code 5.
+                b.extend_from_slice(&layer_handle(name).to_be_bytes());
             }
             XDataValue::BinaryData(data) => {
                 // Each item length is a single byte; split oversized blobs into
@@ -147,7 +148,7 @@ pub(crate) fn decode_values(
         let s: [u8; 8] = b.get(i..i + 8)?.try_into().ok()?;
         Some(f64::from_le_bytes(s))
     };
-    let read_u64 = |b: &[u8], i: usize| -> Option<u64> {
+    let _read_u64 = |b: &[u8], i: usize| -> Option<u64> {
         let s: [u8; 8] = b.get(i..i + 8)?.try_into().ok()?;
         Some(u64::from_le_bytes(s))
     };
@@ -188,7 +189,10 @@ pub(crate) fn decode_values(
                 ));
             }
             3 => {
-                let h = read_u64(bytes, i)?;
+                // Layer handles use the same 8-byte big-endian form as
+                // code 5 handles.
+                let bytes = bytes.get(i..i + 8)?;
+                let h = u64::from_be_bytes(bytes.try_into().ok()?);
                 i += 8;
                 values.push(XDataValue::LayerName(layer_name(h).unwrap_or_default()));
             }

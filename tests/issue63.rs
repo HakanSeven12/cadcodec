@@ -83,13 +83,18 @@ fn acad_field_nod_entry_uses_hard_owner_pointer() {
 }
 
 #[test]
-fn acad_layout_and_plotstylename_nod_entries_use_hard_owner_pointer() {
+fn acad_layout_and_plotstylename_nod_entries_match_bricscad() {
+    // Updated per issue #51: BricsCAD's own DXF export writes ALL NOD
+    // entries (including ACAD_LAYOUT and ACAD_PLOTSTYLENAME) as soft
+    // pointers (350); hard-owning the plot style dictionary made BricsCAD's
+    // audit reject the layers' PlotStyleName references. Only ACAD_FIELD
+    // stays a hard owner (360) - covered by its dedicated test below.
     let doc = CadDocument::with_version(DxfVersion::AC1032);
     let output = write_text(&doc);
 
     for key in ["ACAD_LAYOUT", "ACAD_PLOTSTYLENAME"] {
         let (code, _) = dictionary_entry(&output, key);
-        assert_eq!(code, 360, "{} must use hard-owner code 360", key);
+        assert_eq!(code, 350, "{} must use soft-pointer code 350", key);
     }
     // Soft-pointer entries must stay soft.
     let (group_code, _) = dictionary_entry(&output, "ACAD_GROUP");

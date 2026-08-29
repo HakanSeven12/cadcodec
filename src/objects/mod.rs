@@ -190,20 +190,20 @@ impl Dictionary {
             .any(|name| name.eq_ignore_ascii_case(key))
     }
 
-    /// Named-object-dictionary keys that AutoCAD/ODA write as hard-owner
+    /// Named-object-dictionary keys that must be written as hard-owner
     /// references (DXF code 360) even when the dictionary-wide hard-owner
-    /// flag is clear. Reader and writer both canonicalize these keys so
-    /// write→read→write cycles stay stable (issue #51) and DWG→DXF
-    /// conversion keeps the genuine encoding (issue #63).
+    /// flag is clear. ACAD_FIELD owns the drawing's FIELDLIST; applications
+    /// reject the file when it dangles (issue #63).
+    ///
+    /// Note: ACAD_PLOTSTYLENAME and ACAD_LAYOUT are intentionally NOT in
+    /// this list - BricsCAD's own DXF export writes every NOD entry except
+    /// ACAD_FIELD as a soft pointer (350), and hard-owning the plot style
+    /// dictionary makes BricsCAD's audit reject the layers' PlotStyleName
+    /// references (issue #51).
     pub fn is_canonical_hard_owner_key(key: &str) -> bool {
         matches!(
             key.to_ascii_uppercase().as_str(),
-            "ACAD_LAYOUT"
-                | "ACAD_PLOTSTYLENAME"
-                | "ACAD_FIELD"
-                | "ACAD_SORTENTS"
-                | "ACAD_FILTER"
-                | "SPATIAL"
+            "ACAD_FIELD"
         )
     }
 

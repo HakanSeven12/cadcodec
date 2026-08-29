@@ -152,34 +152,65 @@ fn hard_owner_dictionary_survives_roundtrip() {
 }
 
 #[test]
-fn nod_hard_owner_keys_are_canonicalized_on_read() {
-    // A producer that writes the canonical hard-owner NOD keys with soft
-    // codes (350) must still read back as hard-owned -- that is what the
-    // writer emits, and mismatching the two is what made documents drift.
+fn nod_soft_entries_stay_soft_on_roundtrip() {
+    // BricsCAD's own DXF export writes every NOD entry except ACAD_FIELD as
+    // a soft pointer (350) - including ACAD_LAYOUT and ACAD_PLOTSTYLENAME.
+    // The reader must preserve that ownership mode so the round-trip is
+    // stable (issue #51).
     let bytes = write_dxf(&sample_document(DxfVersion::AC1032));
     let text = String::from_utf8(bytes.clone()).unwrap();
-    let patched = text
-        .replace("  3\r\nACAD_LAYOUT\r\n360\r\n", "  3\r\nACAD_LAYOUT\r\n350\r\n")
-        .replace(
-            "  3\r\nACAD_PLOTSTYLENAME\r\n360\r\n",
-            "  3\r\nACAD_PLOTSTYLENAME\r\n350\r\n",
-        );
-    assert_ne!(text, patched, "expected canonical 360 entries in output");
+    assert!(
+        text.contains("  3\r\nACAD_LAYOUT\r\n350\r\n"),
+        "expected soft 350 entries in output"
+    );
 
-    let doc = read_dxf(patched.as_bytes().into());
+    let doc = read_dxf(&bytes);
     let nod_handle = doc.header.named_objects_dict_handle;
     if let Some(ObjectType::Dictionary(nod)) = doc.objects.get(&nod_handle) {
         assert!(
-            nod.is_entry_hard_owner("ACAD_LAYOUT"),
-            "ACAD_LAYOUT must be canonicalized to hard-owner"
+            !nod.is_entry_hard_owner("ACAD_LAYOUT"),
+            "ACAD_LAYOUT must stay a soft pointer"
         );
         assert!(
-            nod.is_entry_hard_owner("ACAD_PLOTSTYLENAME"),
-            "ACAD_PLOTSTYLENAME must be canonicalized to hard-owner"
+            !nod.is_entry_hard_owner("ACAD_PLOTSTYLENAME"),
+            "ACAD_PLOTSTYLENAME must stay a soft pointer"
         );
         assert!(
             !nod.is_entry_hard_owner("ACAD_GROUP"),
             "ACAD_GROUP stays a soft pointer"
+        );
+    } else {
+        panic!("root NOD missing");
+    }
+}
+
+#[test]
+fn acad_field_entry_is_canonicalized_on_read() {
+    // ACAD_FIELD is the one NOD key the writer always emits as a hard owner
+    // (360); a file that carries it as 350 must still read back as
+    // hard-owned so the next write is identical (issue #63).
+    let mut doc = sample_document(DxfVersion::AC1032);
+    let nod_handle = doc.header.named_objects_dict_handle;
+    let xrec = doc
+        .objects
+        .iter()
+        .find_map(|(h, o)| matches!(o, ObjectType::XRecord(_)).then_some(*h))
+        .expect("sample has an XRecord");
+    if let Some(ObjectType::Dictionary(nod)) = doc.objects.get_mut(&nod_handle) {
+        nod.add_entry("ACAD_FIELD", xrec);
+    }
+
+    let bytes = write_dxf(&doc);
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    let patched = text.replace("  3\r\nACAD_FIELD\r\n360\r\n", "  3\r\nACAD_FIELD\r\n350\r\n");
+    assert_ne!(text, patched, "expected a hard-owner ACAD_FIELD in output");
+
+    let doc = read_dxf(patched.as_bytes());
+    let nod_handle = doc.header.named_objects_dict_handle;
+    if let Some(ObjectType::Dictionary(nod)) = doc.objects.get(&nod_handle) {
+        assert!(
+            nod.is_entry_hard_owner("ACAD_FIELD"),
+            "ACAD_FIELD must be canonicalized to hard-owner on read"
         );
     } else {
         panic!("root NOD missing");
@@ -507,25 +538,28 @@ fn handle_less_records_receive_handles_on_read() {
 }
 
 #[test]
-fn dictionary_with_default_record_carries_hard_owner_flag() {
-    // Issue #51 BricsCAD audit: the ACDBDICTIONARYWDFLT record omitted the
-    // hard-owner flag (280), shifting every following field and making the
-    // record unparseable - every layer's PlotStyleName Id was rejected.
+fn dictionary_with_default_record_matches_bricscad_form() {
+    // Issue #51 BricsCAD audit: BricsCAD's own DXF export does NOT write the
+    // hard-owner flag (280) in ACDBDICTIONARYWDFLT records - the record goes
+    // straight from the AcDbDictionary subclass to the cloning flag (281).
+    // Writing 280 made BricsCAD's audit reject the plot style references.
     let doc = CadDocument::with_version(DxfVersion::AC1032);
     let text = String::from_utf8(write_dxf(&doc)).unwrap();
     let lines: Vec<&str> = text.split("\r\n").collect();
-    for i in 0..lines.len() - 2 {
-        if lines[i] == "ACDBDICTIONARYWDFLT" {
+    for i in 1..lines.len() - 2 {
+        // Record start: the class name must follow a group-code-0 line (the
+        // CLASSES section also carries the name as a code-1 value).
+        if lines[i] == "ACDBDICTIONARYWDFLT" && lines[i - 1] == "  0" {
             // Walk the record to the AcDbDictionary subclass marker; the
-            // very next code must be the 280 hard-owner flag.
+            // very next code must be the 281 cloning flag (no 280).
             let mut j = i + 1;
             while j < lines.len() - 1 && lines[j] != "AcDbDictionary" {
                 j += 1;
             }
             assert_eq!(
                 lines[j + 1].trim(),
-                "280",
-                "ACDBDICTIONARYWDFLT record is missing group code 280"
+                "281",
+                "ACDBDICTIONARYWDFLT must not carry group code 280"
             );
         }
     }

@@ -55,15 +55,21 @@ pub(crate) fn polyline2d_downsaves_to_lwpolyline(polyline: &Polyline2D) -> bool 
 /// anyway, which also leaves dangling dictionary entries behind. Dropping
 /// them keeps round-tripped files clean (issue #51 BricsCAD audit).
 fn is_unrestorable_assoc_object(type_name: &str) -> bool {
+    // Normalize: the DWG class names carry underscores (e.g.
+    // ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION) while the DXF records do not.
+    let normalized: String = type_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
     matches!(
-        type_name.to_ascii_uppercase().as_str(),
+        normalized.as_str(),
         "ACDBASSOCDEPENDENCY"
             | "ACDBASSOCVALUEDEPENDENCY"
             | "ACDBASSOCGEOMDEPENDENCY"
             | "ACDBASSOCVARIABLE"
             | "ACDBASSOC2DCONSTRAINTGROUP"
-            | "ACDBDYNAMICBLOCKPURGEPREVENTER"
-    )
+    ) || normalized.starts_with("ACDBDYNAMICBLOCKPURGEPREVENTER")
 }
 
 /// Writes all DXF sections
@@ -286,12 +292,47 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$TRACEWID", |w| w.write_double(40, hdr.trace_width))?;
         self.write_header_variable("$TEXTSTYLE", |w| w.write_string(7, &hdr.current_text_style_name))?;
         self.write_header_variable("$CMLSTYLE", |w| w.write_string(2, &hdr.multiline_style))?;
-        self.write_header_variable("$CTABLESTYLE", |w| w.write_string(2, &hdr.current_table_style_name))?;
-        self.write_header_variable("$CMLEADERSTYLE", |w| w.write_string(2, &hdr.current_mleader_style_name))?;
+        // $CTABLESTYLE / $CMLEADERSTYLE are only written when they differ
+        // from the "Standard" default: BricsCAD (V20) does not write them
+        // itself and its audit reports them as unknown system variables,
+        // flagging the file for recovery (issue #51). $CANNOSCALE is always
+        // skipped for the same reason.
+        if !hdr.current_table_style_name.is_empty()
+            && !hdr.current_table_style_name.eq_ignore_ascii_case("Standard")
+        {
+            self.write_header_variable("$CTABLESTYLE", |w| {
+                w.write_string(2, &hdr.current_table_style_name)
+            })?;
+        }
+        if !hdr.current_mleader_style_name.is_empty()
+            && !hdr.current_mleader_style_name.eq_ignore_ascii_case("Standard")
+        {
+            self.write_header_variable("$CMLEADERSTYLE", |w| {
+                w.write_string(2, &hdr.current_mleader_style_name)
+            })?;
+        }
         self.write_header_variable("$CLAYER", |w| w.write_string(8, &hdr.current_layer_name))?;
         self.write_header_variable("$CELTYPE", |w| w.write_string(6, &hdr.current_linetype_name))?;
         self.write_header_variable("$CECOLOR", |w| w.write_i16(62, hdr.current_entity_color.approximate_index()))?;
-        self.write_header_variable("$CELWEIGHT", |w| w.write_i16(370, hdr.current_line_weight))?;
+        // CELWEIGHT must be a valid lineweight (-3..-1 presets or one of the
+        // fixed hundredths-of-mm values); values outside the DXF table (e.g.
+        // a raw DWG lineweight index such as 29) are rejected by CAD
+        // applications on load (issue #51 BricsCAD audit) — fall back to
+        // BYLAYER.
+        const VALID_LINEWEIGHTS: [i16; 54] = [
+            0, 5, 9, 13, 14, 15, 16, 18, 20, 23, 25, 30, 35, 40, 45, 50, 53, 55, 60, 65, 70, 75,
+            78, 80, 85, 90, 95, 100, 103, 105, 109, 112, 118, 120, 125, 130, 135, 140, 145, 150,
+            155, 158, 160, 165, 170, 175, 180, 185, 190, 195, 200, 205, 209, 211,
+        ];
+        let celweight = {
+            let v = hdr.current_line_weight;
+            if (-3..=-1).contains(&v) || VALID_LINEWEIGHTS.contains(&v) {
+                v
+            } else {
+                -1
+            }
+        };
+        self.write_header_variable("$CELWEIGHT", |w| w.write_i16(370, celweight))?;
         self.write_header_variable("$CELTSCALE", |w| w.write_double(40, hdr.current_entity_linetype_scale))?;
         self.write_header_variable("$DISPSILH", |w| w.write_i16(70, if hdr.display_silhouette { 1 } else { 0 }))?;
         self.write_header_variable("$LWDISPLAY", |w| w.write_bool(290, hdr.lineweight_display))?;
@@ -386,9 +427,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$PLIMCHECK", |w| w.write_i16(70, if hdr.paper_space_limit_check { 1 } else { 0 }))?;
         self.write_header_variable("$VISRETAIN", |w| w.write_i16(70, if hdr.retain_xref_visibility { 1 } else { 0 }))?;
 
-        // === Current annotation scale (R2008+) ===
-        self.write_header_variable("$CANNOSCALE", |w| w.write_string(1, &hdr.current_annotation_scale))?;
-        self.write_header_variable("$CANNOSCALEVALUE", |w| w.write_double(40, hdr.annotation_scale_value))?;
+        // === Plot style mode ===
+        // $PSTYLEMODE is a boolean (code 290) telling the reader whether
+        // plot-style references resolve against a named (1) or
+        // color-dependent (0) table. Writing it with the wrong code - or
+        // omitting it - makes the reader default to color-dependent mode,
+        // where the layers' PlotStyleName Ids fail validation on audit
+        // (issue #51 BricsCAD audit).
+        self.write_header_variable("$PSTYLEMODE", |w| w.write_bool(290, hdr.plotstyle_mode))?;
 
         // === Time ===
         self.write_header_variable("$TDCREATE", |w| w.write_double(40, hdr.create_date_julian))?;
@@ -766,6 +812,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_i16(370, layer.line_weight.value())?;
 
         // R2000+ layer records require a hard pointer to a plot-style object.
+        // NOTE (issue #51): BricsCAD's audit only accepts the reference when
+        // the NOD's ACAD_PLOTSTYLENAME entry is a soft pointer (350) and the
+        // plot style dictionary matches its export form; see
+        // is_canonical_hard_owner_key.
         if self.dxf_version >= DxfVersion::AC1015 {
             let plotstyle_handle = if layer.plotstyle_handle.is_null() {
                 self.normal_plotstyle_handle
@@ -2433,9 +2483,15 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
         self.writer.write_string(0, &object.dxf_name)?;
         self.writer.write_handle(5, object.handle)?;
+        // Reactors referencing objects dropped from the output (e.g.
+        // unrestorable associative-framework dependencies) must be filtered,
+        // otherwise the record dangles and the file is flagged for recovery.
         if !object.reactors.is_empty() {
             self.writer.write_string(102, "{ACAD_REACTORS")?;
             for reactor in &object.reactors {
+                if !self.valid_handles.is_empty() && !self.valid_handles.contains(reactor) {
+                    continue;
+                }
                 self.writer.write_handle(330, *reactor)?;
             }
             self.writer.write_string(102, "}")?;
@@ -7750,6 +7806,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_handle(330, obj.owner)?;
         self.writer.write_subclass("AcDbMaterial")?;
         self.writer.write_string(1, &obj.name)?;
+        // Built-in materials (ByLayer / ByBlock / Global) are written in the
+        // minimal form BricsCAD itself exports; their full default field set
+        // is rejected by BricsCAD's audit (issue #51).
+        if matches!(
+            obj.name.to_ascii_uppercase().as_str(),
+            "BYLAYER" | "BYBLOCK" | "GLOBAL"
+        ) {
+            self.writer
+                .write_i16(72, obj.diffuse_map.source as i16)?;
+            self.writer.write_i32(94, obj.channel_flags)?;
+            return Ok(());
+        }
         if !obj.description.is_empty() {
             self.writer.write_string(2, &obj.description)?;
         }
@@ -7862,7 +7930,15 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         auto_transform_code: i32,
         matrix_code: i32,
     ) -> Result<()> {
+        // Field order follows the DXF specification: blend factor, file
+        // name, source, projection, tiling, auto-transform, matrix. The
+        // file name is only written when set - BricsCAD's audit rejects
+        // materials with an empty map file name (issue #51).
         self.writer.write_double(blend_code, value.blend_factor)?;
+        if !value.file_name.is_empty() {
+            self.writer.write_string(file_code, &value.file_name)?;
+        }
+        self.writer.write_i16(source_code, value.source as i16)?;
         self.writer.write_i16(projection_code, value.projection as i16)?;
         self.writer.write_i16(tiling_code, value.tiling as i16)?;
         self.writer
@@ -7870,10 +7946,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         for item in value.transform {
             self.writer.write_double(matrix_code, item)?;
         }
-        self.writer.write_i16(source_code, value.source as i16)?;
-        if value.source == 1 {
-            self.writer.write_string(file_code, &value.file_name)?;
-        } else if value.source == 2 {
+        if value.source == 2 {
             if let Some(texture) = &value.texture {
                 self.write_material_dxf_texture(texture)?;
             } else {
@@ -8299,11 +8372,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_handle(5, obj.handle)?;
         self.writer.write_handle(330, obj.owner)?;
         self.writer.write_subclass("AcDbDictionary")?;
-        // The hard-owner flag (280) belongs between the AcDbDictionary
-        // subclass and the cloning flag; omitting it shifts every following
-        // field and makes the whole record unparseable (issue #51 BricsCAD
-        // audit: every layer's PlotStyleName Id was rejected).
-        self.writer.write_bool(280, obj.hard_owner)?;
+        // BricsCAD's own DXF export does not write the hard-owner flag (280)
+        // for ACDBDICTIONARYWDFLT records; emitting it makes BricsCAD's
+        // audit reject the plot style references (issue #51).
         self.writer.write_i16(281, obj.duplicate_cloning)?;
         for (key, handle) in &obj.entries {
             if !objects.contains_key(handle) {
@@ -8408,6 +8479,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     fn write_stub_handle_only(&mut self, type_name: &str, handle: Handle, owner: Handle) -> Result<()> {
         self.writer.write_string(0, type_name)?;
         self.writer.write_handle(5, handle)?;
+        // Match BricsCAD's own export: the placeholder carries a reactor
+        // group pointing at its owner and no AcDbPlaceHolder subclass
+        // marker (issue #51 BricsCAD audit).
+        self.writer.write_string(102, "{ACAD_REACTORS")?;
+        self.writer.write_handle(330, owner)?;
+        self.writer.write_string(102, "}")?;
         self.writer.write_handle(330, owner)?;
         Ok(())
     }
