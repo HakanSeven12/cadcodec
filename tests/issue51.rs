@@ -1,6 +1,6 @@
-//! Regression tests for issue #51 — inconsistency in DXF file handling.
+//! Regression tests for issue #51 -- inconsistency in DXF file handling.
 //!
-//! Two defects made DXF handling inconsistent between read and write:
+//! Four defects made DXF handling inconsistent between read and write:
 //!
 //! 1. Dictionary per-entry hard ownership was not canonicalized on read.
 //!    The DXF writer emits code 360 for every entry of a dictionary whose
@@ -8,24 +8,37 @@
 //!    keys (ACAD_LAYOUT, ACAD_PLOTSTYLENAME, ACAD_FIELD, ...), but the
 //!    reader only recorded `hard_owner_entries` for literal 360 codes. A
 //!    file produced by another tool (350 codes) therefore produced a
-//!    different model after one write→read cycle, and documents grown a
+//!    different model after one write--read cycle, and documents grown a
 //!    new `hard_owner_entries` list on every cycle.
 //!
 //! 2. MLINESTYLE start/end angles were written in degrees but read raw.
 //!    The model stores radians (the DWG stream stores radians and the DXF
-//!    writer converts with `to_degrees`), so every read→write cycle
-//!    multiplied the angle by 180/π (90.0 → 5156.62 → 295452.57).
+//!    writer converts with `to_degrees`), so every read--write cycle
+//!    multiplied the angle by 180/- (90.0 -- 5156.62 -- 295452.57).
+//!
+//! 3. The object-remap pass in `resolve_references()` updated dictionary
+//!    entries and owners but not `DictionaryWithDefault::default_handle`,
+//!    leaving the dictionary pointing at a handle that had been moved
+//!    (issue #51 comment by Apicqq).
+//!
+//! 4. Defaults created by `CadDocument::new()` before parsing (Standard
+//!    text style / dimstyle, ByLayer/ByBlock linetypes, ...) kept their
+//!    sequential handles even when the file reused those handles for its
+//!    own records and lacked the default entry -- the writer then emitted
+//!    duplicate handles such as `#1B` (issue #51 comment by Apicqq).
 //!
 //! Together these broke the issue's core expectation: reading the same
-//! unmodified file must yield equal documents, and read→write→read cycles
+//! unmodified file must yield equal documents, and read--write--read cycles
 //! must stabilize instead of mutating the document.
 
 use std::collections::HashMap;
 use std::io::Cursor;
 
 use acadrust::entities::{Circle, EntityType, Line};
-use acadrust::objects::{Dictionary, ObjectType, XRecord, XRecordEntry, XRecordValue};
-use acadrust::types::{DxfVersion, Handle};
+use acadrust::objects::{
+    Dictionary, DictionaryWithDefault, ObjectType, PlaceHolder, XRecord, XRecordEntry, XRecordValue,
+};
+use acadrust::types::{DxfVersion, Handle, Vector3};
 use acadrust::{CadDocument, DwgReader, DwgWriter, DxfReader, DxfWriter};
 
 fn write_dxf(doc: &CadDocument) -> Vec<u8> {
@@ -141,7 +154,7 @@ fn hard_owner_dictionary_survives_roundtrip() {
 #[test]
 fn nod_hard_owner_keys_are_canonicalized_on_read() {
     // A producer that writes the canonical hard-owner NOD keys with soft
-    // codes (350) must still read back as hard-owned — that is what the
+    // codes (350) must still read back as hard-owned -- that is what the
     // writer emits, and mismatching the two is what made documents drift.
     let bytes = write_dxf(&sample_document(DxfVersion::AC1032));
     let text = String::from_utf8(bytes.clone()).unwrap();
@@ -294,4 +307,104 @@ fn debug_mls_text() {
             println!("PARSED start={} end={}", s.start_angle, s.end_angle);
         }
     }
+}
+
+#[test]
+fn remaps_dictionary_with_default_handle() {
+    // Issue #51 comment (Apicqq): resolve_references() remapped objects and
+    // dictionary entries, but left DictionaryWithDefault's default (code
+    // 340) pointing at the old handle - ezdxf's audit then reported a
+    // "default object points to a handle that no longer exists".
+    let mut document = CadDocument::new();
+    let colliding = Handle::new(0x100);
+
+    let mut line = Line::from_points(Vector3::ZERO, Vector3::UNIT_X);
+    line.common.handle = colliding;
+    document.add_entity(EntityType::Line(line)).unwrap();
+
+    let mut placeholder = PlaceHolder::new();
+    placeholder.handle = colliding;
+    placeholder.owner = colliding;
+    document
+        .objects
+        .insert(colliding, ObjectType::PlaceHolder(placeholder));
+
+    let dwd_handle = Handle::new(0x200);
+    let mut dwd = DictionaryWithDefault::new();
+    dwd.handle = dwd_handle;
+    dwd.owner = Handle::new(0x0C);
+    dwd.entries.push(("Normal".to_string(), colliding));
+    dwd.default_handle = colliding;
+    document
+        .objects
+        .insert(dwd_handle, ObjectType::DictionaryWithDefault(dwd));
+
+    document.resolve_references();
+
+    // The placeholder must have been moved off the colliding handle, and
+    // the dictionary's default must follow it.
+    match document.objects.get(&dwd_handle) {
+        Some(ObjectType::DictionaryWithDefault(d)) => {
+            assert_ne!(
+                d.default_handle, colliding,
+                "default_handle was not remapped with its object"
+            );
+            assert_eq!(d.entries[0].1, d.default_handle);
+            assert!(
+                matches!(
+                    document.objects.get(&d.default_handle),
+                    Some(ObjectType::PlaceHolder(_))
+                ),
+                "default_handle points at a handle that no longer exists"
+            );
+        }
+        other => panic!("dictionary with default lost: {:?}", other.is_some()),
+    }
+}
+
+#[test]
+fn surviving_default_entries_are_rehandled_on_read() {
+    // Issue #51 comment (Apicqq): a file without a "Standard" dimstyle that
+    // reuses the default Standard handle for *Paper_Space made the writer
+    // emit two records with handle #1B - ezdxf's audit reported a
+    // duplicate handle.
+    let mut doc = CadDocument::new();
+    let standard_handle = doc.dim_styles.get("Standard").unwrap().handle;
+    assert!(doc.dim_styles.remove("Standard").is_some());
+    if let Some(br) = doc.block_records.get_mut("*Paper_Space") {
+        br.handle = standard_handle;
+    }
+    doc.header.paper_space_block_handle = standard_handle;
+
+    let bytes = write_dxf(&doc);
+    let rt = read_dxf(&bytes);
+
+    // The file-sourced *Paper_Space handle must be preserved.
+    let paper_space = rt
+        .block_records
+        .get("*Paper_Space")
+        .expect("*Paper_Space lost")
+        .handle;
+    assert_eq!(paper_space, standard_handle, "file handle must be preserved");
+
+    // The surviving default Standard dimstyle must have been moved off the
+    // colliding handle.
+    let standard = rt
+        .dim_styles
+        .get("Standard")
+        .expect("default Standard dimstyle missing");
+    assert_ne!(
+        standard.handle, paper_space,
+        "default Standard dimstyle kept the colliding handle"
+    );
+
+    // Writing the read document must not emit two records with the same handle.
+    let text = String::from_utf8(write_dxf(&rt)).unwrap();
+    let needle = format!("\r\n  5\r\n{:X}\r\n", standard_handle.value());
+    assert_eq!(
+        text.matches(&needle).count(),
+        1,
+        "duplicate handle {:#X} in round-tripped output",
+        standard_handle.value()
+    );
 }

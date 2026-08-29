@@ -3464,6 +3464,13 @@ impl CadDocument {
                                 *entry_handle = *new_h;
                             }
                         }
+                        // The default entry (code 340) must follow its
+                        // object when that object is remapped; leaving it
+                        // behind points the dictionary at a handle that no
+                        // longer exists (issue #51 comment by Apicqq).
+                        if let Some(new_h) = remap_map.get(&d.default_handle.value()) {
+                            d.default_handle = *new_h;
+                        }
                     }
                     ObjectType::GeoData(g) => {
                         if let Some(new_owner) = remap_map.get(&g.owner.value()) {
