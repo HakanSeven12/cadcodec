@@ -3977,7 +3977,11 @@ impl CadDocument {
             // definition object stays linked (RasterImage/Underlay renderers
             // look the definition up by this handle to find the file path).
             for entity in self.entities.iter_mut() {
-                match Arc::make_mut(entity) {
+                let entity = Arc::make_mut(entity);
+                if let Some(handle) = entity.common_mut().xdictionary_handle.as_mut() {
+                    remap_object_handle(handle);
+                }
+                match entity {
                     EntityType::Insert(insert) => {
                         if let Some(handle) = &mut insert.view_rep_handle {
                             remap_object_handle(handle);
