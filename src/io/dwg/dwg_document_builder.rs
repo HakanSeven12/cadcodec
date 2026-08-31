@@ -898,6 +898,8 @@ impl DwgDocumentBuilder {
                     layer.is_plottable = data.plottable;
                     layer.line_weight = LineWeight::from_value(data.line_weight);
                     layer.color = data.color;
+                    layer.color_name.clone_from(&data.color_name);
+                    layer.book_name.clone_from(&data.book_name);
                     if let Some(app_handle) = layer_transparency_app_handle {
                         if let Some(bytes) = document
                             .eed_by_handle

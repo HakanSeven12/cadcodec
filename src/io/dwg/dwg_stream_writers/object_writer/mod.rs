@@ -677,7 +677,11 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // Color (CMC)
-        self.writer.write_cm_color(&layer.color);
+        self.writer.write_cm_color_with_names(
+            &layer.color,
+            layer.color_name.as_deref(),
+            layer.book_name.as_deref(),
+        );
 
         // External reference block handle
         self.writer

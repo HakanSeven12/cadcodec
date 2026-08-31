@@ -278,6 +278,37 @@ impl DwgMergedWriter {
         self.main.write_cm_color(color);
     }
 
+    pub fn write_cm_color_with_names(
+        &mut self,
+        color: &Color,
+        color_name: Option<&str>,
+        book_name: Option<&str>,
+    ) {
+        if !self.version().r2004_plus() {
+            self.main.write_cm_color(color);
+            return;
+        }
+
+        self.main.write_bit_short(0);
+        let color_long = match color {
+            Color::Rgb { r, g, b } => {
+                (*b as u32) | ((*g as u32) << 8) | ((*r as u32) << 16) | (0xC2u32 << 24)
+            }
+            Color::ByLayer => 0xC0u32 << 24,
+            Color::None => 0xC8u32 << 24,
+            Color::ByBlock => 0xC1u32 << 24,
+            Color::Index(index) => (*index as u32) | (0xC3u32 << 24),
+        };
+        self.main.write_bit_long(color_long as i32);
+        self.main.write_byte(u8::from(color_name.is_some()) | (u8::from(book_name.is_some()) << 1));
+        if let Some(name) = color_name {
+            self.write_variable_text(name);
+        }
+        if let Some(name) = book_name {
+            self.write_variable_text(name);
+        }
+    }
+
     pub fn write_cm_true_color(&mut self, color: &Color) {
         self.main.write_cm_true_color(color);
     }

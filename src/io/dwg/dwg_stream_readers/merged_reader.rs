@@ -290,6 +290,36 @@ impl DwgMergedReader {
         self.main.read_bit_double_with_default(default)
     }
     pub fn read_cm_color(&mut self) -> Color { self.main.read_cm_color() }
+    pub fn read_cm_color_with_names(&mut self) -> (Color, Option<String>, Option<String>) {
+        if self.dxf_version < DxfVersion::AC1018 {
+            return (Color::from_index(self.main.read_bit_short()), None, None);
+        }
+
+        let _color_index = self.main.read_bit_short();
+        let rgb = self.main.read_bit_long() as u32;
+        let bytes = rgb.to_le_bytes();
+        let color = if rgb == 0xC000_0000 {
+            Color::ByLayer
+        } else if rgb == 0xC800_0000 {
+            Color::None
+        } else if (rgb & 0x0100_0000) != 0 {
+            Color::from_index(bytes[0] as i16)
+        } else {
+            Color::from_rgb(bytes[2], bytes[1], bytes[0])
+        };
+        let flags = self.main.read_byte();
+        let color_name = if (flags & 1) != 0 {
+            Some(self.read_variable_text())
+        } else {
+            None
+        };
+        let book_name = if (flags & 2) != 0 {
+            Some(self.read_variable_text())
+        } else {
+            None
+        };
+        (color, color_name, book_name)
+    }
     /// Read a CMTC color.  TABLESTYLE stores the full R2004 CMC payload
     /// even when the containing DWG uses a pre-R2004 file version.
     pub fn read_cm_true_color(&mut self) -> Color {

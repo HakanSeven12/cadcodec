@@ -78,6 +78,8 @@ pub struct LayerData {
     pub plottable: bool,
     pub line_weight: i16,
     pub color: Color,
+    pub color_name: Option<String>,
+    pub book_name: Option<String>,
     pub xref_dependent: bool,
     pub xref_handle: u64,
     pub plotstyle_handle: Option<u64>,
@@ -537,7 +539,7 @@ pub fn read_layer(
         locked = reader.read_bit();
     }
 
-    let color = reader.read_cm_color();
+    let (color, color_name, book_name) = reader.read_cm_color_with_names();
 
     // External reference block handle
     let xref_handle = reader.read_handle();
@@ -568,7 +570,7 @@ pub fn read_layer(
 
     LayerData {
         name, frozen, off, frozen_in_new_vp, locked, plottable,
-        line_weight, color, xref_dependent, xref_handle, plotstyle_handle,
+        line_weight, color, color_name, book_name, xref_dependent, xref_handle, plotstyle_handle,
         material_handle, linetype_handle, unknown_handle,
     }
 }
