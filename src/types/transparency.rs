@@ -5,10 +5,7 @@ use std::fmt;
 /// Transparency source and explicit amount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(
-    feature = "serde",
-    serde(tag = "method", content = "alpha", rename_all = "snake_case")
-)]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Transparency {
     /// Use the owning layer's transparency.
     ByLayer,
