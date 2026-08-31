@@ -771,8 +771,8 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
         let _ = r.read_bit_double(); // 3DDWFPREC
         h.lens_length = r.read_bit_double();
         h.camera_height = r.read_bit_double();
-        let _ = r.read_byte(); // SOLIDHIST
-        let _ = r.read_byte(); // SHOWHIST
+        h.record_solid_history = r.read_byte() != 0;
+        h.show_solid_history = (r.read_byte() as i16).clamp(0, 2);
         let _ = r.read_bit_double(); // PSOLWIDTH
         let _ = r.read_bit_double(); // PSOLHEIGHT
         h.loft_angle1 = r.read_bit_double();
