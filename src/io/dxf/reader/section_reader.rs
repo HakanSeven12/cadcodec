@@ -2543,28 +2543,33 @@ impl<'a> SectionReader<'a> {
                     }),
                 )
             }
-            "ACSH_CYLINDER_CLASS" | "ACSH_CONE_CLASS" => {
-                let section = if dxf_name == "ACSH_CYLINDER_CLASS" {
-                    "AcDbShCylinder"
-                } else {
-                    "AcDbShCone"
-                };
-                let value = SolidHistoryCylinder {
+            "ACSH_CYLINDER_CLASS" => {
+                let section = "AcDbShCylinder";
+                DynamicBlockData::SolidHistoryNode(SolidHistoryOperation::Cylinder(
+                    SolidHistoryCylinder {
+                        base: dynamic_dxf_history_base(&fields),
+                        operation_major: fields.i32(section, 90),
+                        operation_minor: fields.i32(section, 91),
+                        height: fields.f64(section, 40),
+                        major_radius: fields.f64(section, 41),
+                        minor_radius: fields.f64(section, 42),
+                        x_radius: fields.f64(section, 43),
+                    },
+                ))
+            }
+            "ACSH_CONE_CLASS" => {
+                let section = "AcDbShCone";
+                DynamicBlockData::SolidHistoryNode(SolidHistoryOperation::Cone(
+                    SolidHistoryCone {
                     base: dynamic_dxf_history_base(&fields),
                     operation_major: fields.i32(section, 90),
                     operation_minor: fields.i32(section, 91),
                     height: fields.f64(section, 40),
-                    major_radius: fields.f64(section, 41),
-                    minor_radius: fields.f64(section, 42),
-                    x_radius: fields.f64(section, 43),
-                };
-                DynamicBlockData::SolidHistoryNode(
-                    if dxf_name == "ACSH_CYLINDER_CLASS" {
-                        SolidHistoryOperation::Cylinder(value)
-                    } else {
-                        SolidHistoryOperation::Cone(value)
+                        base_x_radius: fields.f64(section, 41),
+                        base_y_radius: fields.f64(section, 42),
+                        top_radius: fields.f64(section, 43),
                     },
-                )
+                ))
             }
             "ACSH_PYRAMID_CLASS" => {
                 let section = "AcDbShPyramid";

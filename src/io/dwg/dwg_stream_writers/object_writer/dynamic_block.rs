@@ -267,8 +267,7 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_bit_long(value.operation_minor);
                 self.writer.write_bit_double(value.radius);
             }
-            SolidHistoryOperation::Cylinder(value)
-            | SolidHistoryOperation::Cone(value) => {
+            SolidHistoryOperation::Cylinder(value) => {
                 self.write_solid_history_base(&value.base);
                 self.writer.write_bit_long(value.operation_major);
                 self.writer.write_bit_long(value.operation_minor);
@@ -276,6 +275,15 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_bit_double(value.major_radius);
                 self.writer.write_bit_double(value.minor_radius);
                 self.writer.write_bit_double(value.x_radius);
+            }
+            SolidHistoryOperation::Cone(value) => {
+                self.write_solid_history_base(&value.base);
+                self.writer.write_bit_long(value.operation_major);
+                self.writer.write_bit_long(value.operation_minor);
+                self.writer.write_bit_double(value.height);
+                self.writer.write_bit_double(value.base_x_radius);
+                self.writer.write_bit_double(value.base_y_radius);
+                self.writer.write_bit_double(value.top_radius);
             }
             SolidHistoryOperation::Pyramid(value) => {
                 self.write_solid_history_base(&value.base);

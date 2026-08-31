@@ -354,8 +354,7 @@ pub fn read_solid_history_data(
                 radius: reader.read_bit_double(),
             },
         ),
-        "ACSH_CYLINDER_CLASS" | "ACSH_CONE_CLASS" => {
-            let value = SolidHistoryCylinder {
+        "ACSH_CYLINDER_CLASS" => SolidHistoryOperation::Cylinder(SolidHistoryCylinder {
                 base,
                 operation_major: reader.read_bit_long(),
                 operation_minor: reader.read_bit_long(),
@@ -363,13 +362,16 @@ pub fn read_solid_history_data(
                 major_radius: reader.read_bit_double(),
                 minor_radius: reader.read_bit_double(),
                 x_radius: reader.read_bit_double(),
-            };
-            if dxf_name == "ACSH_CYLINDER_CLASS" {
-                SolidHistoryOperation::Cylinder(value)
-            } else {
-                SolidHistoryOperation::Cone(value)
-            }
-        }
+            }),
+        "ACSH_CONE_CLASS" => SolidHistoryOperation::Cone(SolidHistoryCone {
+            base,
+            operation_major: reader.read_bit_long(),
+            operation_minor: reader.read_bit_long(),
+            height: reader.read_bit_double(),
+            base_x_radius: reader.read_bit_double(),
+            base_y_radius: reader.read_bit_double(),
+            top_radius: reader.read_bit_double(),
+        }),
         "ACSH_PYRAMID_CLASS" => SolidHistoryOperation::Pyramid(
             SolidHistoryPyramid {
                 base,
