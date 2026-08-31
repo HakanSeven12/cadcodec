@@ -732,7 +732,7 @@ impl DwgBitWriter {
         // R2004+: Build flags bitfield
         let mut flags: u16 = 0;
         let is_true_color = matches!(color, Color::Rgb { .. });
-        let has_transparency = !transparency.is_opaque();
+        let has_transparency = !transparency.is_by_layer();
 
         // Autodesk writes book colors with both ENC color bits set.  The
         // AcDbColor handle still supplies the RGB value, so no RGB BL follows.

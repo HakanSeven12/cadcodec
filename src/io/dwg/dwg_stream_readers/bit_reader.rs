@@ -872,7 +872,7 @@ impl DwgBitReader {
 
                 (color, transparency, is_book_color)
             } else {
-                (Color::ByBlock, Transparency::OPAQUE, false)
+                (Color::ByBlock, Transparency::BY_LAYER, false)
             }
         } else {
             // Pre-R2004

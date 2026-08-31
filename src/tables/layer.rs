@@ -71,7 +71,13 @@ pub struct Layer {
     /// Is this layer plottable?
     pub is_plottable: bool,
     /// Layer transparency
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default = "crate::types::transparency::opaque",
+            deserialize_with = "crate::types::transparency::deserialize_layer"
+        )
+    )]
     pub transparency: Transparency,
     /// Material handle
     pub material: Handle,

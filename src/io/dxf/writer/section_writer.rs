@@ -3018,8 +3018,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_i16(60, 1)?;
         }
 
-        // Transparency (code 440) — only for AC1018+ and non-opaque
-        if self.dxf_version >= DxfVersion::AC1018 && !common.transparency.is_opaque() {
+        // Transparency (code 440) — ByLayer is the implicit default.
+        if self.dxf_version >= DxfVersion::AC1018 && !common.transparency.is_by_layer() {
             self.writer.write_i32(440, common.transparency.to_dxf_value())?;
         }
 
@@ -3626,7 +3626,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             }
         }
         // Transparency (code 440) — only for AC1018+ and non-opaque
-        if self.dxf_version >= DxfVersion::AC1018 && !base.common.transparency.is_opaque() {
+        if self.dxf_version >= DxfVersion::AC1018 && !base.common.transparency.is_by_layer() {
             self.writer.write_i32(440, base.common.transparency.to_dxf_value())?;
         }
 
