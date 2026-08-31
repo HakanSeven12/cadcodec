@@ -4,6 +4,11 @@ use std::fmt;
 
 /// Transparency source and explicit amount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(tag = "method", content = "alpha", rename_all = "snake_case")
+)]
 pub enum Transparency {
     /// Use the owning layer's transparency.
     ByLayer,
@@ -134,104 +139,6 @@ impl fmt::Display for Transparency {
 }
 
 #[cfg(feature = "serde")]
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum TransparencyMethod {
-    ByLayer,
-    ByBlock,
-    Explicit,
-}
-
-#[cfg(feature = "serde")]
-#[derive(serde::Serialize, serde::Deserialize)]
-struct TaggedTransparency {
-    method: TransparencyMethod,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    alpha: Option<u8>,
-}
-
-#[cfg(feature = "serde")]
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum TransparencyRepr {
-    Legacy(u8),
-    Tagged(TaggedTransparency),
-}
-
-#[cfg(feature = "serde")]
-impl serde::Serialize for Transparency {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let tagged = match self {
-            Self::ByLayer => TaggedTransparency {
-                method: TransparencyMethod::ByLayer,
-                alpha: None,
-            },
-            Self::ByBlock => TaggedTransparency {
-                method: TransparencyMethod::ByBlock,
-                alpha: None,
-            },
-            Self::Explicit(alpha) => TaggedTransparency {
-                method: TransparencyMethod::Explicit,
-                alpha: Some(*alpha),
-            },
-        };
-        serde::Serialize::serialize(&tagged, serializer)
-    }
-}
-
-#[cfg(feature = "serde")]
-fn from_repr<E>(repr: TransparencyRepr, legacy_zero: Transparency) -> Result<Transparency, E>
-where
-    E: serde::de::Error,
-{
-    match repr {
-        TransparencyRepr::Legacy(0) => Ok(legacy_zero),
-        TransparencyRepr::Legacy(alpha) => Ok(Transparency::Explicit(alpha)),
-        TransparencyRepr::Tagged(TaggedTransparency {
-            method: TransparencyMethod::ByLayer,
-            ..
-        }) => Ok(Transparency::ByLayer),
-        TransparencyRepr::Tagged(TaggedTransparency {
-            method: TransparencyMethod::ByBlock,
-            ..
-        }) => Ok(Transparency::ByBlock),
-        TransparencyRepr::Tagged(TaggedTransparency {
-            method: TransparencyMethod::Explicit,
-            alpha: Some(alpha),
-        }) => Ok(Transparency::Explicit(alpha)),
-        TransparencyRepr::Tagged(TaggedTransparency {
-            method: TransparencyMethod::Explicit,
-            alpha: None,
-        }) => Err(E::missing_field("alpha")),
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'de> serde::Deserialize<'de> for Transparency {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        from_repr(TransparencyRepr::deserialize(deserializer)?, Self::ByLayer)
-    }
-}
-
-#[cfg(feature = "serde")]
-pub(crate) fn deserialize_layer<'de, D>(deserializer: D) -> Result<Transparency, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize;
-    from_repr(
-        TransparencyRepr::deserialize(deserializer)?,
-        Transparency::OPAQUE,
-    )
-}
-
-#[cfg(feature = "serde")]
 pub(crate) const fn opaque() -> Transparency {
     Transparency::OPAQUE
 }
@@ -281,9 +188,5 @@ mod tests {
             let json = serde_json::to_string(&value).unwrap();
             assert_eq!(serde_json::from_str::<Transparency>(&json).unwrap(), value);
         }
-        assert_eq!(
-            serde_json::from_str::<Transparency>("0").unwrap(),
-            Transparency::BY_LAYER
-        );
     }
 }

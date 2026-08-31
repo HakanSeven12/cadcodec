@@ -73,10 +73,7 @@ pub struct Layer {
     /// Layer transparency
     #[cfg_attr(
         feature = "serde",
-        serde(
-            default = "crate::types::transparency::opaque",
-            deserialize_with = "crate::types::transparency::deserialize_layer"
-        )
+        serde(default = "crate::types::transparency::opaque")
     )]
     pub transparency: Transparency,
     /// Material handle
