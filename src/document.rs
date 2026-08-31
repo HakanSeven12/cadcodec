@@ -35,6 +35,11 @@ fn default_sketch_tolerance() -> f64 {
     0.5
 }
 
+#[cfg(feature = "serde")]
+fn default_show_history_mode() -> i16 {
+    1
+}
+
 #[derive(Default)]
 struct EntityChangeRecorderInner {
     before: HashMap<Handle, Option<Arc<EntityType>>>,
@@ -131,6 +136,12 @@ pub struct HeaderVariables {
     pub spline_frame: bool,
     /// DELOBJ - Delete source objects for regions/solids
     pub delete_objects: bool,
+    /// SOLIDHIST - Record construction history for subsequently created solids
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub record_solid_history: bool,
+    /// SHOWHIST - Global solid-history display override (0=hide, 1=per-object, 2=show)
+    #[cfg_attr(feature = "serde", serde(default = "default_show_history_mode"))]
+    pub show_solid_history: i16,
     /// DRAGMODE - Drag mode (0=off, 1=on request, 2=auto)
     pub drag_mode: i16,
     /// BLIPMODE - Blip mode on/off
@@ -671,6 +682,8 @@ impl Default for HeaderVariables {
             display_silhouette: true,
             spline_frame: false,
             delete_objects: true,
+            record_solid_history: false,
+            show_solid_history: 1,
             drag_mode: 2,
             blip_mode: false,
             attribute_request: true,
@@ -2111,7 +2124,7 @@ impl CadDocument {
             major: 1,
             owner: entity,
             history_node_id: step_id,
-            record_history: true,
+            record_history: self.header.record_solid_history,
             ..SolidHistory::default()
         });
 

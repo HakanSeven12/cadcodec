@@ -1351,6 +1351,8 @@ impl<'a> SectionReader<'a> {
                 "$DISPSILH" => { if let Some(p) = self.reader.read_pair()? { hdr.display_silhouette = p.as_i16() == Some(1); } }
                 "$SPLFRAME" => { if let Some(p) = self.reader.read_pair()? { hdr.spline_frame = p.as_i16() == Some(1); } }
                 "$DELOBJ" => { if let Some(p) = self.reader.read_pair()? { hdr.delete_objects = p.as_i16() == Some(1); } }
+                "$SOLIDHIST" => { if let Some(p) = self.reader.read_pair()? { hdr.record_solid_history = p.as_i16() == Some(1); } }
+                "$SHOWHIST" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_i16() { hdr.show_solid_history = v.clamp(0, 2); } } }
                 "$BLIPMODE" => { if let Some(p) = self.reader.read_pair()? { hdr.blip_mode = p.as_i16() == Some(1); } }
                 "$ATTREQ" => { if let Some(p) = self.reader.read_pair()? { hdr.attribute_request = p.as_i16() == Some(1); } }
                 "$ATTDIA" => { if let Some(p) = self.reader.read_pair()? { hdr.attribute_dialog = p.as_i16() == Some(1); } }

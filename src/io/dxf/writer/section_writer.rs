@@ -332,6 +332,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // === Misc ===
         self.write_header_variable("$SPLFRAME", |w| w.write_i16(70, if hdr.spline_frame { 1 } else { 0 }))?;
+        self.write_header_variable("$SOLIDHIST", |w| w.write_i16(70, if hdr.record_solid_history { 1 } else { 0 }))?;
+        self.write_header_variable("$SHOWHIST", |w| w.write_i16(70, hdr.show_solid_history.clamp(0, 2)))?;
         self.write_header_variable("$SPLINETYPE", |w| w.write_i16(70, hdr.spline_type))?;
         self.write_header_variable("$SPLINESEGS", |w| w.write_i16(70, hdr.spline_segments))?;
         self.write_header_variable("$SURFTAB1", |w| w.write_i16(70, hdr.surface_tab1))?;
