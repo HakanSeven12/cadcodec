@@ -2199,9 +2199,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_i32(90, value.operation_major)?;
                 self.writer.write_i32(91, value.operation_minor)?;
                 self.writer.write_double(40, value.height)?;
-                self.writer.write_double(41, value.major_radius)?;
-                self.writer.write_double(42, value.minor_radius)?;
-                self.writer.write_double(43, value.x_radius)?;
+                self.writer.write_double(41, value.base_x_radius)?;
+                self.writer.write_double(42, value.base_y_radius)?;
+                self.writer.write_double(43, value.top_radius)?;
             }
             SolidHistoryOperation::Pyramid(value) => {
                 self.write_solid_history_base_dxf(&value.base)?;

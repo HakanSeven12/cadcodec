@@ -410,8 +410,10 @@ fn visit_solid_history_operation(
         SolidHistoryOperation::Sphere(value) => {
             visit_solid_history_base(&mut value.base, visit);
         }
-        SolidHistoryOperation::Cylinder(value)
-        | SolidHistoryOperation::Cone(value) => {
+        SolidHistoryOperation::Cylinder(value) => {
+            visit_solid_history_base(&mut value.base, visit);
+        }
+        SolidHistoryOperation::Cone(value) => {
             visit_solid_history_base(&mut value.base, visit);
         }
         SolidHistoryOperation::Pyramid(value) => {
@@ -929,7 +931,7 @@ pub enum SolidHistoryOperation {
     Wedge(SolidHistoryBox),
     Sphere(SolidHistorySphere),
     Cylinder(SolidHistoryCylinder),
-    Cone(SolidHistoryCylinder),
+    Cone(SolidHistoryCone),
     Pyramid(SolidHistoryPyramid),
     Torus(SolidHistoryTorus),
     Boolean(SolidHistoryBoolean),
@@ -948,7 +950,8 @@ impl SolidHistoryOperation {
             Self::Unknown => None,
             Self::Box(value) | Self::Wedge(value) => Some(&value.base),
             Self::Sphere(value) => Some(&value.base),
-            Self::Cylinder(value) | Self::Cone(value) => Some(&value.base),
+            Self::Cylinder(value) => Some(&value.base),
+            Self::Cone(value) => Some(&value.base),
             Self::Pyramid(value) => Some(&value.base),
             Self::Torus(value) => Some(&value.base),
             Self::Boolean(value) => Some(&value.base),
@@ -966,7 +969,8 @@ impl SolidHistoryOperation {
             Self::Unknown => None,
             Self::Box(value) | Self::Wedge(value) => Some(&mut value.base),
             Self::Sphere(value) => Some(&mut value.base),
-            Self::Cylinder(value) | Self::Cone(value) => Some(&mut value.base),
+            Self::Cylinder(value) => Some(&mut value.base),
+            Self::Cone(value) => Some(&mut value.base),
             Self::Pyramid(value) => Some(&mut value.base),
             Self::Torus(value) => Some(&mut value.base),
             Self::Boolean(value) => Some(&mut value.base),
@@ -1031,6 +1035,23 @@ pub struct SolidHistoryCylinder {
     pub major_radius: f64,
     pub minor_radius: f64,
     pub x_radius: f64,
+}
+
+/// Parametric cone or frustum history.
+///
+/// The three stored radii are the two base semi-axes and the top major
+/// radius. Keeping this separate from cylinder history prevents the top
+/// radius from being mistaken for a third copy of the base radius.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SolidHistoryCone {
+    pub base: SolidHistoryNodeBase,
+    pub operation_major: i32,
+    pub operation_minor: i32,
+    pub height: f64,
+    pub base_x_radius: f64,
+    pub base_y_radius: f64,
+    pub top_radius: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
