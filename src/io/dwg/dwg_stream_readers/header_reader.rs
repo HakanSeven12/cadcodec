@@ -291,7 +291,7 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
     }
 
     h.user_timer = r.read_bit();
-    let _ = r.read_bit(); // SKPOLY
+    h.sketch_type = if r.read_bit() { 1 } else { 0 }; // SKPOLY
     h.angle_direction = if r.read_bit() { 1 } else { 0 }; // ANGDIR
     h.spline_frame = r.read_bit(); // SPLFRAME
 
@@ -771,8 +771,8 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
         let _ = r.read_bit_double(); // 3DDWFPREC
         h.lens_length = r.read_bit_double();
         h.camera_height = r.read_bit_double();
-        let _ = r.read_byte(); // SOLIDHIST
-        let _ = r.read_byte(); // SHOWHIST
+        h.record_solid_history = r.read_byte() != 0;
+        h.show_solid_history = (r.read_byte() as i16).clamp(0, 2);
         let _ = r.read_bit_double(); // PSOLWIDTH
         let _ = r.read_bit_double(); // PSOLHEIGHT
         h.loft_angle1 = r.read_bit_double();
@@ -862,6 +862,7 @@ mod tests {
         let mut original = HeaderVariables::default();
         original.fingerprint_guid = "{TEST-GUID-1234}".to_string();
         original.version_guid = "{VERSION-GUID-5678}".to_string();
+        original.current_layer_handle = Handle::new(98);
         let written = header_writer::write_header(DxfVersion::AC1021, &original, 0);
         let read = read_header(&written, DxfVersion::AC1021, 0).unwrap();
 
@@ -887,11 +888,13 @@ mod tests {
             "FINGERPRINTGUID should survive three-stream roundtrip");
         assert_eq!(read.version_guid, original.version_guid,
             "VERSIONGUID should survive three-stream roundtrip");
+        assert_eq!(read.current_layer_handle, original.current_layer_handle);
     }
 
     #[test]
     fn test_header_roundtrip_r2010() {
-        let original = HeaderVariables::default();
+        let mut original = HeaderVariables::default();
+        original.current_layer_handle = Handle::new(98);
         let written = header_writer::write_header(DxfVersion::AC1024, &original, 0);
         let read = read_header(&written, DxfVersion::AC1024, 0).unwrap();
 
@@ -899,6 +902,7 @@ mod tests {
         assert_eq!(read.linear_unit_format, original.linear_unit_format);
         assert!((read.text_height - original.text_height).abs() < 1e-10);
         assert_eq!(read.attribute_visibility, original.attribute_visibility);
+        assert_eq!(read.current_layer_handle, original.current_layer_handle);
     }
 
     #[test]

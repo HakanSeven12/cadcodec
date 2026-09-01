@@ -278,6 +278,37 @@ impl DwgMergedWriter {
         self.main.write_cm_color(color);
     }
 
+    pub fn write_cm_color_with_names(
+        &mut self,
+        color: &Color,
+        color_name: Option<&str>,
+        book_name: Option<&str>,
+    ) {
+        if !self.version().r2004_plus() {
+            self.main.write_cm_color(color);
+            return;
+        }
+
+        self.main.write_bit_short(0);
+        let color_long = match color {
+            Color::Rgb { r, g, b } => {
+                (*b as u32) | ((*g as u32) << 8) | ((*r as u32) << 16) | (0xC2u32 << 24)
+            }
+            Color::ByLayer => 0xC0u32 << 24,
+            Color::None => 0xC8u32 << 24,
+            Color::ByBlock => 0xC1u32 << 24,
+            Color::Index(index) => (*index as u32) | (0xC3u32 << 24),
+        };
+        self.main.write_bit_long(color_long as i32);
+        self.main.write_byte(u8::from(color_name.is_some()) | (u8::from(book_name.is_some()) << 1));
+        if let Some(name) = color_name {
+            self.write_variable_text(name);
+        }
+        if let Some(name) = book_name {
+            self.write_variable_text(name);
+        }
+    }
+
     pub fn write_cm_true_color(&mut self, color: &Color) {
         self.main.write_cm_true_color(color);
     }
@@ -427,7 +458,7 @@ impl DwgMergedWriter {
     ///
     /// The reader computes:
     /// - flag at RL − 1 (per-object) or at RL (section)
-    /// - handles at the next byte boundary after the flag bit
+    /// - handles immediately after the flag bit
     ///
     /// 1. Record main and text bit sizes
     /// 2. If saved position: compute total bits, patch size field
@@ -436,7 +467,7 @@ impl DwgMergedWriter {
     ///    b. Write text-size flag at the text boundary (set_position_by_flag)
     ///    c. Write `true` bit (text present flag)
     /// 4. If text not present: write `false` bit
-    /// 5. Byte-align, then append handle stream
+    /// 5. Append the handle stream
     fn merge_three_stream(&mut self) -> Vec<u8> {
         let main_size_bits = self.main.position_in_bits();
         let text_size_bits = self.text.position_in_bits();
@@ -449,8 +480,6 @@ impl DwgMergedWriter {
             let saved_pos = self.position_in_bits;
 
             // RL = mainSizeBits + textSizeBits + 1 (flag bit) + flag_words.
-            // This matches C# ACadSharp DwgMergedStreamWriter.WriteSpearShift()
-            // which uses the same formula for both per-object and section records.
             let mut total_bits = main_size_bits + text_size_bits + 1;
             if text_size_bits > 0 {
                 total_bits += 16;
@@ -480,7 +509,6 @@ impl DwgMergedWriter {
 
             // Byte-align after text bytes — ensures the buffer is large
             // enough before we seek back to write flag words.
-            // ACadSharp: this.Main.WriteSpearShift() after WriteBytes.
             self.main.write_spear_shift();
 
             // The text data occupies bits [main_size_bits .. main_size_bits + text_size_bits).
@@ -493,9 +521,6 @@ impl DwgMergedWriter {
         } else {
             self.main.write_bit(false); // no text
         }
-
-        // C# ACadSharp: handles are appended immediately after the flag bit
-        // with NO extra byte-alignment. The handle stream itself is padded.
 
         // Record handle start position.
         self.handle.write_spear_shift();

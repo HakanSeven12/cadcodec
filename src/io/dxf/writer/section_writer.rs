@@ -290,6 +290,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$ATTMODE", |w| w.write_i16(70, hdr.attribute_visibility))?;
         self.write_header_variable("$TEXTSIZE", |w| w.write_double(40, hdr.text_height))?;
         self.write_header_variable("$TRACEWID", |w| w.write_double(40, hdr.trace_width))?;
+        self.write_header_variable("$SKETCHINC", |w| w.write_double(40, hdr.sketch_increment))?;
+        self.write_header_variable("$SKPOLY", |w| w.write_i16(70, hdr.sketch_type.clamp(0, 2)))?;
+        let sketch_tolerance = if hdr.sketch_tolerance.is_finite() {
+            hdr.sketch_tolerance.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        self.write_header_variable("$SKTOLERANCE", |w| w.write_double(40, sketch_tolerance))?;
         self.write_header_variable("$TEXTSTYLE", |w| w.write_string(7, &hdr.current_text_style_name))?;
         self.write_header_variable("$CMLSTYLE", |w| w.write_string(2, &hdr.multiline_style))?;
         // $CTABLESTYLE / $CMLEADERSTYLE are only written when they differ
@@ -412,6 +420,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // === Misc ===
         self.write_header_variable("$SPLFRAME", |w| w.write_i16(70, if hdr.spline_frame { 1 } else { 0 }))?;
+        self.write_header_variable("$SOLIDHIST", |w| w.write_i16(70, if hdr.record_solid_history { 1 } else { 0 }))?;
+        self.write_header_variable("$SHOWHIST", |w| w.write_i16(70, hdr.show_solid_history.clamp(0, 2)))?;
         self.write_header_variable("$SPLINETYPE", |w| w.write_i16(70, hdr.spline_type))?;
         self.write_header_variable("$SPLINESEGS", |w| w.write_i16(70, hdr.spline_segments))?;
         self.write_header_variable("$SURFTAB1", |w| w.write_i16(70, hdr.surface_tab1))?;
@@ -803,6 +813,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // now honours 420) round-trips the layer to Index(7)/white. (#223)
         if let Some(tc) = layer.color.to_true_color_value() {
             self.writer.write_i32(420, tc)?;
+        }
+        if self.dxf_version >= DxfVersion::AC1018 {
+            if let Some(name) = crate::io::dxf::join_color_book_name(
+                layer.book_name.as_deref(),
+                layer.color_name.as_deref(),
+            ) {
+                self.writer.write_string(430, &name)?;
+            }
         }
 
         // Linetype name
@@ -2303,9 +2321,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_i32(90, value.operation_major)?;
                 self.writer.write_i32(91, value.operation_minor)?;
                 self.writer.write_double(40, value.height)?;
-                self.writer.write_double(41, value.major_radius)?;
-                self.writer.write_double(42, value.minor_radius)?;
-                self.writer.write_double(43, value.x_radius)?;
+                self.writer.write_double(41, value.base_x_radius)?;
+                self.writer.write_double(42, value.base_y_radius)?;
+                self.writer.write_double(43, value.top_radius)?;
             }
             SolidHistoryOperation::Pyramid(value) => {
                 self.write_solid_history_base_dxf(&value.base)?;
@@ -3126,8 +3144,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_i16(60, 1)?;
         }
 
-        // Transparency (code 440) — only for AC1018+ and non-opaque
-        if self.dxf_version >= DxfVersion::AC1018 && !common.transparency.is_opaque() {
+        // Transparency (code 440) — ByLayer is the implicit default.
+        if self.dxf_version >= DxfVersion::AC1018 && !common.transparency.is_by_layer() {
             self.writer.write_i32(440, common.transparency.to_dxf_value())?;
         }
 
@@ -3594,6 +3612,43 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_i32(441, mtext.background_transparency)?;
             }
         }
+        // Standard DXF MTEXT column layout. Rotation is emitted above before
+        // the first column marker because code 50 is reused for column heights.
+        if mtext.column_data.column_type != 0 {
+            self.writer
+                .write_i16(75, mtext.column_data.column_type)?;
+            let manual_heights = mtext.column_data.column_type == 2
+                && !mtext.column_data.auto_height;
+            let column_count = if manual_heights {
+                mtext.column_data.heights.len().min(i16::MAX as usize) as i16
+            } else {
+                mtext
+                    .column_data
+                    .column_count
+                    .clamp(0, i16::MAX as i32) as i16
+            };
+            self.writer.write_i16(76, column_count)?;
+            self.writer.write_i16(
+                78,
+                i16::from(mtext.column_data.flow_reversed),
+            )?;
+            self.writer.write_i16(
+                79,
+                i16::from(mtext.column_data.auto_height),
+            )?;
+            self.writer.write_double(48, mtext.column_data.width)?;
+            self.writer.write_double(49, mtext.column_data.gutter)?;
+            if manual_heights {
+                for height in mtext
+                    .column_data
+                    .heights
+                    .iter()
+                    .take(column_count as usize)
+                {
+                    self.writer.write_double(50, *height)?;
+                }
+            }
+        }
         self.write_normal(mtext.normal)?;
         Ok(())
     }
@@ -3710,7 +3765,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
     }
 
-    fn write_dimension_base(&mut self, base: &DimensionBase, type_flags: i16, owner: Handle) -> Result<()> {
+    fn write_dimension_base(
+        &mut self,
+        base: &DimensionBase,
+        definition_point: Vector3,
+        type_flags: i16,
+        owner: Handle,
+    ) -> Result<()> {
         self.writer.write_handle(5, base.common.handle)?;
         self.writer.write_handle(330, owner)?;
 
@@ -3758,13 +3819,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             }
         }
         // Transparency (code 440) — only for AC1018+ and non-opaque
-        if self.dxf_version >= DxfVersion::AC1018 && !base.common.transparency.is_opaque() {
+        if self.dxf_version >= DxfVersion::AC1018 && !base.common.transparency.is_by_layer() {
             self.writer.write_i32(440, base.common.transparency.to_dxf_value())?;
         }
 
         self.writer.write_subclass("AcDbDimension")?;
         self.writer.write_string(2, &base.block_name)?;
-        self.writer.write_point3d(10, base.definition_point)?;
+        self.writer.write_point3d(10, definition_point)?;
         self.writer.write_point3d(11, base.text_middle_point)?;
         // Bit 0x80 marks text positioned at a user-defined location.
         let type_flags = if base.text_user_positioned {
@@ -3773,14 +3834,22 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             type_flags
         };
         self.writer.write_i16(70, type_flags)?;
+        self.writer.write_double(42, base.actual_measurement)?;
         // DXF angles are in degrees; internal representation is radians.
         self.writer.write_double(53, base.text_rotation.to_degrees())?;
+        if base.horizontal_direction.abs() > 1e-12 {
+            self.writer
+                .write_double(51, base.horizontal_direction.to_degrees())?;
+        }
+        self.writer
+            .write_i16(71, base.attachment_point as i16)?;
+        self.writer.write_i16(72, base.line_spacing_style)?;
         self.writer.write_string(3, &base.style_name)?;
-        if !base.text.is_empty() {
-            self.writer.write_string(1, &base.text)?;
+        if let Some(text) = base.text_override() {
+            self.writer.write_string(1, text)?;
         }
         if (base.line_spacing_factor - 1.0).abs() > 1e-10 {
-            self.writer.write_double(44, base.line_spacing_factor)?;
+            self.writer.write_double(41, base.line_spacing_factor)?;
         }
         // Normal vector (extrusion direction) — only write if not default (0,0,1)
         let n = base.normal;
@@ -3794,7 +3863,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_aligned(&mut self, dim: &DimensionAligned, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 1, owner)?; // Aligned = 1
+        self.write_dimension_base(&dim.base, dim.definition_point, 1, owner)?; // Aligned = 1
         self.writer.write_subclass("AcDbAlignedDimension")?;
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;
@@ -3807,7 +3876,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_linear(&mut self, dim: &DimensionLinear, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 0, owner)?; // Linear = 0
+        self.write_dimension_base(&dim.base, dim.definition_point, 0, owner)?; // Linear = 0
         self.writer.write_subclass("AcDbAlignedDimension")?;
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;
@@ -3823,16 +3892,17 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_radius(&mut self, dim: &DimensionRadius, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 4, owner)?; // Radius = 4
+        // Group 10 is the centre; group 15 is the chord point.
+        self.write_dimension_base(&dim.base, dim.angle_vertex, 4, owner)?; // Radius = 4
         self.writer.write_subclass("AcDbRadialDimension")?;
-        self.writer.write_point3d(15, dim.angle_vertex)?;
+        self.writer.write_point3d(15, dim.definition_point)?;
         self.writer.write_double(40, dim.leader_length)?;
         Ok(())
     }
 
     fn write_dimension_diameter(&mut self, dim: &DimensionDiameter, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 3, owner)?; // Diameter = 3
+        self.write_dimension_base(&dim.base, dim.definition_point, 3, owner)?; // Diameter = 3
         self.writer.write_subclass("AcDbDiametricDimension")?;
         self.writer.write_point3d(15, dim.angle_vertex)?;
         self.writer.write_double(40, dim.leader_length)?;
@@ -3841,18 +3911,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_angular_2line(&mut self, dim: &DimensionAngular2Ln, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 2, owner)?; // Angular = 2
+        self.write_dimension_base(&dim.base, dim.definition_point, 2, owner)?; // Angular = 2
         self.writer.write_subclass("AcDb2LineAngularDimension")?;
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;
         self.writer.write_point3d(15, dim.angle_vertex)?;
-        self.writer.write_point3d(16, dim.definition_point)?;
+        self.writer.write_point3d(16, dim.dimension_arc)?;
         Ok(())
     }
 
     fn write_dimension_angular_3point(&mut self, dim: &DimensionAngular3Pt, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 5, owner)?; // 3-point angular = 5
+        self.write_dimension_base(&dim.base, dim.definition_point, 5, owner)?; // 3-point angular = 5
         self.writer.write_subclass("AcDb3PointAngularDimension")?;
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;
@@ -3865,7 +3935,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Bit 0x40 marks the X datum; clear = Y. (0x80 is reserved for the
         // text-user-positioned flag and must not be reused here.)
         let type_flags = if dim.is_ordinate_type_x { 0x40 } else { 0 };
-        self.write_dimension_base(&dim.base, 6 | type_flags, owner)?;
+        let mut base = dim.base.clone();
+        base.actual_measurement = dim.measurement();
+        self.write_dimension_base(&base, dim.definition_point, 6 | type_flags, owner)?;
         self.writer.write_subclass("AcDbOrdinateDimension")?;
         self.writer.write_point3d(13, dim.feature_location)?;
         self.writer.write_point3d(14, dim.leader_endpoint)?;
@@ -3874,7 +3946,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_arc(&mut self, dim: &DimensionArc, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("ARC_DIMENSION")?;
-        self.write_dimension_base(&dim.base, 8, owner)?;
+        self.write_dimension_base(&dim.base, dim.definition_point, 8, owner)?;
         self.writer.write_subclass("AcDbArcDimension")?;
         self.writer.write_point3d(13, dim.first_extension_point)?;
         self.writer.write_point3d(14, dim.second_extension_point)?;
@@ -3894,7 +3966,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         owner: Handle,
     ) -> Result<()> {
         self.writer.write_entity_type("LARGE_RADIAL_DIMENSION")?;
-        self.write_dimension_base(&dim.base, 4, owner)?;
+        self.write_dimension_base(&dim.base, dim.definition_point, 4, owner)?;
         self.writer.write_subclass("AcDbRadialDimensionLarge")?;
         self.writer.write_point3d(13, dim.jog_point)?;
         self.writer.write_point3d(14, dim.override_center)?;
@@ -8357,11 +8429,15 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_handle(5, obj.handle)?;
         self.writer.write_handle(330, obj.owner)?;
         self.writer.write_subclass("AcDbColor")?;
-        if !obj.color_name.is_empty() {
-            self.writer.write_string(1, &obj.color_name)?;
+        self.writer.write_i16(62, obj.color.approximate_index())?;
+        if let Some(true_color) = obj.color.to_true_color_value() {
+            self.writer.write_i32(420, true_color)?;
         }
-        if !obj.book_name.is_empty() {
-            self.writer.write_string(2, &obj.book_name)?;
+        if let Some(name) = crate::io::dxf::join_color_book_name(
+            Some(&obj.book_name),
+            Some(&obj.color_name),
+        ) {
+            self.writer.write_string(430, &name)?;
         }
         Ok(())
     }
@@ -10693,7 +10769,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     fn write_wipeout(&mut self, wipeout: &Wipeout, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("WIPEOUT")?;
         self.write_common_entity_data(&wipeout.common, owner)?;
-        self.writer.write_subclass("AcDbWipeout")?;
+        self.writer.write_subclass("AcDbRasterImage")?;
 
         // Class version
         self.writer.write_i32(90, wipeout.class_version)?;
@@ -10717,6 +10793,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_double(13, wipeout.size.x)?;
         self.writer.write_double(23, wipeout.size.y)?;
 
+        if let Some(handle) = wipeout.definition_handle {
+            self.writer.write_handle(340, handle)?;
+        }
+
         // Display flags
         self.writer.write_i16(70, wipeout.flags.bits())?;
 
@@ -10725,6 +10805,17 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_byte(281, wipeout.brightness)?;
         self.writer.write_byte(282, wipeout.contrast)?;
         self.writer.write_byte(283, wipeout.fade)?;
+
+        if let Some(handle) = wipeout.definition_reactor_handle {
+            self.writer.write_handle(360, handle)?;
+        }
+
+        if self.dxf_version >= DxfVersion::AC1024 {
+            self.writer.write_bool(
+                290,
+                wipeout.clip_mode == crate::entities::WipeoutClipMode::Inside,
+            )?;
+        }
 
         // Clip boundary type
         self.writer.write_i16(71, wipeout.clip_type as i16)?;
@@ -11153,9 +11244,5 @@ fn get_invisible_edge_bits(flags: &InvisibleEdgeFlags) -> u8 {
 
 /// Helper to extract boundary path flag bits
 fn get_boundary_path_bits(flags: &BoundaryPathFlags) -> u32 {
-    let mut bits = 0u32;
-    if flags.is_external() { bits |= 1; }
-    if flags.is_polyline() { bits |= 2; }
-    if flags.is_derived() { bits |= 4; }
-    bits
+    flags.bits()
 }

@@ -101,9 +101,39 @@ impl ExtendedData {
         self.records.push(record);
     }
 
+    /// Insert a record, replacing the existing record for the same application.
+    ///
+    /// XDATA permits only one logical payload per registered application on an
+    /// entity. Keeping this invariant here prevents callers from accidentally
+    /// writing ambiguous duplicate records when metadata is edited repeatedly.
+    pub fn upsert_record(&mut self, record: ExtendedDataRecord) {
+        if let Some(existing) = self
+            .records
+            .iter_mut()
+            .find(|existing| existing.application_name == record.application_name)
+        {
+            *existing = record;
+        } else {
+            self.records.push(record);
+        }
+    }
+
+    /// Remove and return the record owned by `application_name`.
+    pub fn remove_record(&mut self, application_name: &str) -> Option<ExtendedDataRecord> {
+        let index = self
+            .records
+            .iter()
+            .position(|record| record.application_name == application_name)?;
+        Some(self.records.remove(index))
+    }
+
     /// Get all records
     pub fn records(&self) -> &[ExtendedDataRecord] {
         &self.records
+    }
+
+    pub(crate) fn records_mut(&mut self) -> &mut [ExtendedDataRecord] {
+        &mut self.records
     }
 
     /// Get a record by application name
@@ -157,5 +187,4 @@ mod tests {
         assert!(xdata.get_record("APP2").is_none());
     }
 }
-
 

@@ -56,6 +56,12 @@ pub struct Layer {
     pub flags: LayerFlags,
     /// Layer color
     pub color: Color,
+    /// Named color identity
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub color_name: Option<String>,
+    /// Color-book identity
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub book_name: Option<String>,
     /// Line type name
     pub line_type: String,
     /// Line weight
@@ -65,7 +71,10 @@ pub struct Layer {
     /// Is this layer plottable?
     pub is_plottable: bool,
     /// Layer transparency
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default = "crate::types::transparency::opaque")
+    )]
     pub transparency: Transparency,
     /// Material handle
     pub material: Handle,
@@ -83,6 +92,8 @@ impl Layer {
             name: name.into(),
             flags: LayerFlags::new(),
             color: Color::WHITE,
+            color_name: None,
+            book_name: None,
             line_type: "Continuous".to_string(),
             line_weight: LineWeight::Default,
             plot_style: String::new(),
@@ -101,6 +112,8 @@ impl Layer {
             name: "0".to_string(),
             flags: LayerFlags::standard(),
             color: Color::WHITE,
+            color_name: None,
+            book_name: None,
             line_type: "Continuous".to_string(),
             line_weight: LineWeight::Default,
             plot_style: String::new(),

@@ -838,6 +838,9 @@ pub fn read_layout_print_config(
     ExtendedEntityData::LayoutPrintConfig(LayoutPrintConfigData {
         class_version: reader.read_bit_short(),
         flag: reader.read_bit_short(),
+        raw_dwg_data: None,
+        raw_dwg_handle_bits: 0,
+        raw_dwg_version: None,
     })
 }
 
@@ -2358,8 +2361,9 @@ pub fn read_dimension_radius(
     dxf_version: DxfVersion,
 ) -> DimensionRadiusData {
     let common = read_common_dimension_data(reader, version, dxf_version);
-    let definition_point = reader.read_3bit_double();
+    // Radius stores the centre before the chord point.
     let angle_vertex = reader.read_3bit_double();
+    let definition_point = reader.read_3bit_double();
     let leader_length = reader.read_bit_double();
     DimensionRadiusData {
         common,
@@ -2375,8 +2379,9 @@ pub fn read_dimension_diameter(
     dxf_version: DxfVersion,
 ) -> DimensionDiameterData {
     let common = read_common_dimension_data(reader, version, dxf_version);
-    let definition_point = reader.read_3bit_double();
+    // Diameter stores the first chord before its opposite.
     let angle_vertex = reader.read_3bit_double();
+    let definition_point = reader.read_3bit_double();
     let leader_length = reader.read_bit_double();
     DimensionDiameterData {
         common,
@@ -3818,6 +3823,9 @@ fn read_legacy_table_style_override(
     };
     if flags & 0x0001 != 0 {
         value.title_suppressed = Some(reader.read_bit());
+    }
+    if flags & 0x0002 != 0 {
+        value.header_suppressed = Some(reader.read_bit());
     }
     if flags & 0x0004 != 0 {
         value.flow_direction = Some(reader.read_bit_short());

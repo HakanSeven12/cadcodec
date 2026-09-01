@@ -1351,6 +1351,8 @@ impl<'a> SectionReader<'a> {
                 "$DISPSILH" => { if let Some(p) = self.reader.read_pair()? { hdr.display_silhouette = p.as_i16() == Some(1); } }
                 "$SPLFRAME" => { if let Some(p) = self.reader.read_pair()? { hdr.spline_frame = p.as_i16() == Some(1); } }
                 "$DELOBJ" => { if let Some(p) = self.reader.read_pair()? { hdr.delete_objects = p.as_i16() == Some(1); } }
+                "$SOLIDHIST" => { if let Some(p) = self.reader.read_pair()? { hdr.record_solid_history = p.as_i16() == Some(1); } }
+                "$SHOWHIST" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_i16() { hdr.show_solid_history = v.clamp(0, 2); } } }
                 "$BLIPMODE" => { if let Some(p) = self.reader.read_pair()? { hdr.blip_mode = p.as_i16() == Some(1); } }
                 "$ATTREQ" => { if let Some(p) = self.reader.read_pair()? { hdr.attribute_request = p.as_i16() == Some(1); } }
                 "$ATTDIA" => { if let Some(p) = self.reader.read_pair()? { hdr.attribute_dialog = p.as_i16() == Some(1); } }
@@ -1406,6 +1408,8 @@ impl<'a> SectionReader<'a> {
                 "$TEXTSIZE" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.text_height = v; } } }
                 "$TRACEWID" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.trace_width = v; } } }
                 "$SKETCHINC" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.sketch_increment = v; } } }
+                "$SKPOLY" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_i16() { hdr.sketch_type = v.clamp(0, 2); } } }
+                "$SKTOLERANCE" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.sketch_tolerance = if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.5 }; } } }
                 "$THICKNESS" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.thickness = v; } } }
                 "$PDSIZE" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.point_display_size = v; } } }
                 "$PLINEWID" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.polyline_width = v; } } }
@@ -2541,28 +2545,33 @@ impl<'a> SectionReader<'a> {
                     }),
                 )
             }
-            "ACSH_CYLINDER_CLASS" | "ACSH_CONE_CLASS" => {
-                let section = if dxf_name == "ACSH_CYLINDER_CLASS" {
-                    "AcDbShCylinder"
-                } else {
-                    "AcDbShCone"
-                };
-                let value = SolidHistoryCylinder {
+            "ACSH_CYLINDER_CLASS" => {
+                let section = "AcDbShCylinder";
+                DynamicBlockData::SolidHistoryNode(SolidHistoryOperation::Cylinder(
+                    SolidHistoryCylinder {
+                        base: dynamic_dxf_history_base(&fields),
+                        operation_major: fields.i32(section, 90),
+                        operation_minor: fields.i32(section, 91),
+                        height: fields.f64(section, 40),
+                        major_radius: fields.f64(section, 41),
+                        minor_radius: fields.f64(section, 42),
+                        x_radius: fields.f64(section, 43),
+                    },
+                ))
+            }
+            "ACSH_CONE_CLASS" => {
+                let section = "AcDbShCone";
+                DynamicBlockData::SolidHistoryNode(SolidHistoryOperation::Cone(
+                    SolidHistoryCone {
                     base: dynamic_dxf_history_base(&fields),
                     operation_major: fields.i32(section, 90),
                     operation_minor: fields.i32(section, 91),
                     height: fields.f64(section, 40),
-                    major_radius: fields.f64(section, 41),
-                    minor_radius: fields.f64(section, 42),
-                    x_radius: fields.f64(section, 43),
-                };
-                DynamicBlockData::SolidHistoryNode(
-                    if dxf_name == "ACSH_CYLINDER_CLASS" {
-                        SolidHistoryOperation::Cylinder(value)
-                    } else {
-                        SolidHistoryOperation::Cone(value)
+                        base_x_radius: fields.f64(section, 41),
+                        base_y_radius: fields.f64(section, 42),
+                        top_radius: fields.f64(section, 43),
                     },
-                )
+                ))
             }
             "ACSH_PYRAMID_CLASS" => {
                 let section = "AcDbShPyramid";
@@ -5473,6 +5482,9 @@ impl<'a> SectionReader<'a> {
                                     properties: envelope.properties,
                                     payload: envelope.payload,
                                     object_ids: object.object_ids,
+                                    raw_dwg_data: None,
+                                    raw_dwg_handle_bits: 0,
+                                    raw_dwg_version: None,
                                 },
                             )
                         } else {
@@ -7478,6 +7490,8 @@ impl<'a> SectionReader<'a> {
     /// Read a DBCOLOR object
     fn read_bookcolor(&mut self) -> Result<Option<BookColor>> {
         let mut obj = BookColor::new();
+        let mut indexed_color = None;
+        let mut true_color = None;
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 { self.reader.push_back(pair); break; }
             match pair.code {
@@ -7485,8 +7499,19 @@ impl<'a> SectionReader<'a> {
                 330 => { if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) { obj.owner = Handle::new(h); } }
                 1 => obj.color_name = pair.value_string.clone(),
                 2 => obj.book_name = pair.value_string.clone(),
+                62 => indexed_color = pair.as_i16().map(Color::from_index),
+                420 => true_color = pair.as_i32().map(Color::from_true_color_value),
+                430 => {
+                    let (book_name, color_name) =
+                        crate::io::dxf::split_color_book_name(&pair.value_string);
+                    obj.book_name = book_name.unwrap_or_default();
+                    obj.color_name = color_name.unwrap_or_default();
+                }
                 _ => {}
             }
+        }
+        if let Some(color) = true_color.or(indexed_color) {
+            obj.color = color;
         }
         Ok(Some(obj))
     }
@@ -7828,14 +7853,11 @@ impl<'a> SectionReader<'a> {
                         layer.color = Color::from_true_color_value(v);
                     }
                 }
-                // True color (code 420): packed 24-bit RGB, overrides the ACI
-                // index in code 62 (which is 7 for a true-colour layer). Without
-                // this every RGB-coloured layer read back as Index(7)/white on
-                // DXF import while the DWG reader kept the RGB. (#223)
-                420 => {
-                    if let Some(v) = pair.as_i32() {
-                        layer.color = Color::from_true_color_value(v);
-                    }
+                430 => {
+                    let (book_name, color_name) =
+                        crate::io::dxf::split_color_book_name(&pair.value_string);
+                    layer.book_name = book_name;
+                    layer.color_name = color_name;
                 }
                 6 => layer.line_type = pair.value_string.clone(),
                 70 => {
@@ -10443,6 +10465,7 @@ impl<'a> SectionReader<'a> {
         let mut insertion = PointReader::new();
         let mut normal = PointReader::new();
         let mut x_direction = PointReader::new();
+        let mut reading_columns = false;
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
@@ -10488,8 +10511,19 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 50 => {
-                    if let Some(rotation) = pair.as_double() {
-                        mtext.rotation = rotation.to_radians();
+                    if let Some(value) = pair.as_double() {
+                        if reading_columns {
+                            let columns = &mut mtext.column_data;
+                            let height_count = columns.column_count.max(0) as usize;
+                            if columns.column_type == 2
+                                && !columns.auto_height
+                                && columns.heights.len() < height_count
+                            {
+                                columns.heights.push(value);
+                            }
+                        } else {
+                            mtext.rotation = value.to_radians();
+                        }
                     }
                 }
                 71 => {
@@ -10519,6 +10553,39 @@ impl<'a> SectionReader<'a> {
                 44 => {
                     if let Some(lsf) = pair.as_double() {
                         mtext.line_spacing_factor = lsf;
+                    }
+                }
+                // Standard DXF column data. These codes follow 75 and reuse
+                // numbers that mean something else earlier in AcDbMText.
+                75 => {
+                    if let Some(value) = pair.as_i16() {
+                        mtext.column_data.column_type = value;
+                        reading_columns = value != 0;
+                    }
+                }
+                76 if reading_columns => {
+                    if let Some(value) = pair.as_i16() {
+                        mtext.column_data.column_count = value as i32;
+                    }
+                }
+                78 if reading_columns => {
+                    if let Some(value) = pair.as_i16() {
+                        mtext.column_data.flow_reversed = value != 0;
+                    }
+                }
+                79 if reading_columns => {
+                    if let Some(value) = pair.as_i16() {
+                        mtext.column_data.auto_height = value != 0;
+                    }
+                }
+                48 if reading_columns => {
+                    if let Some(value) = pair.as_double() {
+                        mtext.column_data.width = value;
+                    }
+                }
+                49 if reading_columns => {
+                    if let Some(value) = pair.as_double() {
+                        mtext.column_data.gutter = value;
                     }
                 }
                 73 => {
@@ -10572,7 +10639,10 @@ impl<'a> SectionReader<'a> {
                 // R2018+ column/layout companion — its codes shadow the
                 // entity's own, so it must not fall through this match. The
                 // embedded object carries the MTEXT column layout.
-                101 => { mtext.column_data = self.read_mtext_embedded_object()?; }
+                101 => {
+                    mtext.column_data = self.read_mtext_embedded_object()?;
+                    reading_columns = false;
+                }
                 _ => { self.try_read_common_entity_code(&pair, &mut mtext.common)?; }
             }
         }
@@ -12360,11 +12430,15 @@ impl<'a> SectionReader<'a> {
         let mut line_weight = LineWeight::ByLayer;
         let mut rotation = 0.0;
         let mut text_rotation = 0.0f64;
+        let mut horizontal_direction = 0.0f64;
         let mut ext_line_rotation = 0.0f64;
         let mut ordinate_is_x = true;
-        let mut actual_measurement = 0.0;
+        // Missing group 42 preserves the computed measurement.
+        let mut actual_measurement = None;
         let mut leader_length = 0.0;
         let mut line_spacing_factor = 1.0f64;
+        let mut line_spacing_style = 1i16;
+        let mut attachment_point = AttachmentPointType::MiddleCenter;
         let mut normal = PointReader::new();
         let mut common = EntityCommon::new();
 
@@ -12435,14 +12509,33 @@ impl<'a> SectionReader<'a> {
                         text_rotation = v.to_radians();
                     }
                 }
-                44 => {
+                51 => {
+                    if let Some(v) = pair.as_double() {
+                        horizontal_direction = v.to_radians();
+                    }
+                }
+                41 => {
                     if let Some(lsf) = pair.as_double() {
                         line_spacing_factor = lsf;
                     }
                 }
+                71 => {
+                    attachment_point = match pair.as_i16().unwrap_or(5) {
+                        1 => AttachmentPointType::TopLeft,
+                        2 => AttachmentPointType::TopCenter,
+                        3 => AttachmentPointType::TopRight,
+                        4 => AttachmentPointType::MiddleLeft,
+                        6 => AttachmentPointType::MiddleRight,
+                        7 => AttachmentPointType::BottomLeft,
+                        8 => AttachmentPointType::BottomCenter,
+                        9 => AttachmentPointType::BottomRight,
+                        _ => AttachmentPointType::MiddleCenter,
+                    };
+                }
+                72 => line_spacing_style = pair.as_i16().unwrap_or(1),
                 42 => {
                     if let Some(measurement) = pair.as_double() {
-                        actual_measurement = measurement;
+                        actual_measurement = Some(measurement);
                     }
                 }
                 40 => {
@@ -12473,7 +12566,9 @@ impl<'a> SectionReader<'a> {
                 dim.base.common.line_weight = line_weight;
                 dim.base.text = text;
                 dim.base.style_name = style_name;
-                dim.base.actual_measurement = actual_measurement;
+                if let Some(measurement) = actual_measurement {
+                    dim.base.actual_measurement = measurement;
+                }
                 dim.ext_line_rotation = ext_line_rotation;
                 if let Some(def_pt) = definition_point.get_point() {
                     dim.definition_point = def_pt;
@@ -12487,7 +12582,9 @@ impl<'a> SectionReader<'a> {
                 dim.base.common.line_weight = line_weight;
                 dim.base.text = text;
                 dim.base.style_name = style_name;
-                dim.base.actual_measurement = actual_measurement;
+                if let Some(measurement) = actual_measurement {
+                    dim.base.actual_measurement = measurement;
+                }
                 dim.ext_line_rotation = ext_line_rotation;
                 if let Some(def_pt) = definition_point.get_point() {
                     dim.definition_point = def_pt;
@@ -12495,36 +12592,38 @@ impl<'a> SectionReader<'a> {
                 Dimension::Linear(dim)
             }
             DimensionType::Radius => {
-                // Writer emits the centre as code 15 (angle_vertex) and the
-                // point on the arc as the base definition point (code 10).
-                let center = pt3;
-                let chord_point = definition_point.get_point().unwrap_or(Vector3::zero());
+                // Group 10 is the centre; group 15 is the chord point.
+                let center = definition_point.get_point().unwrap_or(Vector3::zero());
+                let chord_point = pt3;
                 let mut dim = DimensionRadius::new(center, chord_point);
                 dim.base.common.layer = layer;
                 dim.base.common.color = color;
                 dim.base.common.line_weight = line_weight;
                 dim.base.text = text;
                 dim.base.style_name = style_name;
-                dim.base.actual_measurement = actual_measurement;
+                if let Some(measurement) = actual_measurement {
+                    dim.base.actual_measurement = measurement;
+                }
                 dim.leader_length = leader_length;
                 Dimension::Radius(dim)
             }
             DimensionType::Diameter => {
-                let center = pt3;
-                let point_on_arc = definition_point.get_point().unwrap_or(Vector3::zero());
-                let mut dim = DimensionDiameter::new(center, point_on_arc);
+                // Group 15 is the first chord; group 10 is its opposite.
+                let chord_point = pt3;
+                let far_chord_point = definition_point.get_point().unwrap_or(Vector3::zero());
+                let mut dim = DimensionDiameter::new(chord_point, far_chord_point);
                 dim.base.common.layer = layer;
                 dim.base.common.color = color;
                 dim.base.common.line_weight = line_weight;
                 dim.base.text = text;
                 dim.base.style_name = style_name;
-                dim.base.actual_measurement = actual_measurement;
+                if let Some(measurement) = actual_measurement {
+                    dim.base.actual_measurement = measurement;
+                }
                 Dimension::Diameter(dim)
             }
             DimensionType::Angular => {
-                // Assign by DXF code, not through new() (whose argument order is
-                // vertex,first,second and would scramble the points): 13=first,
-                // 14=second, 15=angle_vertex, 16=arc location.
+                // 13-14 and 10-15 define the lines; 16 locates the arc.
                 let mut dim = DimensionAngular2Ln::default();
                 dim.first_point = pt1;
                 dim.second_point = pt2;
@@ -12535,7 +12634,9 @@ impl<'a> SectionReader<'a> {
                 dim.base.common.line_weight = line_weight;
                 dim.base.text = text;
                 dim.base.style_name = style_name;
-                dim.base.actual_measurement = actual_measurement;
+                if let Some(measurement) = actual_measurement {
+                    dim.base.actual_measurement = measurement;
+                }
                 Dimension::Angular2Ln(dim)
             }
             DimensionType::Angular3Point => {
@@ -12553,22 +12654,26 @@ impl<'a> SectionReader<'a> {
                 dim.base.common.line_weight = line_weight;
                 dim.base.text = text;
                 dim.base.style_name = style_name;
-                dim.base.actual_measurement = actual_measurement;
+                if let Some(measurement) = actual_measurement {
+                    dim.base.actual_measurement = measurement;
+                }
                 Dimension::Angular3Pt(dim)
             }
             DimensionType::Ordinate => {
                 // 13=feature_location, 14=leader_endpoint; X vs Y datum from the
-                // group-70 0x40 bit; the leader elbow is the base def point (10).
+                // group-70 0x40 bit; group 10 is the datum origin.
                 let mut dim = DimensionOrdinate::new(pt1, pt2, ordinate_is_x);
-                if let Some(elbow) = definition_point.get_point() {
-                    dim.definition_point = elbow;
+                if let Some(origin) = definition_point.get_point() {
+                    dim.definition_point = origin;
                 }
                 dim.base.common.layer = layer;
                 dim.base.common.color = color;
                 dim.base.common.line_weight = line_weight;
                 dim.base.text = text;
                 dim.base.style_name = style_name;
-                dim.base.actual_measurement = actual_measurement;
+                if let Some(measurement) = actual_measurement {
+                    dim.base.actual_measurement = measurement;
+                }
                 Dimension::Ordinate(dim)
             }
             DimensionType::ArcLength => Dimension::Arc(DimensionArc::default()),
@@ -12588,16 +12693,26 @@ impl<'a> SectionReader<'a> {
                 dc.text_middle_point = pt;
             }
             dc.text_rotation = text_rotation;
+            dc.horizontal_direction = horizontal_direction;
             dc.text_user_positioned = text_user_positioned;
-            if let Some(pt) = definition_point.get_point() {
-                dc.definition_point = pt;
-            }
+            dc.attachment_point = attachment_point;
+            dc.line_spacing_style = line_spacing_style;
             if line_spacing_factor != 1.0 {
                 dc.line_spacing_factor = line_spacing_factor;
             }
             if let Some(n) = normal.get_point() {
                 dc.normal = n;
             }
+        }
+
+        // Radius group 10 is the centre, not the chord point.
+        if !matches!(dimension, Dimension::Radius(_)) {
+            if let Some(point) = definition_point.get_point() {
+                dimension.set_definition_point(point);
+            }
+        }
+        if let Dimension::Ordinate(value) = &mut dimension {
+            value.refresh_measurement();
         }
 
         Ok(Some(dimension))
@@ -13658,6 +13773,7 @@ impl<'a> SectionReader<'a> {
         let mut tolerance = Tolerance::new();
         let mut insertion_point = PointReader::new();
         let mut direction = PointReader::new();
+        let mut normal = PointReader::new();
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
@@ -13676,12 +13792,16 @@ impl<'a> SectionReader<'a> {
                 3 => tolerance.dimension_style_name = pair.value_string.clone(),
                 10 | 20 | 30 => { insertion_point.add_coordinate(&pair); }
                 11 | 21 | 31 => { direction.add_coordinate(&pair); }
+                210 | 220 | 230 => { normal.add_coordinate(&pair); }
                 _ => { self.try_read_common_entity_code(&pair, &mut tolerance.common)?; }
             }
         }
 
         tolerance.insertion_point = insertion_point.get_point().unwrap_or(Vector3::zero());
         tolerance.direction = direction.get_point().unwrap_or(Vector3::new(1.0, 0.0, 0.0));
+        if let Some(normal) = normal.get_point() {
+            tolerance.normal = normal;
+        }
 
         Ok(Some(tolerance))
     }
@@ -13770,9 +13890,46 @@ impl<'a> SectionReader<'a> {
                 10 | 20 | 30 => { insertion_point.add_coordinate(&pair); }
                 11 | 21 | 31 => { u_vector.add_coordinate(&pair); }
                 12 | 22 | 32 => { v_vector.add_coordinate(&pair); }
+                13 => { if let Some(v) = pair.as_double() { wipeout.size.x = v; } }
+                23 => { if let Some(v) = pair.as_double() { wipeout.size.y = v; } }
+                90 => { if let Some(v) = pair.as_i32() { wipeout.class_version = v; } }
+                340 => {
+                    let handle = parse_dxf_handle(&pair.value_string);
+                    if !handle.is_null() { wipeout.definition_handle = Some(handle); }
+                }
+                360 => {
+                    let handle = parse_dxf_handle(&pair.value_string);
+                    if !handle.is_null() { wipeout.definition_reactor_handle = Some(handle); }
+                }
+                70 => {
+                    if let Some(v) = pair.as_i16() {
+                        wipeout.flags = WipeoutDisplayFlags::from_bits_truncate(v);
+                    }
+                }
                 71 => {
                     if let Some(v) = pair.as_i16() {
                         wipeout.clip_type = crate::entities::wipeout::WipeoutClipType::from(v);
+                    }
+                }
+                280 => {
+                    if let Some(v) = pair.as_i16() { wipeout.clipping_enabled = v != 0; }
+                }
+                281 => {
+                    if let Some(v) = pair.as_i16() { wipeout.brightness = v.clamp(0, 100) as u8; }
+                }
+                282 => {
+                    if let Some(v) = pair.as_i16() { wipeout.contrast = v.clamp(0, 100) as u8; }
+                }
+                283 => {
+                    if let Some(v) = pair.as_i16() { wipeout.fade = v.clamp(0, 100) as u8; }
+                }
+                290 => {
+                    if let Some(v) = pair.as_bool() {
+                        wipeout.clip_mode = if v {
+                            crate::entities::wipeout::WipeoutClipMode::Inside
+                        } else {
+                            crate::entities::wipeout::WipeoutClipMode::Outside
+                        };
                     }
                 }
                 91 => {

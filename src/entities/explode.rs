@@ -29,6 +29,7 @@ fn inherit_common(source: &EntityCommon) -> EntityCommon {
         linetype_scale: source.linetype_scale,
         transparency: source.transparency,
         color_name: source.color_name.clone(),
+        color_book_handle: source.color_book_handle,
         invisible: source.invisible,
         owner_handle: source.owner_handle,
         ..EntityCommon::new()
@@ -288,7 +289,7 @@ fn explode_ellipse(ellipse: &Ellipse) -> Vec<EntityType> {
 fn explode_solid(solid: &Solid) -> Vec<EntityType> {
     // Explode a filled solid into its edge lines.
     let common = &solid.common;
-    let corners = solid.corners();
+    let corners = solid.boundary_corners();
     let n = corners.len();
     let mut result = Vec::with_capacity(n);
     for i in 0..n {
@@ -491,13 +492,10 @@ fn explode_dimension(dim: &Dimension) -> Vec<EntityType> {
     let base = dim.base();
     let common = &base.common;
 
-    let text_value = if !base.text.is_empty() {
-        base.text.clone()
-    } else if let Some(ref ut) = base.user_text {
-        ut.clone()
-    } else {
-        format!("{:.4}", base.actual_measurement)
-    };
+    let text_value = base
+        .text_override()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{:.4}", dim.measurement()));
 
     let mut result = Vec::new();
 
@@ -529,7 +527,12 @@ fn explode_dimension(dim: &Dimension) -> Vec<EntityType> {
             result.push(line_entity(d.angle_vertex, d.second_point, 0.0, base.normal, common));
         }
         Dimension::Ordinate(d) => {
-            result.push(line_entity(d.feature_location, d.leader_endpoint, 0.0, base.normal, common));
+            let points = d.leader_polyline(0.0, 0.0, None);
+            for pair in points.windows(2) {
+                if (pair[1] - pair[0]).length() > 1e-12 {
+                    result.push(line_entity(pair[0], pair[1], 0.0, base.normal, common));
+                }
+            }
         }
         Dimension::Arc(d) => {
             result.push(line_entity(d.center_point, d.first_extension_point, 0.0, base.normal, common));
@@ -926,17 +929,30 @@ mod tests {
 
     #[test]
     fn test_explode_solid_quad() {
+        let first = Vector3::new(0.0, 0.0, 0.0);
+        let second = Vector3::new(10.0, 0.0, 0.0);
+        let third = Vector3::new(0.0, 10.0, 0.0);
+        let fourth = Vector3::new(10.0, 10.0, 0.0);
         let solid = Solid::new(
-            Vector3::new(0.0, 0.0, 0.0),
-            Vector3::new(10.0, 0.0, 0.0),
-            Vector3::new(10.0, 10.0, 0.0),
-            Vector3::new(0.0, 10.0, 0.0),
+            first,
+            second,
+            third,
+            fourth,
         );
         let entity = EntityType::Solid(solid);
         let parts = entity.explode();
-        assert_eq!(parts.len(), 4); // 4 edge lines
-        for part in &parts {
-            assert!(matches!(part, EntityType::Line(_)));
+        let expected = [
+            (first, second),
+            (second, fourth),
+            (fourth, third),
+            (third, first),
+        ];
+        assert_eq!(parts.len(), expected.len());
+        for (part, (start, end)) in parts.iter().zip(expected) {
+            let EntityType::Line(line) = part else {
+                panic!("expected line")
+            };
+            assert_eq!((line.start, line.end), (start, end));
         }
     }
 

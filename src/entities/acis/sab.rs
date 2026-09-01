@@ -508,7 +508,6 @@ impl CoordLayout {
             "sphere-surface" => Self::POS_S_DIR_DIR,
             "torus-surface" => Self::POS_DIR_SS_DIR,
             "ellipse-curve" => Self::POS_DIR_DIR,
-            "intcurve-curve" | "spline-surface" => Self::POS_DIR_DIR,
             _ => Self::EMPTY,
         }
     }

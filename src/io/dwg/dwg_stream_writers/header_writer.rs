@@ -379,7 +379,8 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
     }
 
     w.write_bit(h.user_timer);
-    w.write_bit(false); // SKPOLY (no dedicated field — default false)
+    // The legacy DWG header stores SKPOLY as one bit.
+    w.write_bit(h.sketch_type != 0); // SKPOLY
     w.write_bit(h.angle_direction != 0); // ANGDIR
     w.write_bit(h.spline_frame); // SPLFRAME
 
@@ -872,8 +873,8 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
         w.write_bit_double(2.0); // 3DDWFPREC — valid range 1..6
         w.write_bit_double(h.lens_length);
         w.write_bit_double(h.camera_height);
-        w.write_byte(0); // SOLIDHIST
-        w.write_byte(0); // SHOWHIST
+        w.write_byte(u8::from(h.record_solid_history));
+        w.write_byte(h.show_solid_history.clamp(0, 2) as u8);
         w.write_bit_double(0.25); // PSOLWIDTH — valid range >0
         w.write_bit_double(0.25); // PSOLHEIGHT
         w.write_bit_double(h.loft_angle1);

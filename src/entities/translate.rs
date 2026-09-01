@@ -120,51 +120,45 @@ pub(crate) fn translate_helix(e: &mut Helix, offset: Vector3) {
 // ── Dimension ────────────────────────────────────────────────────────────────
 
 pub(crate) fn translate_dimension(e: &mut Dimension, offset: Vector3) {
+    e.set_definition_point(e.definition_point() + offset);
     match e {
         Dimension::Aligned(d) => {
-            d.definition_point = d.definition_point + offset;
             d.base.text_middle_point = d.base.text_middle_point + offset;
             d.first_point = d.first_point + offset;
             d.second_point = d.second_point + offset;
         }
         Dimension::Linear(d) => {
-            d.definition_point = d.definition_point + offset;
             d.base.text_middle_point = d.base.text_middle_point + offset;
             d.first_point = d.first_point + offset;
             d.second_point = d.second_point + offset;
         }
         Dimension::Radius(d) => {
-            d.definition_point = d.definition_point + offset;
             d.base.text_middle_point = d.base.text_middle_point + offset;
             d.angle_vertex = d.angle_vertex + offset;
         }
         Dimension::Diameter(d) => {
-            d.definition_point = d.definition_point + offset;
             d.base.text_middle_point = d.base.text_middle_point + offset;
             d.angle_vertex = d.angle_vertex + offset;
         }
         Dimension::Angular2Ln(d) => {
-            d.definition_point = d.definition_point + offset;
             d.base.text_middle_point = d.base.text_middle_point + offset;
+            d.dimension_arc = d.dimension_arc + offset;
             d.angle_vertex = d.angle_vertex + offset;
             d.first_point = d.first_point + offset;
             d.second_point = d.second_point + offset;
         }
         Dimension::Angular3Pt(d) => {
-            d.definition_point = d.definition_point + offset;
             d.base.text_middle_point = d.base.text_middle_point + offset;
             d.angle_vertex = d.angle_vertex + offset;
             d.first_point = d.first_point + offset;
             d.second_point = d.second_point + offset;
         }
         Dimension::Ordinate(d) => {
-            d.definition_point = d.definition_point + offset;
             d.base.text_middle_point = d.base.text_middle_point + offset;
             d.feature_location = d.feature_location + offset;
             d.leader_endpoint = d.leader_endpoint + offset;
         }
         Dimension::Arc(d) => {
-            d.definition_point = d.definition_point + offset;
             d.base.text_middle_point = d.base.text_middle_point + offset;
             d.first_extension_point = d.first_extension_point + offset;
             d.second_extension_point = d.second_extension_point + offset;
@@ -173,7 +167,6 @@ pub(crate) fn translate_dimension(e: &mut Dimension, offset: Vector3) {
             d.second_leader_point = d.second_leader_point + offset;
         }
         Dimension::LargeRadial(d) => {
-            d.definition_point = d.definition_point + offset;
             d.base.text_middle_point = d.base.text_middle_point + offset;
             d.chord_point = d.chord_point + offset;
             d.override_center = d.override_center + offset;

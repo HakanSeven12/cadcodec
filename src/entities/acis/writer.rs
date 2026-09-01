@@ -459,6 +459,76 @@ impl SatDocument {
         index
     }
 
+    /// Add an exact 3-D NURBS curve carried by an `exactcur` record.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_spline_curve(
+        &mut self,
+        rational: bool,
+        degree: i32,
+        closed: bool,
+        knots: &[(f64, i32)],
+        control: &[[f64; 3]],
+        weights: Option<&[f64]>,
+        fit_tol: f64,
+    ) -> i32 {
+        let index = self.records.len() as i32;
+        let mut record = SatRecord::new(index, "intcurve-curve");
+        record.attribute = SatPointer::NULL;
+        let id = |value: &str| SatToken::Ident(value.to_string());
+
+        record.tokens.push(SatToken::Pointer(SatPointer::NULL));
+        record.tokens.push(id("forward"));
+        record.tokens.push(id("{"));
+        record.tokens.push(id("exactcur"));
+        record.tokens.push(id("full"));
+        record.tokens.push(id(if rational { "nurbs" } else { "nubs" }));
+        record.tokens.push(SatToken::Integer(degree as i64));
+        record.tokens.push(id(if closed { "closed" } else { "open" }));
+        record.tokens.push(SatToken::Integer(knots.len() as i64));
+        for &(knot, multiplicity) in knots {
+            record.tokens.push(SatToken::Float(knot));
+            record.tokens.push(SatToken::Integer(multiplicity as i64));
+        }
+        for (position, point) in control.iter().enumerate() {
+            record.tokens.push(SatToken::Float(point[0]));
+            record.tokens.push(SatToken::Float(point[1]));
+            record.tokens.push(SatToken::Float(point[2]));
+            if rational {
+                record.tokens.push(SatToken::Float(
+                    weights
+                        .and_then(|values| values.get(position))
+                        .copied()
+                        .unwrap_or(1.0),
+                ));
+            }
+        }
+        record.tokens.push(SatToken::Float(fit_tol));
+        record.tokens.extend([
+            id("null_surface"),
+            id("null_surface"),
+            id("nullbs"),
+            id("nullbs"),
+            id("I"),
+            id("I"),
+        ]);
+        record.tokens.extend([
+            SatToken::Float(0.0),
+            SatToken::Float(0.0),
+            SatToken::Float(0.0),
+            SatToken::False,
+            SatToken::Float(1.0),
+            SatToken::False,
+            SatToken::Float(0.0),
+        ]);
+        record.tokens.push(id("}"));
+        record.tokens.push(id("I"));
+        record.tokens.push(id("I"));
+
+        self.records.push(record);
+        self.header.num_records = self.records.len();
+        index
+    }
+
     /// Add an exact NURBS `spline-surface` record and return its index.
     ///
     /// Emits the `exact_spl_sur` form used for a free-form (non-analytic)
@@ -534,6 +604,59 @@ impl SatDocument {
         record.tokens.push(id("I"));
         record.tokens.push(id("I"));
         record.tokens.push(id("I"));
+
+        self.records.push(record);
+        self.header.num_records = self.records.len();
+        index
+    }
+
+    /// Add an inline NURBS trimming curve in surface parameter space.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_pcurve(
+        &mut self,
+        rational: bool,
+        degree: i32,
+        closed: bool,
+        knots: &[(f64, i32)],
+        control: &[[f64; 2]],
+        weights: Option<&[f64]>,
+        fit_tol: f64,
+        parameter_range: (f64, f64),
+    ) -> i32 {
+        let index = self.records.len() as i32;
+        let mut record = SatRecord::new(index, "pcurve");
+        record.attribute = SatPointer::NULL;
+        let id = |value: &str| SatToken::Ident(value.to_string());
+
+        record.tokens.push(SatToken::Pointer(SatPointer::NULL));
+        record.tokens.push(SatToken::Integer(0));
+        record.tokens.push(id("{"));
+        record.tokens.push(id("exp_par_cur"));
+        record.tokens.push(id(if rational { "nurbs" } else { "nubs" }));
+        record.tokens.push(SatToken::Integer(degree as i64));
+        record.tokens.push(id(if closed { "closed" } else { "open" }));
+        record.tokens.push(SatToken::Integer(knots.len() as i64));
+        for &(knot, multiplicity) in knots {
+            record.tokens.push(SatToken::Float(knot));
+            record.tokens.push(SatToken::Integer(multiplicity as i64));
+        }
+        for (position, point) in control.iter().enumerate() {
+            record.tokens.push(SatToken::Float(point[0]));
+            record.tokens.push(SatToken::Float(point[1]));
+            if rational {
+                record.tokens.push(SatToken::Float(
+                    weights
+                        .and_then(|values| values.get(position))
+                        .copied()
+                        .unwrap_or(1.0),
+                ));
+            }
+        }
+        record.tokens.push(SatToken::Float(fit_tol));
+        record.tokens.push(id("}"));
+        record.tokens.extend((0..4).map(|_| id("I")));
+        record.tokens.push(SatToken::Float(parameter_range.0));
+        record.tokens.push(SatToken::Float(parameter_range.1));
 
         self.records.push(record);
         self.header.num_records = self.records.len();

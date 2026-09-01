@@ -17,6 +17,11 @@
 use crate::types::Handle;
 use indexmap::IndexMap;
 
+/// Normalize a symbol-table name for case-insensitive lookup.
+pub fn normalize_name(name: &str) -> String {
+    name.to_uppercase()
+}
+
 pub mod layer;
 pub mod linetype;
 pub mod textstyle;
@@ -98,7 +103,7 @@ impl<T: TableEntry> Table<T> {
 
     /// Add an entry to the table
     pub fn add(&mut self, entry: T) -> Result<(), String> {
-        let name = entry.name().to_uppercase();
+        let name = normalize_name(entry.name());
         if self.entries.contains_key(&name) {
             return Err(format!("Entry '{}' already exists in table", entry.name()));
         }
@@ -108,7 +113,7 @@ impl<T: TableEntry> Table<T> {
 
     /// Add or replace an entry in the table (parsed data wins over defaults)
     pub fn add_or_replace(&mut self, entry: T) {
-        let name = entry.name().to_uppercase();
+        let name = normalize_name(entry.name());
         self.entries.insert(name, entry);
     }
 
@@ -116,7 +121,7 @@ impl<T: TableEntry> Table<T> {
     /// name. This is needed for AutoCAD VPORT tables, where tiled model-space
     /// viewports can all be named "*Active".
     pub fn add_allow_duplicate(&mut self, entry: T) {
-        let name = entry.name().to_uppercase();
+        let name = normalize_name(entry.name());
         if !self.entries.contains_key(&name) {
             self.entries.insert(name, entry);
             return;
@@ -138,22 +143,44 @@ impl<T: TableEntry> Table<T> {
 
     /// Get an entry by name (case-insensitive)
     pub fn get(&self, name: &str) -> Option<&T> {
-        self.entries.get(&name.to_uppercase())
+        self.entries.get(&normalize_name(name))
     }
 
     /// Get a mutable entry by name (case-insensitive)
     pub fn get_mut(&mut self, name: &str) -> Option<&mut T> {
-        self.entries.get_mut(&name.to_uppercase())
+        self.entries.get_mut(&normalize_name(name))
     }
 
     /// Remove an entry by name (case-insensitive)
     pub fn remove(&mut self, name: &str) -> Option<T> {
-        self.entries.shift_remove(&name.to_uppercase())
+        self.entries.shift_remove(&normalize_name(name))
     }
 
     /// Check if an entry exists (case-insensitive)
     pub fn contains(&self, name: &str) -> bool {
-        self.entries.contains_key(&name.to_uppercase())
+        self.entries.contains_key(&normalize_name(name))
+    }
+
+    /// Rename an entry without changing its handle or table position.
+    pub fn rename(&mut self, old_name: &str, new_name: impl Into<String>) -> Result<(), String> {
+        let new_name = new_name.into();
+        let old_key = normalize_name(old_name);
+        let new_key = normalize_name(&new_name);
+        let Some(index) = self.entries.get_index_of(&old_key) else {
+            return Err(format!("Entry '{old_name}' does not exist in table"));
+        };
+        if old_key != new_key && self.entries.contains_key(&new_key) {
+            return Err(format!("Entry '{new_name}' already exists in table"));
+        }
+        if old_key == new_key {
+            self.entries[index].set_name(new_name);
+            return Ok(());
+        }
+        let (_, _, mut entry) = self.entries.shift_remove_full(&old_key).unwrap();
+        entry.set_name(new_name);
+        let replaced = self.entries.shift_insert(index, new_key, entry);
+        debug_assert!(replaced.is_none());
+        Ok(())
     }
 
     /// Get the number of entries
@@ -286,5 +313,58 @@ mod tests {
         let removed = table.remove("test");
         assert!(removed.is_some());
         assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn test_table_rename_preserves_entry_and_order() {
+        let mut table = Table::new();
+        for (handle, name) in [(1, "First"), (2, "Test"), (3, "Last")] {
+            table
+                .add(MockEntry {
+                    handle: Handle::new(handle),
+                    name: name.to_string(),
+                })
+                .unwrap();
+        }
+
+        table.rename("Test", "Renamed").unwrap();
+
+        assert_eq!(
+            table.names().collect::<Vec<_>>(),
+            vec!["First", "Renamed", "Last"]
+        );
+        assert_eq!(table.get("renamed").unwrap().handle(), Handle::new(2));
+    }
+
+    #[test]
+    fn test_table_rename_allows_unicode_case_change() {
+        let mut table = Table::new();
+        table
+            .add(MockEntry {
+                handle: Handle::new(1),
+                name: "é".to_string(),
+            })
+            .unwrap();
+
+        table.rename("é", "É").unwrap();
+
+        assert_eq!(table.get("é").unwrap().name(), "É");
+    }
+
+    #[test]
+    fn test_table_rename_errors_do_not_mutate() {
+        let mut table = Table::new();
+        for (handle, name) in [(1, "First"), (2, "Second")] {
+            table
+                .add(MockEntry {
+                    handle: Handle::new(handle),
+                    name: name.to_string(),
+                })
+                .unwrap();
+        }
+
+        assert!(table.rename("First", "Second").is_err());
+        assert!(table.rename("Missing", "Renamed").is_err());
+        assert_eq!(table.names().collect::<Vec<_>>(), vec!["First", "Second"]);
     }
 }

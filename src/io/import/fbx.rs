@@ -32,19 +32,15 @@ use super::ImportConfig;
 /// An FBX property value.
 #[derive(Debug, Clone)]
 enum FbxProp {
-    Bool(bool),
+    Ignored,
     I16(i16),
     I32(i32),
     I64(i64),
     F32(f32),
     F64(f64),
     Str(String),
-    Bytes(Vec<u8>),
     ArrayI32(Vec<i32>),
-    ArrayI64(Vec<i64>),
-    ArrayF32(Vec<f32>),
     ArrayF64(Vec<f64>),
-    ArrayBool(Vec<bool>),
 }
 
 /// An FBX node.
@@ -413,8 +409,8 @@ fn read_fbx_property(data: &[u8], cursor: &mut Cursor<&[u8]>) -> Result<FbxProp>
 
     match type_code {
         b'C' => {
-            let v = cursor.read_u8().unwrap_or(0);
-            Ok(FbxProp::Bool(v != 0))
+            let _ = cursor.read_u8();
+            Ok(FbxProp::Ignored)
         }
         b'Y' => {
             let v = cursor.read_i16::<LittleEndian>().unwrap_or(0);
@@ -447,7 +443,7 @@ fn read_fbx_property(data: &[u8], cursor: &mut Cursor<&[u8]>) -> Result<FbxProp>
             if type_code == b'S' {
                 Ok(FbxProp::Str(String::from_utf8_lossy(bytes).to_string()))
             } else {
-                Ok(FbxProp::Bytes(bytes.to_vec()))
+                Ok(FbxProp::Ignored)
             }
         }
         b'i' => read_array_i32(data, cursor),
@@ -518,13 +514,8 @@ fn read_array_f64(data: &[u8], cursor: &mut Cursor<&[u8]>) -> Result<FbxProp> {
 
 fn read_array_f32(data: &[u8], cursor: &mut Cursor<&[u8]>) -> Result<FbxProp> {
     let (count, encoding, compressed_len) = read_array_header(cursor)?;
-    let raw = decompress_array_data(data, cursor, encoding, compressed_len, 4, count)?;
-    let mut values = Vec::with_capacity(count as usize);
-    let mut c = Cursor::new(&raw[..]);
-    for _ in 0..count {
-        values.push(c.read_f32::<LittleEndian>().unwrap_or(0.0));
-    }
-    Ok(FbxProp::ArrayF32(values))
+    let _ = decompress_array_data(data, cursor, encoding, compressed_len, 4, count)?;
+    Ok(FbxProp::Ignored)
 }
 
 fn read_array_i32(data: &[u8], cursor: &mut Cursor<&[u8]>) -> Result<FbxProp> {
@@ -540,20 +531,14 @@ fn read_array_i32(data: &[u8], cursor: &mut Cursor<&[u8]>) -> Result<FbxProp> {
 
 fn read_array_i64(data: &[u8], cursor: &mut Cursor<&[u8]>) -> Result<FbxProp> {
     let (count, encoding, compressed_len) = read_array_header(cursor)?;
-    let raw = decompress_array_data(data, cursor, encoding, compressed_len, 8, count)?;
-    let mut values = Vec::with_capacity(count as usize);
-    let mut c = Cursor::new(&raw[..]);
-    for _ in 0..count {
-        values.push(c.read_i64::<LittleEndian>().unwrap_or(0));
-    }
-    Ok(FbxProp::ArrayI64(values))
+    let _ = decompress_array_data(data, cursor, encoding, compressed_len, 8, count)?;
+    Ok(FbxProp::Ignored)
 }
 
 fn read_array_bool(data: &[u8], cursor: &mut Cursor<&[u8]>) -> Result<FbxProp> {
     let (count, encoding, compressed_len) = read_array_header(cursor)?;
-    let raw = decompress_array_data(data, cursor, encoding, compressed_len, 1, count)?;
-    let values: Vec<bool> = raw.iter().map(|&b| b != 0).collect();
-    Ok(FbxProp::ArrayBool(values))
+    let _ = decompress_array_data(data, cursor, encoding, compressed_len, 1, count)?;
+    Ok(FbxProp::Ignored)
 }
 
 // ─── ASCII FBX parser ────────────────────────────────────────────────────

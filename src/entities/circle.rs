@@ -1,7 +1,9 @@
 //! Circle entity
 
 use super::{Entity, EntityCommon};
-use crate::types::{BoundingBox3D, Color, Handle, LineWeight, Transform, Transparency, Vector3};
+use crate::types::{
+    BoundingBox3D, Color, Handle, LineWeight, Matrix3, Transform, Transparency, Vector3,
+};
 
 /// A circle entity
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +60,29 @@ impl Circle {
     /// Get the area of the circle
     pub fn area(&self) -> f64 {
         std::f64::consts::PI * self.radius * self.radius
+    }
+
+    /// Centre converted from the entity coordinate system to world space.
+    pub fn center_wcs(&self) -> Vector3 {
+        Matrix3::arbitrary_axis(self.normal) * self.center
+    }
+
+    /// Unit circle axes in world space.
+    pub fn axes_wcs(&self) -> (Vector3, Vector3) {
+        let basis = Matrix3::arbitrary_axis(self.normal);
+        (
+            basis * Vector3::new(1.0, 0.0, 0.0),
+            basis * Vector3::new(0.0, 1.0, 0.0),
+        )
+    }
+
+    /// Point at a circle angle converted to world space.
+    pub fn point_at_angle_wcs(&self, angle: f64) -> Vector3 {
+        let center = self.center_wcs();
+        let (axis_x, axis_y) = self.axes_wcs();
+        center
+            + axis_x * (self.radius * angle.cos())
+            + axis_y * (self.radius * angle.sin())
     }
 }
 
@@ -117,19 +142,27 @@ impl Entity for Circle {
     }
 
     fn bounding_box(&self) -> BoundingBox3D {
+        let center = self.center_wcs();
+        let (axis_x, axis_y) = self.axes_wcs();
+        let extent = Vector3::new(
+            self.radius * axis_x.x.hypot(axis_y.x),
+            self.radius * axis_x.y.hypot(axis_y.y),
+            self.radius * axis_x.z.hypot(axis_y.z),
+        );
+        let extrusion = self.normal.normalize() * self.thickness;
+        let opposite = center + extrusion;
         BoundingBox3D::new(
             Vector3::new(
-                self.center.x - self.radius,
-                self.center.y - self.radius,
-                self.center.z,
+                (center.x - extent.x).min(opposite.x - extent.x),
+                (center.y - extent.y).min(opposite.y - extent.y),
+                (center.z - extent.z).min(opposite.z - extent.z),
             ),
             Vector3::new(
-                self.center.x + self.radius,
-                self.center.y + self.radius,
-                self.center.z,
+                (center.x + extent.x).max(opposite.x + extent.x),
+                (center.y + extent.y).max(opposite.y + extent.y),
+                (center.z + extent.z).max(opposite.z + extent.z),
             ),
         )
-        .ocs_to_wcs(self.normal)
     }
 
     fn translate(&mut self, offset: Vector3) {

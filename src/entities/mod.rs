@@ -65,6 +65,7 @@ pub mod translate;
 pub mod transform;
 pub mod mirror;
 pub mod embedded_entity;
+pub mod centerline;
 
 pub use point::Point;
 pub use line::Line;
@@ -155,6 +156,11 @@ pub use unknown_entity::UnknownEntity;
 pub use view_border::ViewBorder;
 pub use extended_entity::*;
 pub use embedded_entity::EmbeddedEntity;
+pub use centerline::{
+    CenterLineAssociation, CenterLineSource, CenterLineSourceKind,
+    CenterMarkAssociation, CenterMarkSource, CenterMarkSourceKind,
+    CENTERLINE_XDATA_APPLICATION, CENTERMARK_XDATA_APPLICATION,
+};
 
 /// Base trait for all CAD entities
 pub trait Entity {
@@ -289,8 +295,9 @@ pub struct EntityCommon {
     /// Linetype scale factor (default 1.0)
     pub linetype_scale: f64,
     /// Transparency
+    #[cfg_attr(feature = "serde", serde(default))]
     pub transparency: Transparency,
-    /// DXF named/color-book color name (group code 430).
+    /// Named/color-book identity from DXF group code 430.
     #[cfg_attr(feature = "serde", serde(default))]
     pub color_name: Option<String>,
     /// Visibility flag
@@ -357,7 +364,7 @@ impl EntityCommon {
             linetype: String::new(),
             linetype_handle: None,
             linetype_scale: 1.0,
-            transparency: Transparency::OPAQUE,
+            transparency: Transparency::BY_LAYER,
             color_name: None,
             invisible: false,
             extended_data: crate::xdata::ExtendedData::new(),

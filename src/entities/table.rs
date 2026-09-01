@@ -1473,6 +1473,75 @@ fn visit_table_cell_handles(
 }
 
 impl Table {
+    fn canonical_merged_ranges(&self) -> Vec<CellRange> {
+        let row_count = self.rows.len();
+        let column_count = self.columns.len();
+        if row_count == 0 || column_count == 0 {
+            return Vec::new();
+        }
+
+        let mut ranges = Vec::new();
+        for range in &self.merged_ranges {
+            if range.top_row >= row_count
+                || range.left_col >= column_count
+                || range.top_row > range.bottom_row
+                || range.left_col > range.right_col
+            {
+                continue;
+            }
+            let range = CellRange {
+                top_row: range.top_row,
+                left_col: range.left_col,
+                bottom_row: range.bottom_row.min(row_count - 1),
+                right_col: range.right_col.min(column_count - 1),
+            };
+            if range.cell_count() > 1 && !ranges.contains(&range) {
+                ranges.push(range);
+            }
+        }
+        for (row_index, row) in self.rows.iter().enumerate() {
+            for (column_index, cell) in row.cells.iter().take(column_count).enumerate() {
+                let height = cell.merge_height.max(1) as usize;
+                let width = cell.merge_width.max(1) as usize;
+                if height == 1 && width == 1 {
+                    continue;
+                }
+                let range = CellRange {
+                    top_row: row_index,
+                    left_col: column_index,
+                    bottom_row: row_index.saturating_add(height - 1).min(row_count - 1),
+                    right_col: column_index
+                        .saturating_add(width - 1)
+                        .min(column_count - 1),
+                };
+                if range.cell_count() > 1 && !ranges.contains(&range) {
+                    ranges.push(range);
+                }
+            }
+        }
+        ranges
+    }
+
+    fn set_merged_ranges(&mut self, ranges: Vec<CellRange>) {
+        for row in &mut self.rows {
+            for cell in &mut row.cells {
+                cell.merge_width = 1;
+                cell.merge_height = 1;
+            }
+        }
+        self.merged_ranges = ranges;
+        for range in &self.merged_ranges {
+            if let Some(cell) = self
+                .rows
+                .get_mut(range.top_row)
+                .and_then(|row| row.cells.get_mut(range.left_col))
+            {
+                cell.merge_width = range.col_count() as i32;
+                cell.merge_height = range.row_count() as i32;
+            }
+        }
+    }
+
     pub(crate) fn visit_object_handles_mut(
         &mut self,
         visit: &mut impl FnMut(&mut Handle),
@@ -1670,24 +1739,90 @@ impl Table {
     pub fn insert_row(&mut self, index: usize) {
         let num_cols = self.columns.len();
         if index <= self.rows.len() {
+            let ranges = self
+                .canonical_merged_ranges()
+                .into_iter()
+                .map(|mut range| {
+                    if index <= range.top_row {
+                        range.top_row += 1;
+                        range.bottom_row += 1;
+                    } else if index <= range.bottom_row {
+                        range.bottom_row += 1;
+                    }
+                    range
+                })
+                .collect();
             self.rows.insert(index, TableRow::new(num_cols));
+            for range in &mut self.break_ranges {
+                if index as i32 <= range.start_row {
+                    range.start_row += 1;
+                    range.end_row += 1;
+                } else if index as i32 <= range.end_row {
+                    range.end_row += 1;
+                }
+            }
+            self.set_merged_ranges(ranges);
         }
     }
 
     /// Inserts a column at the given index.
     pub fn insert_column(&mut self, index: usize, width: f64) {
         if index <= self.columns.len() {
+            let ranges = self
+                .canonical_merged_ranges()
+                .into_iter()
+                .map(|mut range| {
+                    if index <= range.left_col {
+                        range.left_col += 1;
+                        range.right_col += 1;
+                    } else if index <= range.right_col {
+                        range.right_col += 1;
+                    }
+                    range
+                })
+                .collect();
             self.columns.insert(index, TableColumn::with_width(width));
             for row in &mut self.rows {
                 row.cells.insert(index, TableCell::new());
             }
+            self.set_merged_ranges(ranges);
         }
     }
 
     /// Removes a row.
     pub fn remove_row(&mut self, index: usize) -> Option<TableRow> {
         if index < self.rows.len() {
-            Some(self.rows.remove(index))
+            let ranges = self
+                .canonical_merged_ranges()
+                .into_iter()
+                .filter_map(|mut range| {
+                    if index < range.top_row {
+                        range.top_row -= 1;
+                        range.bottom_row -= 1;
+                    } else if index <= range.bottom_row {
+                        if range.top_row == range.bottom_row {
+                            return None;
+                        }
+                        range.bottom_row -= 1;
+                    }
+                    (range.cell_count() > 1).then_some(range)
+                })
+                .collect();
+            let removed = self.rows.remove(index);
+            self.break_ranges.retain_mut(|range| {
+                if (index as i32) < range.start_row {
+                    range.start_row -= 1;
+                    range.end_row -= 1;
+                } else if index as i32 <= range.end_row {
+                    if range.start_row == range.end_row {
+                        return false;
+                    }
+                    range.end_row -= 1;
+                }
+                true
+            });
+            self.set_merged_ranges(ranges);
+            Some(removed)
         } else {
             None
         }
@@ -1696,12 +1831,29 @@ impl Table {
     /// Removes a column.
     pub fn remove_column(&mut self, index: usize) -> Option<TableColumn> {
         if index < self.columns.len() {
+            let ranges = self
+                .canonical_merged_ranges()
+                .into_iter()
+                .filter_map(|mut range| {
+                    if index < range.left_col {
+                        range.left_col -= 1;
+                        range.right_col -= 1;
+                    } else if index <= range.right_col {
+                        if range.left_col == range.right_col {
+                            return None;
+                        }
+                        range.right_col -= 1;
+                    }
+                    (range.cell_count() > 1).then_some(range)
+                })
+                .collect();
             let col = self.columns.remove(index);
             for row in &mut self.rows {
                 if index < row.cells.len() {
                     row.cells.remove(index);
                 }
             }
+            self.set_merged_ranges(ranges);
             Some(col)
         } else {
             None
@@ -1710,18 +1862,33 @@ impl Table {
 
     /// Merges cells in the given range.
     pub fn merge_cells(&mut self, range: CellRange) {
-        if let Some(cell) = self.cell_mut(range.top_row, range.left_col) {
-            cell.merge_width = range.col_count() as i32;
-            cell.merge_height = range.row_count() as i32;
+        if range.top_row > range.bottom_row
+            || range.left_col > range.right_col
+            || range.bottom_row >= self.rows.len()
+            || range.right_col >= self.columns.len()
+            || range.cell_count() <= 1
+        {
+            return;
         }
+        let mut ranges = self.canonical_merged_ranges();
+        ranges.retain(|current| {
+            current.bottom_row < range.top_row
+                || current.top_row > range.bottom_row
+                || current.right_col < range.left_col
+                || current.left_col > range.right_col
+        });
+        ranges.push(range);
+        self.set_merged_ranges(ranges);
     }
 
     /// Unmerges a cell.
     pub fn unmerge_cell(&mut self, row: usize, col: usize) {
-        if let Some(cell) = self.cell_mut(row, col) {
-            cell.merge_width = 1;
-            cell.merge_height = 1;
-        }
+        let ranges = self
+            .canonical_merged_ranges()
+            .into_iter()
+            .filter(|range| !range.contains(row, col))
+            .collect();
+        self.set_merged_ranges(ranges);
     }
 
     /// Sets uniform row height for all rows.
@@ -1804,13 +1971,32 @@ impl Entity for Table {
     }
 
     fn bounding_box(&self) -> BoundingBox3D {
-        let min = self.insertion_point;
-        let max = Vector3::new(
-            min.x + self.total_width(),
-            min.y + self.total_height(),
-            min.z,
-        );
-        BoundingBox3D::new(min, max)
+        let horizontal = if self.horizontal_direction.length() > 1.0e-12 {
+            self.horizontal_direction.normalize()
+        } else {
+            Vector3::UNIT_X
+        };
+        let normal = if self.normal.length() > 1.0e-12 {
+            self.normal.normalize()
+        } else {
+            Vector3::UNIT_Z
+        };
+        let down = {
+            let candidate = horizontal.cross(&normal);
+            if candidate.length() > 1.0e-12 {
+                candidate.normalize()
+            } else {
+                Vector3::new(0.0, -1.0, 0.0)
+            }
+        };
+        let width = self.total_width();
+        let height = self.total_height();
+        let p0 = self.insertion_point;
+        let p1 = p0 + horizontal * width;
+        let p2 = p0 + down * height;
+        let p3 = p1 + down * height;
+        BoundingBox3D::from_points(&[p0, p1, p2, p3])
+            .unwrap_or_else(|| BoundingBox3D::from_point(self.insertion_point))
     }
 
     fn translate(&mut self, offset: Vector3) {

@@ -69,16 +69,21 @@ impl<'a> DwgObjectWriter<'a> {
             EntityType::SectionSymbol(e) => self.write_section_symbol(e),
             EntityType::ViewBorder(e) => self.write_view_border(e),
             EntityType::Extended(e) => {
-                if let ExtendedEntityData::Format(data) = &e.data {
-                    if let Some(raw) = &data.raw_dwg_data {
-                        if self.raw_passthrough_compatible(data.raw_dwg_version) {
-                            self.register_raw_object(
-                                e.common.handle,
-                                raw,
-                                data.raw_dwg_handle_bits,
-                            );
-                            return;
-                        }
+                let raw = match &e.data {
+                    ExtendedEntityData::Format(data) => data.raw_dwg_data.as_ref().map(|raw| {
+                        (raw, data.raw_dwg_handle_bits, data.raw_dwg_version)
+                    }),
+                    ExtendedEntityData::LayoutPrintConfig(data) => {
+                        data.raw_dwg_data.as_ref().map(|raw| {
+                            (raw, data.raw_dwg_handle_bits, data.raw_dwg_version)
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some((raw, handle_bits, version)) = raw {
+                    if self.raw_passthrough_compatible(version) {
+                        self.register_raw_object(e.common.handle, raw, handle_bits);
+                        return;
                     }
                 }
                 self.write_extended_entity(e);
@@ -1130,11 +1135,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // R2004+: owned object count when has_attribs
         let (attrib_handles, seqend_handle) = if e.has_attributes() {
-            // Preserve each attribute's original handle. The owning block's
-            // owned-entity list references these handles, so re-allocating them
-            // leaves dangling references (AutoCAD: eUnknownHandle on the space).
-            // Only allocate a fresh handle when one is missing (e.g. an
-            // attribute created programmatically with a null handle).
+            // Preserve existing attribute handles and allocate only missing ones.
             let ahs: Vec<Handle> = e.attributes.iter()
                 .map(|a| if a.common.handle.is_null() {
                     self.alloc_handle()
@@ -2262,7 +2263,8 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_byte(flags_byte);
 
         // User text TV 1
-        self.writer.write_variable_text(&base.text);
+        self.writer
+            .write_variable_text(base.text_override().unwrap_or(""));
 
         // Text rot BD 53
         self.writer.write_bit_double(base.text_rotation);
@@ -2344,9 +2346,9 @@ impl<'a> DwgObjectWriter<'a> {
     fn write_dimension_radius(&mut self, d: &DimensionRadius) {
         self.write_common_dimension_data(common::OBJ_DIMENSION_RADIUS, &d.base);
         self.writer
-            .write_3bit_double(d.definition_point);
-        self.writer
             .write_3bit_double(d.angle_vertex);
+        self.writer
+            .write_3bit_double(d.definition_point);
         self.writer.write_bit_double(d.leader_length);
         self.register_object(d.base.common.handle);
     }
@@ -2354,9 +2356,9 @@ impl<'a> DwgObjectWriter<'a> {
     fn write_dimension_diameter(&mut self, d: &DimensionDiameter) {
         self.write_common_dimension_data(common::OBJ_DIMENSION_DIAMETER, &d.base);
         self.writer
-            .write_3bit_double(d.definition_point);
-        self.writer
             .write_3bit_double(d.angle_vertex);
+        self.writer
+            .write_3bit_double(d.definition_point);
         self.writer.write_bit_double(d.leader_length);
         self.register_object(d.base.common.handle);
     }
@@ -2390,7 +2392,9 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_dimension_ordinate(&mut self, d: &DimensionOrdinate) {
-        self.write_common_dimension_data(common::OBJ_DIMENSION_ORDINATE, &d.base);
+        let mut base = d.base.clone();
+        base.actual_measurement = d.measurement();
+        self.write_common_dimension_data(common::OBJ_DIMENSION_ORDINATE, &base);
         self.writer
             .write_3bit_double(d.definition_point);
         self.writer
@@ -3537,6 +3541,10 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer
                 .write_bit(value.title_suppressed.unwrap_or(false));
         }
+        if flags & 0x0002 != 0 {
+            self.writer
+                .write_bit(value.header_suppressed.unwrap_or(false));
+        }
         if flags & 0x0004 != 0 {
             self.writer
                 .write_bit_short(value.flow_direction.unwrap_or(0));
@@ -3915,16 +3923,30 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_byte(e.fade);
 
         if self.version.r2010_plus() {
-            self.writer.write_bit(false);
+            self.writer.write_bit(e.clip_mode == crate::entities::WipeoutClipMode::Inside);
         }
 
         // Clip boundary
-        self.writer
-            .write_bit_short(e.clip_type as i16);
-        self.writer
-            .write_bit_long(e.clip_boundary_vertices.len() as i32);
-        for v in &e.clip_boundary_vertices {
-            self.writer.write_2raw_double(*v);
+        self.writer.write_bit_short(e.clip_type as i16);
+        match e.clip_type {
+            crate::entities::WipeoutClipType::Rectangular => {
+                let defaults = [Vector2::new(-0.5, -0.5), Vector2::new(0.5, 0.5)];
+                for index in 0..2 {
+                    self.writer.write_2raw_double(
+                        e.clip_boundary_vertices
+                            .get(index)
+                            .copied()
+                            .unwrap_or(defaults[index]),
+                    );
+                }
+            }
+            crate::entities::WipeoutClipType::Polygonal => {
+                self.writer
+                    .write_bit_long(e.clip_boundary_vertices.len() as i32);
+                for v in &e.clip_boundary_vertices {
+                    self.writer.write_2raw_double(*v);
+                }
+            }
         }
 
         // Definition + reactor handles

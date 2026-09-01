@@ -70,7 +70,7 @@ pub use dynamic_block::{
     BlockRotationParameter, BlockStretchAction, BlockStretchCode, BlockStretchHandle,
     BlockTwoPointParameter, BlockUserParameter, BlockXYParameter, DynamicBlockData,
     DynamicBlockObject, SolidHistory, SolidHistoryBoolean, SolidHistoryBox, SolidHistoryBrep,
-    SolidHistoryChamfer, SolidHistoryCylinder, SolidHistoryFillet, SolidHistoryLoft,
+    SolidHistoryChamfer, SolidHistoryCone, SolidHistoryCylinder, SolidHistoryFillet, SolidHistoryLoft,
     SolidHistoryNodeBase, SolidHistoryOperation, SolidHistoryPyramid, SolidHistoryRevolve,
     SolidHistorySphere, SolidHistorySweep, SolidHistoryTorus,
 };

@@ -264,6 +264,7 @@ impl SatToken {
     pub fn as_integer(&self) -> Option<i64> {
         match self {
             SatToken::Integer(v) => Some(*v),
+            SatToken::Float(v) => exact_integer(*v),
             SatToken::Sab { tag: 0x02, data } if data.len() == 1 => {
                 Some(i8::from_le_bytes([data[0]]) as i64)
             }
@@ -275,6 +276,15 @@ impl SatToken {
             }
             SatToken::Sab { tag: 0x17, data } if data.len() == 8 => {
                 Some(i64::from_le_bytes([
+                    data[0], data[1], data[2], data[3],
+                    data[4], data[5], data[6], data[7],
+                ]))
+            }
+            SatToken::Sab { tag: 0x05, data } if data.len() == 4 => {
+                exact_integer(f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
+            }
+            SatToken::Sab { tag: 0x06, data } if data.len() == 8 => {
+                exact_integer(f64::from_le_bytes([
                     data[0], data[1], data[2], data[3],
                     data[4], data[5], data[6], data[7],
                 ]))
@@ -335,6 +345,14 @@ impl SatToken {
             _ => None,
         }
     }
+}
+
+fn exact_integer(value: f64) -> Option<i64> {
+    (value.is_finite()
+        && value.fract() == 0.0
+        && value >= i64::MIN as f64
+        && value <= i64::MAX as f64)
+        .then_some(value as i64)
 }
 
 fn sab_string_bytes(tag: u8, data: &[u8]) -> Option<&[u8]> {
@@ -1504,43 +1522,57 @@ impl<'a> SatPCurve<'a> {
         (offsets.len() == 2).then_some((offsets[1], offsets[0]))
     }
 
+    fn referenced_bspline(
+        &self,
+        document: &SatDocument,
+    ) -> Option<((usize, Vec<f64>, Vec<[f64; 4]>), bool)> {
+        let selector = self
+            .record
+            .tokens
+            .iter()
+            .find_map(SatToken::as_integer)
+            .unwrap_or(1);
+        let target = self
+            .record
+            .nth_pointer(1)
+            .and_then(|pointer| document.resolve(pointer))?;
+        let mut tokens = target.tokens.as_slice();
+        if !tokens
+            .iter()
+            .any(|token| token.as_ident() == Some("par_int_cur"))
+        {
+            if let Some(reference) = subtype_reference(tokens) {
+                tokens = document.subtype_tokens(reference)?;
+            }
+        }
+        let parametric = tokens
+            .iter()
+            .any(|token| token.as_ident() == Some("par_int_cur"));
+        let blocks: Vec<usize> = tokens
+            .iter()
+            .enumerate()
+            .filter_map(|(index, token)| {
+                matches!(token.as_ident(), Some("nubs" | "nurbs")).then_some(index)
+            })
+            .collect();
+        let support = selector.unsigned_abs().max(1) as usize;
+        let block = support.checked_sub(usize::from(parametric))?;
+        let spline = Self::bspline_at(tokens, *blocks.get(block)?)?;
+        let reversed = (selector < 0) ^ (target.token_sense(1) == Sense::Reversed);
+        Some((spline, reversed))
+    }
+
     /// Decode this UV curve into homogeneous `[uw, vw, w]` controls.
     pub fn bspline_in(&self, document: &SatDocument) -> Option<(usize, Vec<f64>, Vec<[f64; 3]>)> {
-        let mut reversed = false;
         let direct = self
             .record
             .tokens
             .iter()
             .position(|token| matches!(token.as_ident(), Some("nubs" | "nurbs")))
             .and_then(|start| Self::bspline_at(&self.record.tokens, start));
-        let spline = match direct {
-            Some(spline) => spline,
-            None => {
-                let selector = self
-                    .record
-                    .tokens
-                    .iter()
-                    .find_map(SatToken::as_integer)
-                    .unwrap_or(1);
-                reversed = selector < 0;
-                let target = self
-                    .record
-                    .nth_pointer(1)
-                    .and_then(|pointer| document.resolve(pointer))?;
-                let mut tokens = target.tokens.as_slice();
-                if let Some(reference) = subtype_reference(tokens) {
-                    tokens = document.subtype_tokens(reference)?;
-                }
-                let blocks: Vec<usize> = tokens
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, token)| {
-                        matches!(token.as_ident(), Some("nubs" | "nurbs")).then_some(index)
-                    })
-                    .collect();
-                let support = selector.unsigned_abs().max(1) as usize;
-                Self::bspline_at(tokens, *blocks.get(support)?)?
-            }
+        let (spline, reversed) = match direct {
+            Some(spline) => (spline, false),
+            None => self.referenced_bspline(document)?,
         };
         let (degree, mut knots, controls) = spline;
         let (u_offset, v_offset) = self.offsets().unwrap_or((0.0, 0.0));
@@ -1556,7 +1588,7 @@ impl<'a> SatPCurve<'a> {
             .collect();
         if reversed {
             controls.reverse();
-            let sum = knots.first()? + knots.last()?;
+            let sum = knots.get(degree)? + knots.get(controls.len())?;
             knots = knots.into_iter().rev().map(|knot| sum - knot).collect();
         }
         Some((degree, knots, controls))
@@ -1592,45 +1624,11 @@ impl<'a> SatPCurve<'a> {
             return direct;
         }
 
-        let selector = self
-            .record
-            .tokens
-            .iter()
-            .find_map(SatToken::as_integer)
-            .unwrap_or(1);
-        let target = self
-            .record
-            .nth_pointer(1)
-            .and_then(|pointer| document.resolve(pointer));
-        let Some(target) = target else {
-            return Vec::new();
-        };
-        let mut target_tokens = target.tokens.as_slice();
-        if let Some(reference) = subtype_reference(target_tokens) {
-            let Some(tokens) = document.subtype_tokens(reference) else {
-                return Vec::new();
-            };
-            target_tokens = tokens;
-        }
-
-        // The first spline block is the 3-D intersection curve. Following
-        // blocks are its UV curves on the supporting surfaces.
-        let blocks: Vec<usize> = target_tokens
-            .iter()
-            .enumerate()
-            .filter_map(|(index, token)| {
-                matches!(token.as_ident(), Some("nubs" | "nurbs")).then_some(index)
-            })
-            .collect();
-        let support_index = selector.unsigned_abs().max(1) as usize;
-        let Some(&start) = blocks.get(support_index) else {
-            return Vec::new();
-        };
-        let Some(spline) = Self::bspline_at(target_tokens, start) else {
+        let Some((spline, reversed)) = self.referenced_bspline(document) else {
             return Vec::new();
         };
         let mut points = Self::sample_bspline(spline, segments);
-        if selector < 0 {
+        if reversed {
             points.reverse();
         }
         self.apply_offsets(&mut points);
