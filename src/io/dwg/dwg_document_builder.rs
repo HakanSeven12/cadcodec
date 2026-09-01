@@ -2713,6 +2713,8 @@ impl DwgDocumentBuilder {
             }
         }
 
+        document.resolve_book_colors();
+
         // The current model-space annotation scale (CANNOSCALE) is not carried
         // in the DWG header stream, only in the AcDbVariableDictionary. Reflect
         // it into the header so consumers (and DXF export) see the real scale

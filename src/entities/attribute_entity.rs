@@ -124,6 +124,7 @@ impl AttributeEntity {
                 layer: attdef.common.layer.clone(),
                 color: attdef.common.color,
                 color_name: attdef.common.color_name.clone(),
+                color_book_handle: attdef.common.color_book_handle,
                 ..Default::default()
             },
             tag: attdef.tag.clone(),

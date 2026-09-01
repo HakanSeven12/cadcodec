@@ -297,7 +297,7 @@ pub struct EntityCommon {
     /// Transparency
     #[cfg_attr(feature = "serde", serde(default))]
     pub transparency: Transparency,
-    /// DXF named/color-book color name (group code 430).
+    /// Named/color-book identity from DXF group code 430.
     #[cfg_attr(feature = "serde", serde(default))]
     pub color_name: Option<String>,
     /// Visibility flag

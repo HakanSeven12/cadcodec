@@ -92,6 +92,10 @@ pub struct LayerStateLayer {
     pub plottable: bool,
     pub new_viewport_frozen: bool,
     pub color: Color,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub color_name: Option<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub book_name: Option<String>,
     pub line_type: String,
     pub line_weight: LineWeight,
     pub plot_style: String,
@@ -205,6 +209,8 @@ impl CadDocument {
                 plottable: layer.is_plottable,
                 new_viewport_frozen: layer.flags.frozen_in_new_viewport,
                 color: layer.color,
+                color_name: layer.color_name.clone(),
+                book_name: layer.book_name.clone(),
                 line_type: layer.line_type.clone(),
                 line_weight: layer.line_weight,
                 plot_style: if layer.plot_style.is_empty() {
@@ -307,6 +313,8 @@ impl CadDocument {
             }
             if state.mask.contains(LayerStateMask::COLOR) {
                 layer.color = saved.color;
+                layer.color_name.clone_from(&saved.color_name);
+                layer.book_name.clone_from(&saved.book_name);
             }
             if state.mask.contains(LayerStateMask::LINE_TYPE) && !saved.line_type.is_empty() {
                 layer.line_type.clone_from(&saved.line_type);
@@ -535,9 +543,13 @@ impl CadDocument {
             .value
             .as_handle()?;
         let flags = entry_i32(entries, 90).unwrap_or(0);
-        let color = entry_i32(entries, 420)
+        let color = entry_i32(entries, 92)
+            .or_else(|| entry_i32(entries, 420))
             .map(Color::from_true_color_value)
             .unwrap_or_else(|| Color::from_index(entry_i32(entries, 62).unwrap_or(7) as i16));
+        let (book_name, color_name) = entry_string(entries, 300)
+            .map(crate::io::dxf::split_color_book_name)
+            .unwrap_or((None, None));
         let line_type_handle = entry_handle(entries, 331).unwrap_or(Handle::NULL);
         let layer_name = self
             .layers
@@ -561,6 +573,8 @@ impl CadDocument {
             plottable: flags & 0x08 != 0,
             new_viewport_frozen: flags & 0x10 != 0,
             color,
+            color_name,
+            book_name,
             line_type,
             line_weight: LineWeight::from_value(entry_i32(entries, 370).unwrap_or(-3) as i16),
             plot_style: entry_string(entries, 1).unwrap_or_default().to_string(),
@@ -622,13 +636,22 @@ impl CadDocument {
             entries.push(XRecordEntry::int32(90, flags));
             entries.push(XRecordEntry::int16(62, layer.color.approximate_index()));
             if let Some(true_color) = layer.color.to_true_color_value() {
-                entries.push(XRecordEntry::int32(420, true_color));
+                entries.push(XRecordEntry::int32(
+                    92,
+                    (0xC200_0000u32 | true_color as u32) as i32,
+                ));
             }
             entries.push(XRecordEntry::int16(370, layer.line_weight.value()));
             entries.push(XRecordEntry::handle(331, line_type_handle));
             entries.push(XRecordEntry::string(1, &layer.plot_style));
             if let Some(transparency) = layer.transparency {
                 entries.push(XRecordEntry::int32(440, transparency.to_dxf_value()));
+            }
+            if let Some(name) = crate::io::dxf::join_color_book_name(
+                layer.book_name.as_deref(),
+                layer.color_name.as_deref(),
+            ) {
+                entries.push(XRecordEntry::string(300, &name));
             }
         }
         entries

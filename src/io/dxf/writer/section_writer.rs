@@ -721,6 +721,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if let Some(tc) = layer.color.to_true_color_value() {
             self.writer.write_i32(420, tc)?;
         }
+        if self.dxf_version >= DxfVersion::AC1018 {
+            if let Some(name) = crate::io::dxf::join_color_book_name(
+                layer.book_name.as_deref(),
+                layer.color_name.as_deref(),
+            ) {
+                self.writer.write_string(430, &name)?;
+            }
+        }
 
         // Linetype name
         self.writer.write_string(6, &layer.line_type)?;
@@ -8200,11 +8208,15 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_handle(5, obj.handle)?;
         self.writer.write_handle(330, obj.owner)?;
         self.writer.write_subclass("AcDbColor")?;
-        if !obj.color_name.is_empty() {
-            self.writer.write_string(1, &obj.color_name)?;
+        self.writer.write_i16(62, obj.color.approximate_index())?;
+        if let Some(true_color) = obj.color.to_true_color_value() {
+            self.writer.write_i32(420, true_color)?;
         }
-        if !obj.book_name.is_empty() {
-            self.writer.write_string(2, &obj.book_name)?;
+        if let Some(name) = crate::io::dxf::join_color_book_name(
+            Some(&obj.book_name),
+            Some(&obj.color_name),
+        ) {
+            self.writer.write_string(430, &name)?;
         }
         Ok(())
     }

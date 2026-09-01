@@ -7481,6 +7481,8 @@ impl<'a> SectionReader<'a> {
     /// Read a DBCOLOR object
     fn read_bookcolor(&mut self) -> Result<Option<BookColor>> {
         let mut obj = BookColor::new();
+        let mut indexed_color = None;
+        let mut true_color = None;
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 { self.reader.push_back(pair); break; }
             match pair.code {
@@ -7488,8 +7490,19 @@ impl<'a> SectionReader<'a> {
                 330 => { if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) { obj.owner = Handle::new(h); } }
                 1 => obj.color_name = pair.value_string.clone(),
                 2 => obj.book_name = pair.value_string.clone(),
+                62 => indexed_color = pair.as_i16().map(Color::from_index),
+                420 => true_color = pair.as_i32().map(Color::from_true_color_value),
+                430 => {
+                    let (book_name, color_name) =
+                        crate::io::dxf::split_color_book_name(&pair.value_string);
+                    obj.book_name = book_name.unwrap_or_default();
+                    obj.color_name = color_name.unwrap_or_default();
+                }
                 _ => {}
             }
+        }
+        if let Some(color) = true_color.or(indexed_color) {
+            obj.color = color;
         }
         Ok(Some(obj))
     }
@@ -7830,6 +7843,12 @@ impl<'a> SectionReader<'a> {
                     if let Some(v) = pair.as_i32() {
                         layer.color = Color::from_true_color_value(v);
                     }
+                }
+                430 => {
+                    let (book_name, color_name) =
+                        crate::io::dxf::split_color_book_name(&pair.value_string);
+                    layer.book_name = book_name;
+                    layer.color_name = color_name;
                 }
                 6 => layer.line_type = pair.value_string.clone(),
                 70 => {

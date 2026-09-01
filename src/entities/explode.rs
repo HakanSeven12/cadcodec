@@ -29,6 +29,7 @@ fn inherit_common(source: &EntityCommon) -> EntityCommon {
         linetype_scale: source.linetype_scale,
         transparency: source.transparency,
         color_name: source.color_name.clone(),
+        color_book_handle: source.color_book_handle,
         invisible: source.invisible,
         owner_handle: source.owner_handle,
         ..EntityCommon::new()

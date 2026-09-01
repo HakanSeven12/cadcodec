@@ -4099,7 +4099,11 @@ impl CadDocument {
             // definition object stays linked (RasterImage/Underlay renderers
             // look the definition up by this handle to find the file path).
             for entity in self.entities.iter_mut() {
-                match Arc::make_mut(entity) {
+                let entity = Arc::make_mut(entity);
+                if let Some(handle) = entity.common_mut().color_book_handle.as_mut() {
+                    remap_object_handle(handle);
+                }
+                match entity {
                     EntityType::Insert(insert) => {
                         if let Some(handle) = &mut insert.view_rep_handle {
                             remap_object_handle(handle);
@@ -4292,8 +4296,54 @@ impl CadDocument {
                 }
             }
         }
+        self.resolve_book_colors();
         self.resolve_xrecord_names();
         self.resolve_xrecord_backed_properties();
+    }
+
+    pub(crate) fn resolve_book_colors(&mut self) {
+        let colors: Vec<(Handle, Color, String, String)> = self
+            .objects
+            .iter()
+            .filter_map(|(handle, object)| match object {
+                ObjectType::BookColor(color) => Some((
+                    *handle,
+                    color.color,
+                    color.book_name.clone(),
+                    color.color_name.clone(),
+                )),
+                _ => None,
+            })
+            .collect();
+        if colors.is_empty() {
+            return;
+        }
+
+        for entity in self.entities_mut() {
+            let common = entity.common_mut();
+            let resolved = common
+                .color_book_handle
+                .and_then(|handle| colors.iter().find(|entry| entry.0 == handle))
+                .or_else(|| {
+                    let identity = common.color_name.as_deref()?;
+                    let (book_name, color_name) =
+                        crate::io::dxf::split_color_book_name(identity);
+                    let book_name = book_name.as_deref()?;
+                    let color_name = color_name.as_deref()?;
+                    colors.iter().find(|entry| {
+                        entry.2.eq_ignore_ascii_case(book_name)
+                            && entry.3.eq_ignore_ascii_case(color_name)
+                    })
+                });
+            if let Some((handle, color, book_name, color_name)) = resolved {
+                common.color_book_handle = Some(*handle);
+                common.color = *color;
+                common.color_name = crate::io::dxf::join_color_book_name(
+                    Some(book_name),
+                    Some(color_name),
+                );
+            }
+        }
     }
 }
 
