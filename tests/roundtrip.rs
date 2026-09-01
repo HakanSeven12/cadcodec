@@ -2471,6 +2471,9 @@ fn build_annotative_document() -> CadDocument {
 
 fn mleader_is_annotative(doc: &CadDocument) -> bool {
     use acadrust::objects::ObjectType;
+    // Order-independent: the objects map is a HashMap, so a find_map here
+    // raced between the default "Standard" style (not annotative) and the
+    // test's annotative one (issue #51 class of bugs).
     doc.objects
         .values()
         .any(|o| matches!(o, ObjectType::MultiLeaderStyle(s) if s.is_annotative))

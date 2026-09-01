@@ -3346,6 +3346,104 @@ impl CadDocument {
 
         self.next_handle = max_handle;
 
+        // --- 1a. Assign handles to records the file left without one ---
+        // Handle-less sources (R12 and earlier carry no handle records at
+        // all) leave table entries and objects with NULL handles; writing
+        // them would emit invalid `5 / 0` handle records that CAD
+        // applications reject (issue #51 comment by Apicqq). Entities
+        // already receive handles in `add_entity`, so only table entries
+        // and objects need this pass. Running after the max-handle scan
+        // above keeps the fresh handles clear of file-sourced ones.
+        let mut missing_handles: Vec<(&'static str, String)> = Vec::new();
+        macro_rules! collect_missing {
+            ($tag:literal, $table:expr) => {
+                for entry in $table.iter() {
+                    if entry.handle().is_null() {
+                        missing_handles.push(($tag, entry.name().to_string()));
+                    }
+                }
+            };
+        }
+        collect_missing!("layers", self.layers);
+        collect_missing!("line_types", self.line_types);
+        collect_missing!("text_styles", self.text_styles);
+        collect_missing!("dim_styles", self.dim_styles);
+        collect_missing!("app_ids", self.app_ids);
+        collect_missing!("views", self.views);
+        collect_missing!("vports", self.vports);
+        collect_missing!("ucss", self.ucss);
+        collect_missing!("vx_table", self.vx_table);
+        collect_missing!("block_records", self.block_records);
+        let null_object_keys: Vec<Handle> = self
+            .objects
+            .keys()
+            .filter(|handle| handle.is_null())
+            .copied()
+            .collect();
+        // Objects whose record handle is NULL but whose map key is valid:
+        // align the record with its key (the key is the object's identity).
+        let misaligned_object_keys: Vec<Handle> = self
+            .objects
+            .iter()
+            .filter(|(key, object)| !key.is_null() && object.has_null_handle())
+            .map(|(key, _)| *key)
+            .collect();
+
+        for (tag, name) in missing_handles.drain(..) {
+            let new = self.allocate_handle();
+            macro_rules! apply_missing {
+                ($t:literal, $table:expr) => {
+                    if tag == $t {
+                        if let Some(entry) = $table.get_mut(&name) {
+                            entry.set_handle(new);
+                        }
+                    }
+                };
+            }
+            apply_missing!("layers", self.layers);
+            apply_missing!("line_types", self.line_types);
+            apply_missing!("text_styles", self.text_styles);
+            apply_missing!("dim_styles", self.dim_styles);
+            apply_missing!("app_ids", self.app_ids);
+            apply_missing!("views", self.views);
+            apply_missing!("vports", self.vports);
+            apply_missing!("ucss", self.ucss);
+            apply_missing!("vx_table", self.vx_table);
+            apply_missing!("block_records", self.block_records);
+        }
+        for _ in null_object_keys.iter() {
+            let new = self.allocate_handle();
+            if let Some(mut object) = self.objects.remove(&Handle::NULL) {
+                object.set_handle(new);
+                self.objects.insert(new, object);
+            }
+        }
+        for key in misaligned_object_keys {
+            if let Some(object) = self.objects.get_mut(&key) {
+                object.set_handle(key);
+            }
+        }
+
+        // --- 1a-bis. The ACAD RegApp record must be the first APPID entry ---
+        // Applications map XDATA applications by table index and require the
+        // ACAD record at index 0 (issue #51 BricsCAD audit: "RegApp ACAD has
+        // invalid index 1").
+        if !self
+            .app_ids
+            .iter()
+            .next()
+            .is_some_and(|entry| entry.name().eq_ignore_ascii_case("ACAD"))
+            && self.app_ids.get("ACAD").is_some()
+        {
+            let acad = self.app_ids.remove("ACAD").unwrap();
+            let previous = std::mem::take(&mut self.app_ids);
+            self.app_ids.set_handle(previous.handle());
+            self.app_ids.add_or_replace(acad);
+            for entry in previous.iter() {
+                self.app_ids.add_or_replace(entry.clone());
+            }
+        }
+
         // --- 1b. Resolve table handle collisions ---
         // Collect ALL handles used by entries, entities, and objects so we can
         // detect when a table control handle collides with ANY of them.
@@ -3585,6 +3683,13 @@ impl CadDocument {
                             if let Some(new_h) = remap_map.get(&entry_handle.value()) {
                                 *entry_handle = *new_h;
                             }
+                        }
+                        // The default entry (code 340) must follow its
+                        // object when that object is remapped; leaving it
+                        // behind points the dictionary at a handle that no
+                        // longer exists (issue #51 comment by Apicqq).
+                        if let Some(new_h) = remap_map.get(&d.default_handle.value()) {
+                            d.default_handle = *new_h;
                         }
                     }
                     ObjectType::GeoData(g) => {
@@ -4101,6 +4206,9 @@ impl CadDocument {
             for entity in self.entities.iter_mut() {
                 let entity = Arc::make_mut(entity);
                 if let Some(handle) = entity.common_mut().color_book_handle.as_mut() {
+                    remap_object_handle(handle);
+                }
+                if let Some(handle) = entity.common_mut().xdictionary_handle.as_mut() {
                     remap_object_handle(handle);
                 }
                 match entity {

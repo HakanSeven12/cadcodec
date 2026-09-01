@@ -20,6 +20,18 @@ use crate::io::dwg::dwg_stream_readers::object_reader::common::*;
 use crate::io::dwg::dwg_stream_readers::object_reader::entities;
 use crate::io::dwg::dwg_stream_readers::object_reader::objects;
 use crate::io::dwg::dwg_stream_readers::object_reader::tables;
+
+/// Recognize AutoCAD's hidden per-viewport layer-override records.
+///
+/// These records use `<base layer> @ <decimal viewport handle>` names but
+/// resolve as the base layer in AutoCAD's public layer table.
+fn viewport_override_base_layer(name: &str) -> Option<&str> {
+    let (base, viewport) = name.rsplit_once(" @ ")?;
+    (!base.is_empty()
+        && !viewport.is_empty()
+        && viewport.bytes().all(|byte| byte.is_ascii_digit()))
+    .then_some(base)
+}
 use crate::io::dwg::dwg_stream_readers::object_reader::{DwgObjectReader, EntityCommonData};
 use crate::io::dwg::parallel::{
     filter_map_slice, for_each_mut, map_chunks, map_mut, worker_count,
@@ -637,11 +649,14 @@ impl DwgDocumentBuilder {
                 let table_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     match type_code {
                         OBJ_LAYER => {
-                            let data = tables::read_layer(
+                            let mut data = tables::read_layer(
                                 &mut reader,
                                 self.obj_reader.version(),
                                 self.obj_reader.dxf_version(),
                             );
+                            if let Some(base) = viewport_override_base_layer(&data.name) {
+                                data.name = base.to_owned();
+                            }
                             Some(ParsedEntry::Layer(obj_handle, data))
                         }
                         OBJ_BLOCK_HEADER => {
@@ -7168,4 +7183,25 @@ fn map_entity_common(
     // right modeler entity in object-stream order.
     common.has_ds_data = data.has_ds_data;
     common
+}
+
+#[cfg(test)]
+mod sdb_regression_tests {
+    use super::viewport_override_base_layer;
+
+    #[test]
+    fn recognizes_only_viewport_override_shadow_layer_names() {
+        assert_eq!(
+            viewport_override_base_layer("A-ANNO-TXT @ 8"),
+            Some("A-ANNO-TXT")
+        );
+        assert_eq!(
+            viewport_override_base_layer("A-ANNO-NOTE @ 48"),
+            Some("A-ANNO-NOTE")
+        );
+        assert_eq!(viewport_override_base_layer("user@domain"), None);
+        assert_eq!(viewport_override_base_layer("Layer @ viewport"), None);
+        assert_eq!(viewport_override_base_layer(" @ 8"), None);
+        assert_eq!(viewport_override_base_layer("Layer @ "), None);
+    }
 }

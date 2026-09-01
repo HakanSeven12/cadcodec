@@ -69,9 +69,11 @@ impl DwgBitWriter {
     }
 
     /// Encode text using the document's legacy text code page.
+    ///
+    /// Characters the code page cannot represent become MIF `\U+XXXX`
+    /// escapes instead of `&#NNNNN;` references.
     pub fn encode_legacy_text(&self, text: &str) -> Vec<u8> {
-        let (encoded, _, _) = self.encoding.encode(text);
-        encoded.into_owned()
+        crate::io::dxf::code_page::encode_legacy_string(text, self.encoding)
     }
 
     /// Get the DWG version.
@@ -596,7 +598,7 @@ impl DwgBitWriter {
             }
         } else {
             // Pre-R2007: Write byte count, then encoded bytes
-            let (encoded, _, _) = self.encoding.encode(text);
+            let encoded = crate::io::dxf::code_page::encode_legacy_string(text, self.encoding);
             self.write_bit_short(encoded.len() as i16);
             self.write_bytes(&encoded);
         }

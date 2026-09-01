@@ -80,7 +80,7 @@ impl<'a> DxfWriter<'a> {
     /// Write DXF content to a stream writer
     fn write_dxf<W: DxfStreamWriter>(&self, writer: &mut W) -> Result<()> {
         let handle_start = compute_max_handle(&self.document);
-        let extra_handles = count_extra_handles(&self.document);
+        let extra_handles = count_extra_handles(&self.document, self.document.version);
         let handle_seed = handle_start + extra_handles + 1;
         let mut section_writer = SectionWriter::new(writer, handle_start, handle_seed);
         section_writer.set_version(self.document.version);
@@ -107,7 +107,7 @@ impl<'a> DxfWriter<'a> {
     }
 }
 
-fn count_extra_handles(document: &CadDocument) -> u64 {
+fn count_extra_handles(document: &CadDocument, version: crate::types::DxfVersion) -> u64 {
     use crate::objects::ObjectType;
 
     let mut count = 0u64;
@@ -119,6 +119,13 @@ fn count_extra_handles(document: &CadDocument) -> u64 {
                 count += polyline.vertices.len() as u64 + 1;
             }
             EntityType::Polyline2D(polyline) => {
+                // Plain 2D polylines down-save as LWPOLYLINE for R2000+,
+                // which emits no child records (see SectionWriter).
+                if version >= crate::types::DxfVersion::AC1015
+                    && section_writer::polyline2d_downsaves_to_lwpolyline(polyline)
+                {
+                    continue;
+                }
                 // Vertices + SEQEND all use allocate_handle()
                 count += polyline.vertices.len() as u64 + 1;
             }

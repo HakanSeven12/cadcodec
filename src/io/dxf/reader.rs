@@ -16,7 +16,9 @@ use crate::entities::solid3d::AcisVersion;
 use crate::entities::EntityType;
 use crate::error::{DxfError, Result};
 use crate::io::read::{push_read_diagnostic, ReadDiagnostic, ReadStage, SourceFormat};
+use crate::tables::TableEntry;
 use crate::types::Handle;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
@@ -172,7 +174,14 @@ impl DxfReader {
         let mut document = CadDocument::new();
         document.entities.reserve(self.estimated_entities);
         document.entity_index.reserve(self.estimated_entities);
-        
+
+        // Snapshot the handles initialize_defaults() handed to its well-known
+        // table entries. The file may reuse one of those handles for its own
+        // records while lacking the default entry itself; re-handling that
+        // case after parsing prevents duplicate handles in written output
+        // (issue #51 comment by Apicqq).
+        let default_entry_handles = snapshot_default_entry_handles(&document);
+
         // Read all sections
         let failsafe = self.config.failsafe;
         let mut source_sections = 0usize;
@@ -336,7 +345,10 @@ impl DxfReader {
             }
         }
 
-        // Post-read resolution: assign owner handles and update next_handle
+        // Post-read resolution: re-handle surviving defaults that collide
+        // with file-sourced handles, then assign owner handles and update
+        // next_handle.
+        rehandle_colliding_default_entries(&mut document, &default_entry_handles);
         document.resolve_references();
 
         // Pre-R2004 (R2000/R14) down-saved gradient hatches keep their gradient
@@ -546,5 +558,196 @@ impl DxfReader {
             }
         }
         Ok(())
+    }
+}
+
+/// Snapshot the handles `initialize_defaults()` handed to its well-known
+/// table entries: (table, entry name) → handle.
+fn snapshot_default_entry_handles(
+    document: &CadDocument,
+) -> HashMap<(&'static str, String), u64> {
+    let mut map: HashMap<(&'static str, String), u64> = HashMap::new();
+    macro_rules! snapshot {
+        ($tag:literal, $table:expr) => {
+            for entry in $table.iter() {
+                let handle = entry.handle().value();
+                if handle != 0 {
+                    map.insert(($tag, entry.name().to_string()), handle);
+                }
+            }
+        };
+    }
+    snapshot!("layers", document.layers);
+    snapshot!("line_types", document.line_types);
+    snapshot!("text_styles", document.text_styles);
+    snapshot!("dim_styles", document.dim_styles);
+    snapshot!("app_ids", document.app_ids);
+    snapshot!("views", document.views);
+    snapshot!("vports", document.vports);
+    snapshot!("ucss", document.ucss);
+    snapshot!("vx_table", document.vx_table);
+    snapshot!("block_records", document.block_records);
+    map
+}
+
+/// Re-handle surviving `initialize_defaults()` entries whose handles the
+/// file reused for its own records.
+///
+/// `CadDocument::new()` creates well-known entries (Standard text style and
+/// dimstyle, ByLayer/ByBlock linetypes, ...) before the file is parsed. When
+/// the file lacks such an entry but uses its handle for one of its own
+/// records, the writer would emit two records with the same handle — a hard
+/// integrity error CAD applications reject. Nothing inside the file
+/// references a default the file does not contain, so the surviving default
+/// is moved to a fresh handle and header references still pointing at it
+/// follow (issue #51 comment by Apicqq).
+fn rehandle_colliding_default_entries(
+    document: &mut CadDocument,
+    defaults: &HashMap<(&'static str, String), u64>,
+) {
+    if defaults.is_empty() {
+        return;
+    }
+
+    // Count how often every handle occurs across everything that is
+    // written: table entries, block-record placeholder handles, entities
+    // and objects.
+    let mut usage: HashMap<u64, usize> = HashMap::new();
+    macro_rules! count {
+        ($handle:expr) => {{
+            let handle: u64 = $handle;
+            if handle != 0 {
+                *usage.entry(handle).or_insert(0) += 1;
+            }
+        }};
+    }
+    macro_rules! count_table {
+        ($table:expr) => {
+            for entry in $table.iter() {
+                count!(entry.handle().value());
+            }
+        };
+    }
+    count_table!(document.layers);
+    count_table!(document.line_types);
+    count_table!(document.text_styles);
+    count_table!(document.dim_styles);
+    count_table!(document.app_ids);
+    count_table!(document.views);
+    count_table!(document.vports);
+    count_table!(document.ucss);
+    count_table!(document.vx_table);
+    count_table!(document.block_records);
+    for br in document.block_records.iter() {
+        count!(br.block_entity_handle.value());
+        count!(br.block_end_handle.value());
+    }
+    for entity in document.entities() {
+        count!(entity.common().handle.value());
+    }
+    for handle in document.objects.keys() {
+        count!(handle.value());
+    }
+
+    let collides = |tag: &'static str, name: &str, handle: u64| -> bool {
+        handle != 0
+            && defaults.get(&(tag, name.to_string())) == Some(&handle)
+            && usage.get(&handle).copied().unwrap_or(0) > 1
+    };
+
+    // Collect (tag, name, old handle) candidates first, then apply, in a
+    // deterministic table order.
+    let mut moves: Vec<(&'static str, String, u64)> = Vec::new();
+    macro_rules! collect {
+        ($tag:literal, $table:expr) => {
+            for entry in $table.iter() {
+                if collides($tag, entry.name(), entry.handle().value()) {
+                    moves.push(($tag, entry.name().to_string(), entry.handle().value()));
+                }
+            }
+        };
+    }
+    collect!("layers", document.layers);
+    collect!("line_types", document.line_types);
+    collect!("text_styles", document.text_styles);
+    collect!("dim_styles", document.dim_styles);
+    collect!("app_ids", document.app_ids);
+    collect!("views", document.views);
+    collect!("vports", document.vports);
+    collect!("ucss", document.ucss);
+    collect!("vx_table", document.vx_table);
+    collect!("block_records", document.block_records);
+
+    for (tag, name, old) in moves {
+        let new = document.allocate_handle();
+        macro_rules! apply {
+            ($t:literal, $table:expr) => {
+                if tag == $t {
+                    if let Some(entry) = $table.get_mut(&name) {
+                        entry.set_handle(new);
+                    }
+                }
+            };
+        }
+        apply!("layers", document.layers);
+        apply!("line_types", document.line_types);
+        apply!("text_styles", document.text_styles);
+        apply!("dim_styles", document.dim_styles);
+        apply!("app_ids", document.app_ids);
+        apply!("views", document.views);
+        apply!("vports", document.vports);
+        apply!("ucss", document.ucss);
+        apply!("vx_table", document.vx_table);
+        apply!("block_records", document.block_records);
+
+        // Header references that still point at the moved default follow.
+        let header = &mut document.header;
+        if header.current_layer_handle.value() == old {
+            header.current_layer_handle = new;
+        }
+        if header.continuous_linetype_handle.value() == old {
+            header.continuous_linetype_handle = new;
+        }
+        if header.bylayer_linetype_handle.value() == old {
+            header.bylayer_linetype_handle = new;
+        }
+        if header.current_linetype_handle.value() == old {
+            header.current_linetype_handle = new;
+        }
+        if header.byblock_linetype_handle.value() == old {
+            header.byblock_linetype_handle = new;
+        }
+        if header.current_text_style_handle.value() == old {
+            header.current_text_style_handle = new;
+        }
+        if header.dim_text_style_handle.value() == old {
+            header.dim_text_style_handle = new;
+        }
+        if header.current_dimstyle_handle.value() == old {
+            header.current_dimstyle_handle = new;
+        }
+        if header.model_space_block_handle.value() == old {
+            header.model_space_block_handle = new;
+        }
+        if header.paper_space_block_handle.value() == old {
+            header.paper_space_block_handle = new;
+        }
+        if header.dim_linetype_handle.value() == old {
+            header.dim_linetype_handle = new;
+        }
+        if header.dim_linetype1_handle.value() == old {
+            header.dim_linetype1_handle = new;
+        }
+        if header.dim_linetype2_handle.value() == old {
+            header.dim_linetype2_handle = new;
+        }
+
+        // Default entries cross-referencing the moved one (the Standard
+        // dimstyle points at the Standard text style).
+        for ds in document.dim_styles.iter_mut() {
+            if ds.dimtxsty_handle.value() == old {
+                ds.dimtxsty_handle = new;
+            }
+        }
     }
 }

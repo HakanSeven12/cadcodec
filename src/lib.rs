@@ -27,7 +27,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! acadrust = { version = "0.4.0", features = ["serde"] }
+//! acadrust = { version = "0.5.1", features = ["serde"] }
 //! ```
 //!
 //! ### Serialize an entity to JSON

@@ -187,7 +187,7 @@ fn transcode_xrecord_xdata(
             .0
             .into_owned();
             p += len;
-            s
+            crate::io::dxf::code_page::decode_mif_escapes(&s)
         };
         if tgt_unicode {
             let utf16: Vec<u16> = text
@@ -199,8 +199,8 @@ fn transcode_xrecord_xdata(
                 out.extend_from_slice(&u.to_le_bytes());
             }
         } else {
-            let encoded = target_encoding.encode(&text).0;
-            let bytes = &encoded.as_ref()[..encoded.len().min(u16::MAX as usize)];
+            let encoded = crate::io::dxf::code_page::encode_legacy_string(&text, target_encoding);
+            let bytes = &encoded[..encoded.len().min(u16::MAX as usize)];
             out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
             out.push(target_code_page);
             out.extend_from_slice(&bytes);
@@ -230,8 +230,9 @@ fn encode_xrecord_entries(
                         output.extend_from_slice(&unit.to_le_bytes());
                     }
                 } else {
-                    let encoded = encoding.encode(value).0;
-                    let bytes = encoded.as_ref();
+                    let encoded =
+                        crate::io::dxf::code_page::encode_legacy_string(value, encoding);
+                    let bytes: &[u8] = encoded.as_ref();
                     output.extend_from_slice(
                         &(bytes.len().min(u16::MAX as usize) as u16).to_le_bytes(),
                     );

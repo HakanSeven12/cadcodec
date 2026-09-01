@@ -190,6 +190,23 @@ impl Dictionary {
             .any(|name| name.eq_ignore_ascii_case(key))
     }
 
+    /// Named-object-dictionary keys that must be written as hard-owner
+    /// references (DXF code 360) even when the dictionary-wide hard-owner
+    /// flag is clear. ACAD_FIELD owns the drawing's FIELDLIST; applications
+    /// reject the file when it dangles (issue #63).
+    ///
+    /// Note: ACAD_PLOTSTYLENAME and ACAD_LAYOUT are intentionally NOT in
+    /// this list - BricsCAD's own DXF export writes every NOD entry except
+    /// ACAD_FIELD as a soft pointer (350), and hard-owning the plot style
+    /// dictionary makes BricsCAD's audit reject the layers' PlotStyleName
+    /// references (issue #51).
+    pub fn is_canonical_hard_owner_key(key: &str) -> bool {
+        matches!(
+            key.to_ascii_uppercase().as_str(),
+            "ACAD_FIELD"
+        )
+    }
+
     /// Get a handle by key
     pub fn get(&self, key: &str) -> Option<Handle> {
         self.entries
@@ -538,6 +555,49 @@ impl ObjectType {
                 handle: old_handle,
                 ..
             } => *old_handle = handle,
+        }
+    }
+
+    /// Whether the object's intrinsic handle is NULL. Used by document
+    /// resolution to find records that arrived without a handle.
+    pub(crate) fn has_null_handle(&self) -> bool {
+        match self {
+            ObjectType::Dictionary(value) => value.handle.is_null(),
+            ObjectType::Layout(value) => value.handle.is_null(),
+            ObjectType::XRecord(value) => value.handle.is_null(),
+            ObjectType::Group(value) => value.handle.is_null(),
+            ObjectType::MLineStyle(value) => value.handle.is_null(),
+            ObjectType::ImageDefinition(value) => value.handle.is_null(),
+            ObjectType::UnderlayDefinition(value) => value.handle.is_null(),
+            ObjectType::PlotSettings(value) => value.handle.is_null(),
+            ObjectType::MultiLeaderStyle(value) => value.handle.is_null(),
+            ObjectType::TableStyle(value) => value.handle.is_null(),
+            ObjectType::TableContent(value) => value.common.handle.is_null(),
+            ObjectType::Scale(value) => value.handle.is_null(),
+            ObjectType::ObjectContextData(value) => value.handle.is_null(),
+            ObjectType::SortEntitiesTable(value) => value.handle.is_null(),
+            ObjectType::DictionaryVariable(value) => value.handle.is_null(),
+            ObjectType::VisualStyle(value) => value.handle.is_null(),
+            ObjectType::Material(value) => value.handle.is_null(),
+            ObjectType::ImageDefinitionReactor(value) => value.handle.is_null(),
+            ObjectType::GeoData(value) => value.handle.is_null(),
+            ObjectType::SpatialFilter(value) => value.handle.is_null(),
+            ObjectType::RasterVariables(value) => value.handle.is_null(),
+            ObjectType::BookColor(value) => value.handle.is_null(),
+            ObjectType::PlaceHolder(value) => value.handle.is_null(),
+            ObjectType::DictionaryWithDefault(value) => value.handle.is_null(),
+            ObjectType::WipeoutVariables(value) => value.handle.is_null(),
+            ObjectType::BlockVisibilityParameter(value) => value.handle.is_null(),
+            ObjectType::DynamicBlock(value) => value.handle.is_null(),
+            ObjectType::Associative(value) => value.handle.is_null(),
+            ObjectType::ClassObject(value) => value.handle.is_null(),
+            ObjectType::DataObject(value) => value.handle.is_null(),
+            ObjectType::Field(value) => value.handle.is_null(),
+            ObjectType::FieldList(value) => value.handle.is_null(),
+            ObjectType::RegisteredClass(value) => value.handle.is_null(),
+            ObjectType::DgnLineStyle(value) => value.handle.is_null(),
+            ObjectType::ProxyObject(value) => value.handle.is_null(),
+            ObjectType::Unknown { handle, .. } => handle.is_null(),
         }
     }
 }

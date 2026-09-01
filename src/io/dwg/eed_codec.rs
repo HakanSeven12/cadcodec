@@ -66,7 +66,8 @@ pub(crate) fn encode_values_with_encoding(
                 b.extend_from_slice(&u.to_le_bytes());
             }
         } else {
-            let (encoded, _, _) = encoding.encode(s);
+            let encoded =
+                crate::io::dxf::code_page::encode_legacy_string(s, encoding);
             b.push(encoded.len() as u8);
             b.extend_from_slice(&code_page.to_le_bytes());
             b.extend_from_slice(&encoded);
@@ -91,7 +92,8 @@ pub(crate) fn encode_values_with_encoding(
             }
             XDataValue::LayerName(name) => {
                 b.push(3);
-                b.extend_from_slice(&layer_handle(name).to_le_bytes());
+                // Layer handles use the same big-endian form as code 5.
+                b.extend_from_slice(&layer_handle(name).to_be_bytes());
             }
             XDataValue::BinaryData(data) => {
                 // Each item length is a single byte; split oversized blobs into
@@ -104,7 +106,8 @@ pub(crate) fn encode_values_with_encoding(
             }
             XDataValue::Handle(h) => {
                 b.push(5);
-                b.extend_from_slice(&h.value().to_le_bytes());
+                // DWG EED handles are 8-byte BIG-endian values.
+                b.extend_from_slice(&h.value().to_be_bytes());
             }
             XDataValue::Point3D(p) => push_point(&mut b, 10, p),
             XDataValue::Position3D(p) => push_point(&mut b, 11, p),
@@ -145,7 +148,7 @@ pub(crate) fn decode_values(
         let s: [u8; 8] = b.get(i..i + 8)?.try_into().ok()?;
         Some(f64::from_le_bytes(s))
     };
-    let read_u64 = |b: &[u8], i: usize| -> Option<u64> {
+    let _read_u64 = |b: &[u8], i: usize| -> Option<u64> {
         let s: [u8; 8] = b.get(i..i + 8)?.try_into().ok()?;
         Some(u64::from_le_bytes(s))
     };
@@ -170,10 +173,11 @@ pub(crate) fn decode_values(
                     i += 2;
                     let slice = bytes.get(i..i + n)?;
                     i += n;
-                    crate::io::dxf::code_page::encoding_from_dwg_code_page(code_page)
+                    let decoded = crate::io::dxf::code_page::encoding_from_dwg_code_page(code_page)
                         .decode(slice)
                         .0
-                        .into_owned()
+                        .into_owned();
+                    crate::io::dxf::code_page::decode_mif_escapes(&decoded)
                 };
                 values.push(XDataValue::String(s));
             }
@@ -185,7 +189,10 @@ pub(crate) fn decode_values(
                 ));
             }
             3 => {
-                let h = read_u64(bytes, i)?;
+                // Layer handles use the same 8-byte big-endian form as
+                // code 5 handles.
+                let bytes = bytes.get(i..i + 8)?;
+                let h = u64::from_be_bytes(bytes.try_into().ok()?);
                 i += 8;
                 values.push(XDataValue::LayerName(layer_name(h).unwrap_or_default()));
             }
@@ -197,7 +204,12 @@ pub(crate) fn decode_values(
                 values.push(XDataValue::BinaryData(slice.to_vec()));
             }
             5 => {
-                let h = read_u64(bytes, i)?;
+                // DWG EED handles are 8-byte BIG-endian values. Decoding
+                // them little-endian byte-reversed every handle and made
+                // the DXF writer emit invalid `1005` values (issue #51
+                // BricsCAD audit: XData handle (DA06000000000000)).
+                let bytes = bytes.get(i..i + 8)?;
+                let h = u64::from_be_bytes(bytes.try_into().ok()?);
                 i += 8;
                 values.push(XDataValue::Handle(Handle::new(h)));
             }
@@ -250,6 +262,36 @@ pub(crate) fn decode_values(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eed_handle_is_big_endian() {
+        // The DWG stream stores EED handles as 8-byte big-endian values:
+        // entity 0x6DA's EED in the civil sample reads
+        // `05 | 00 00 00 00 00 00 06 DA`. Decoding it little-endian
+        // byte-reversed every handle and made the DXF writer emit invalid
+        // `1005` values (issue #51 BricsCAD audit).
+        let payload = [0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0xDA];
+        let values = decode_values(&payload, false, |_| None).unwrap();
+        match &values[0] {
+            XDataValue::Handle(h) => assert_eq!(h.value(), 0x6DA),
+            other => panic!("expected handle, got {:?}", other),
+        }
+
+        // Encoding round-trips through the big-endian form.
+        let encoded = encode_values_with_encoding(
+            false,
+            &[XDataValue::Handle(Handle::new(0x6DA))],
+            encoding_rs::WINDOWS_1252,
+            30,
+            |_| 0,
+        );
+        assert_eq!(&encoded[1..9], &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0xDA]);
+        let back = decode_values(&encoded, false, |_| None).unwrap();
+        match &back[0] {
+            XDataValue::Handle(h) => assert_eq!(h.value(), 0x6DA),
+            other => panic!("expected handle, got {:?}", other),
+        }
+    }
 
     fn sample() -> Vec<XDataValue> {
         vec![

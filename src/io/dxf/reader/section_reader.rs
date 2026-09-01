@@ -5606,10 +5606,19 @@ impl<'a> SectionReader<'a> {
                     current_key = Some(pair.value_string.clone());
                 }
                 350 | 360 => {
-                    // Entry value (handle) - 350 is soft owner, 360 is hard owner
+                    // Entry value (handle) - 350 is soft owner, 360 is hard owner.
+                    // When the dictionary-wide hard-owner flag (280) is set,
+                    // every entry is hard-owned regardless of the group code
+                    // the producer used. Canonical hard-owner NOD keys are
+                    // treated the same way so the model matches what the
+                    // writer emits and write→read→write cycles stay stable
+                    // (issue #51).
                     if let Some(key) = current_key.take() {
                         if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
-                            if pair.code == 360 {
+                            if pair.code == 360
+                                || dict.hard_owner
+                                || Dictionary::is_canonical_hard_owner_key(&key)
+                            {
                                 dict.set_entry_hard_owner(&key, true);
                             }
                             dict.add_entry(key, Handle::new(h));
@@ -16823,8 +16832,12 @@ impl<'a> SectionReader<'a> {
                 330 => { if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) { style.owner = Handle::new(h); } }
                 2 => style.name = pair.value_string.clone(),
                 3 => style.description = pair.value_string.clone(),
-                51 => { if let Some(v) = pair.as_double() { style.start_angle = v; } }
-                52 => { if let Some(v) = pair.as_double() { style.end_angle = v; } }
+                // DXF stores MLINESTYLE angles in degrees; the model stores
+                // radians (the DWG stream and the DXF writer both use
+                // radians/degrees respectively). Reading them raw made every
+                // read→write cycle multiply the angle by 180/π (issue #51).
+                51 => { if let Some(v) = pair.as_double() { style.start_angle = v.to_radians(); } }
+                52 => { if let Some(v) = pair.as_double() { style.end_angle = v.to_radians(); } }
                 62 => {
                     if let Some(v) = pair.as_i16() {
                         if let Some(last) = style.elements.last_mut() {
