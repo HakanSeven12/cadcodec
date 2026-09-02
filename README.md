@@ -12,7 +12,7 @@ Supports DXF (ASCII & Binary) and DWG (R13â€“R2018) files.
 
 ```toml
 [dependencies]
-acadrust = "0.5.1"
+acadrust = "0.5.3"
 ```
 
 ```rust
@@ -145,6 +145,25 @@ Full API docs: [docs.rs/acadrust](https://docs.rs/acadrust)
 
 ## Changelog
 
+
+### 0.5.3
+
+- **DIMSTYLE text-style regression, part 2 (issue #64)** - The reader now re-points stale DIMSTYLE text-style handles at the file's same-named text style, so a ByBlock linetype handle can no longer leak into group 340.
+- **MLine::close** - The CLOSED flag is set regardless of vertex count (rebuild geometry guards degenerate cases), restoring the API contract.
+- **Table bounding box** - Unit test updated to the rotated-table-aware semantics: rows flow downward from the top-left insertion point.
+- **DWG handle-less table entries** - Entries added without handles (e.g. Layer::new + layers.add) are assigned fresh handles on DWG save on a cloned document, so they no longer disappear from re-opened drawings and the handle map stays consistent.
+### 0.5.2
+
+- **DIMSTYLE text-style regression (issue #64)** - Fixed a 0.5.1 regression where a DXF round-trip wrote a ByBlock linetype handle as the DIMSTYLE text style (group 340): when the input file replaced the default Standard text style at a colliding handle, the surviving default DIMSTYLE kept pointing at the stale numeric handle. Stale text-style references are now re-pointed at the file's same-named text style on read.
+- **Dimension fidelity** - Angular dimension quadrant measurements, radius/diameter point semantics, ordinate datum references, and dimension geometry/override consistency are preserved through round-trips.
+- **ACIS enhancements** - Exact spline geometry is written, parametric pcurves decode, cone history radius semantics are defined, and solid boundary geometry is corrected.
+- **Table entities** - Structural integrity is preserved and header suppression overrides are honored.
+- **MText / Tolerance** - MText columns are encoded safely and preserved in DXF; geometric tolerance orientation and style identity are preserved.
+- **Curves and surfaces** - Spline transformed geometry with tangents and tolerances, helix transform precision, world-space circle and arc bounds, circle thickness in bounds, and persistent center mark / centerline association metadata.
+- **Hatch / Wipeout / Sketch** - Hatch boundary flags are preserved, wipeout geometry and display data survive with frames visible by default, and freehand sketch settings round-trip.
+- **Layers and color books** - Layer color book identity survives DWG, DXF, and layer-state round-trips; layer rename references are preserved; the current layer state is restored on DWG save and child entity ownership is kept.
+- **Transparency** - The inheritance method is preserved with a serde-friendly enum shape.
+- **DWG saves** - AC1015 records are preserved, saved viewport cameras are restored, and earlier round-trip regressions are repaired.
 
 ### 0.5.1
 
@@ -300,4 +319,5 @@ MPL-2.0 â€” see [LICENSE](LICENSE).
 ## Acknowledgments
 
 - [ACadSharp](https://github.com/DomCR/ACadSharp) â€” the C# library that inspired this project
+
 
