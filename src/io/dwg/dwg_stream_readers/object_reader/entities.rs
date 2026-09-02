@@ -1239,7 +1239,7 @@ fn read_lwpolyline_impl(
     // (1 bit) where a BD (2-bit selector) lives, or BE (1 bit) where a 3BD lives,
     // under-reads and desyncs every field after it (garbage normal, garbage
     // point count) for any polyline that carries a thickness or extrusion flag,
-    // while flag-free polylines still parse. Matches ACadSharp's readLwPolyline.
+    // while flag-free polylines still parse. Matches the reference readLwPolyline.
     let thickness = if has_thickness {
         reader.read_bit_double()
     } else {
@@ -3224,7 +3224,7 @@ pub fn read_underlay(reader: &mut DwgMergedReader) -> UnderlayData {
 //
 // The table entity is INSERT-derived; after the insert base the R2010+ record
 // carries the full table content inline (equivalent to the TABLECONTENT
-// object). This ports ACadSharp's readTableContent + sub-parsers. acadrust's
+// object). This ports the reference readTableContent + sub-parsers. acadrust's
 // model does not hold every cell-style / border / geometry detail, so those
 // sub-structures are read (to stay positioned) but only their meaningful data
 // (column widths, row heights, cell text/value) is retained.
@@ -3295,7 +3295,7 @@ fn read_string_cad_value(reader: &mut DwgMergedReader, version: DwgVersion) -> S
     }
 }
 
-/// A single table cell value (AcDbCellValue). See ACadSharp readCadValue.
+/// A single table cell value (AcDbCellValue). See the reference readCadValue.
 pub(super) fn read_cad_value(reader: &mut DwgMergedReader, version: DwgVersion) -> CellValue {
     read_cad_value_with_schema(reader, version, version.r2007_plus())
 }
@@ -4581,7 +4581,7 @@ pub fn read_multileader(
     let mut text_bottom_attachment: i16 = 9; // CenterOfText — matches MultiLeader::new() default
     let mut text_top_attachment: i16 = 9; // CenterOfText — matches MultiLeader::new() default
     if version.r2010_plus() {
-        // Order: dir (271), bottom (272), top (273) — per AutoCAD/AcadSharp.
+        // Order: dir (271), bottom (272), top (273) — per AutoCAD.
         text_attachment_direction = reader.read_bit_short();
         text_bottom_attachment = reader.read_bit_short();
         text_top_attachment = reader.read_bit_short();
@@ -5146,7 +5146,7 @@ fn read_acis_entity_impl(
     }
 
     if !acis_empty && !has_ds_data {
-        // Unknown bit — per ODA spec / LibreDWG / ACadSharp this B
+        // Unknown bit — per ODA spec / LibreDWG this B
         // is always present between acis_empty and the version BS.
         let _unknown = reader.read_bit();
 

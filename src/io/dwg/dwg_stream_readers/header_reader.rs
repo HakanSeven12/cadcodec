@@ -4,7 +4,7 @@
 //! This is the inverse of `header_writer.rs`, reading ~200 fields with
 //! extensive version-conditional logic.
 //!
-//! Based on ACadSharp's `DwgHeaderReader`.
+//! Based on the reference `DwgHeaderReader`.
 
 use crate::document::HeaderVariables;
 use crate::error::{DxfError, Result};

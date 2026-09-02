@@ -3279,7 +3279,7 @@ impl CadDocument {
 
     /// Resolve handle references after reading a DXF file.
     ///
-    /// This performs a simplified version of ACadSharp's two-phase build:
+    /// This performs a simplified version of the two-phase build:
     ///
     /// Whether any symbol-table entry carries a NULL handle (typical for
     /// programmatically added entries: `Layer::new` + `layers.add` never

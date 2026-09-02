@@ -3,7 +3,7 @@
 //! AC1021 uses a different LZ77 variant than AC1018. The opcode encoding
 //! (instruction format) and copy semantics differ from the AC18 compressor.
 //!
-//! Based on ACadSharp's `DwgLZ77AC21Decompressor`.
+//! Based on the reference `DwgLZ77AC21Decompressor`.
 //!
 //! ## Opcode format
 //!
@@ -280,7 +280,7 @@ fn copy_back_reference(dst: &mut [u8], dst_index: u32, length: u32, src_offset: 
     }
 }
 
-/// Copy N bytes using the ACadSharp-style byte-reordering copy methods.
+/// Copy N bytes using the reference byte-reordering copy methods.
 ///
 /// Each length (1–31) has a specific reordering pattern that matches
 /// the `m_copyMethods` delegate table in `DwgLZ77AC21Decompressor.cs`.

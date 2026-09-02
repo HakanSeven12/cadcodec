@@ -17,7 +17,7 @@
 //! [Product: TU (XML)]
 //! ```
 //!
-//! Based on ACadSharp's `DwgAppInfoWriter`.
+//! Based on the reference `DwgAppInfoWriter`.
 
 use crate::io::dwg::dwg_stream_writers::DwgBitWriter;
 use crate::io::dwg::dwg_version::DwgVersion;

@@ -4415,7 +4415,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Entities follow flag (VERTEX records follow)
         self.writer.write_i16(66, 1)?;
 
-        // Dummy point with elevation (ACadSharp pattern)
+        // Dummy point with elevation (reference pattern)
         self.writer.write_double(10, 0.0)?;
         self.writer.write_double(20, 0.0)?;
         self.writer.write_double(30, polyline.elevation)?;
@@ -10677,7 +10677,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Entities follow flag (VERTEX records follow)
         self.writer.write_i16(66, 1)?;
 
-        // Dummy point with elevation (ACadSharp pattern)
+        // Dummy point with elevation (reference pattern)
         self.writer.write_double(10, 0.0)?;
         self.writer.write_double(20, 0.0)?;
         self.writer.write_double(30, mesh.elevation)?;

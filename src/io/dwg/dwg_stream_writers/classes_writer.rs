@@ -18,7 +18,7 @@
 //! [8 zero bytes — R2004+ only]
 //! ```
 //!
-//! Based on ACadSharp's `DwgClassesWriter`.
+//! Based on the reference `DwgClassesWriter`.
 
 use crate::classes::DxfClass;
 use crate::io::dwg::crc::{crc16, CRC16_SEED};
@@ -56,7 +56,7 @@ pub fn write_classes_with_encoding(
     // R2007+: Use DwgMergedWriter with three-stream merge.
     // Text (class names via WriteVariableText) goes to the text sub-stream,
     // which is merged into the final output with text-size flag words.
-    // This matches C# ACadSharp's DwgClassesWriter which uses
+    // This matches the reference DwgClassesWriter which uses
     // DwgMergedStreamWriter for R2007+.
     // Pre-R2007: Use DwgMergedWriter in two-stream mode (text = main).
     if version >= DxfVersion::AC1021 {

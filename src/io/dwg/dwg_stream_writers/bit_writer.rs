@@ -4,7 +4,7 @@
 //! This writer tracks the current bit position and handles all the
 //! DWG-specific variable-length encodings.
 //!
-//! Based on ACadSharp's `DwgStreamWriterBase` and version-specific subclasses.
+//! Based on the reference `DwgStreamWriterBase` and version-specific subclasses.
 
 use crate::types::{Color, DxfVersion, Vector2, Vector3};
 use crate::types::Transparency;
@@ -428,7 +428,7 @@ impl DwgBitWriter {
     ///
     /// The first parameter `def` is the value to STORE in the stream.
     /// The second parameter `value` is the REFERENCE (default) value
-    /// that the reader already knows. This matches the C# ACadSharp
+    /// that the reader already knows. This matches the reference
     /// parameter convention: `WriteBitDoubleWithDefault(double def, double value)`.
     ///
     /// | Case                            | 2-bit code | Data            |

@@ -3,7 +3,7 @@
 //! Writes the AuxHeader section containing DWG-internal version info,
 //! save counts, timestamps, and HANDSEED.
 //!
-//! Based on ACadSharp's `DwgAuxHeaderWriter`.
+//! Based on the reference `DwgAuxHeaderWriter`.
 
 use crate::document::HeaderVariables;
 use crate::io::dwg::dwg_stream_writers::DwgBitWriter;

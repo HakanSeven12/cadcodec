@@ -23,7 +23,7 @@
 //! [Preview]
 //! ```
 //!
-//! Based on ACadSharp's `DwgFileHeaderWriterAC15`.
+//! Based on the reference `DwgFileHeaderWriterAC15`.
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use indexmap::IndexMap;

@@ -18,7 +18,7 @@
 //!
 //! The section data is then wrapped with sentinels and CRC-16.
 //!
-//! Based on ACadSharp's `DwgHeaderWriter`.
+//! Based on the reference `DwgHeaderWriter`.
 
 use crate::document::HeaderVariables;
 use crate::io::dwg::crc::{crc16, CRC16_SEED};
@@ -36,7 +36,7 @@ use crate::types::{Color, DxfVersion, Handle, Vector2, Vector3};
 /// Internal writer that uses DwgBitWriter for pre-R2007 and DwgMergedWriter
 /// (three-stream merge) for R2007+ (AC1021+). This ensures that for R2007+,
 /// text goes to the text sub-stream and handle references go to the handle
-/// sub-stream, matching the C# ACadSharp `DwgHeaderWriter` behavior.
+/// sub-stream, matching the reference `DwgHeaderWriter` behavior.
 enum SectionWriterInner {
     /// Pre-R2007: single stream, everything inline
     BitWriter(DwgBitWriter),

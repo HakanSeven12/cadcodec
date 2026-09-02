@@ -15,7 +15,7 @@
 //! For pre-R2007, all reads go to the main reader (two-stream mode where
 //! text is inline in the main stream).
 //!
-//! Based on ACadSharp's `DwgMergedReader`.
+//! Based on the reference `DwgMergedReader`.
 
 use crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader;
 use crate::io::dwg::dwg_version::DwgVersion;

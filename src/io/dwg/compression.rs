@@ -20,7 +20,7 @@
 //! - **Long matches** (offset > 0x4000): Opcode 0x10 + length
 //! - **Terminator**: 0x11, 0x00, 0x00
 //!
-//! Based on ACadSharp's `DwgLZ77AC18Compressor`.
+//! Based on the reference `DwgLZ77AC18Compressor`.
 
 /// LZ77 compressor for the AC18 DWG format variant.
 ///

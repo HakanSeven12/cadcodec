@@ -3,7 +3,7 @@
 use super::TableEntry;
 use crate::types::{Color, Handle};
 
-/// A dimension style table entry — maps to ACadSharp's DimensionStyle
+/// A dimension style table entry (analogous to the reference DimensionStyle)
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DimStyle {

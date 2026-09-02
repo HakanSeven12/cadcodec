@@ -8,7 +8,7 @@
 //! 2. Decoding with factor=3, block_size=239
 //! 3. LZ77 AC21 decompressing into a 0x110-byte buffer
 //!
-//! Based on ACadSharp's `Dwg21CompressedMetadata` class.
+//! Based on the reference `Dwg21CompressedMetadata` class.
 
 use std::io::Cursor;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};

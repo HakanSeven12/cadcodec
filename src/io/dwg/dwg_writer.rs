@@ -17,7 +17,7 @@
 //! DwgWriter::write_to_file("output.dwg", &doc).unwrap();
 //! ```
 //!
-//! Based on ACadSharp's `DwgWriter` class.
+//! Based on the reference `DwgWriter` class.
 
 use std::fs::File;
 use std::io::{BufWriter, Cursor, Seek, Write};
@@ -811,7 +811,7 @@ fn write_ac21_impl<W: Write + Seek>(
 /// Build ObjFreeSpace section data.
 ///
 /// Contains approximate object count and a fixed data template.
-/// Matches ACadSharp's `writeObjFreeSpace`.
+/// Matches the reference `writeObjFreeSpace`.
 fn build_obj_free_space(
     version: DxfVersion,
     document: &CadDocument,

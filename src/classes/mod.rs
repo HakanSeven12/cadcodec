@@ -4,7 +4,7 @@
 //! Each class maps a DXF entity/object name to its C++ class name and
 //! application that registered it.
 //!
-//! Corresponds to ACadSharp's `DxfClass` and `DxfClassCollection`.
+//! Corresponds to the classic `DxfClass` and `DxfClassCollection`.
 
 use std::collections::HashMap;
 
@@ -129,7 +129,7 @@ impl DxfClass {
 
 /// Collection of DXF class definitions, keyed by DXF name (case-insensitive).
 ///
-/// Corresponds to ACadSharp's `DxfClassCollection`.
+/// Corresponds to the classic `DxfClassCollection`.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DxfClassCollection {
@@ -147,7 +147,7 @@ impl DxfClassCollection {
     }
 
     /// Add a class. If a class with the same DXF name already exists,
-    /// only its instance count is updated (matching ACadSharp behavior).
+    /// only its instance count is updated (matching the reference behavior).
     pub fn add_or_update(&mut self, mut class: DxfClass) {
         let key = class.dxf_name.to_uppercase();
         if let Some(&idx) = self.name_index.get(&key) {
@@ -213,7 +213,7 @@ impl DxfClassCollection {
 
     /// Populate with default class definitions that AutoCAD expects.
     ///
-    /// This mirrors ACadSharp's `DxfClassCollection.UpdateDxfClasses()`.
+    /// This mirrors the reference `DxfClassCollection.UpdateDxfClasses()`.
     pub fn update_defaults(&mut self) {
         let defaults = default_classes();
         for class in defaults {

@@ -8,7 +8,7 @@
 //! 2. Writes type-specific fields
 //! 3. Calls `register_object()` (CRC, output, handle map)
 //!
-//! Ported from ACadSharp `DwgObjectWriter.Objects.cs`.
+//! Ported from the reference `DwgObjectWriter` objects module.
 
 use crate::io::dwg::dwg_reference_type::DwgReferenceType;
 use crate::objects::*;

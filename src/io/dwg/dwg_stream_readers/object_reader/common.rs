@@ -1,6 +1,6 @@
 //! Object type constants shared between reader and writer.
 //!
-//! These match ACadSharp's fixed type codes (ODA spec table 2.12).
+//! These match the fixed type codes (ODA spec table 2.12).
 //! Fixed types 0–82 use literal codes; non-fixed types use
 //! their DXF class number (500+).
 
@@ -90,7 +90,7 @@ pub const OBJ_LONG_TRANSACTION: i16 = 76;
 
 // ── Standard fixed entity/object types (75+) ────────────────────────
 //
-// These match ACadSharp's ObjectType enum values.  Types 77–82 are
+// These match the reference ObjectType enum values.  Types 77–82 are
 // fixed type codes in the ODA spec; class-based types (MESH, IMAGE,
 // MULTILEADER) always use class numbers ≥500 in the binary.
 
@@ -144,7 +144,7 @@ pub const OBJ_PROXY_ENTITY: i16 = 498;
 pub const OBJ_PROXY_OBJECT: i16 = 499;
 
 // Class-based non-entity objects — also resolved via class mapping for
-// portable type codes.  The values here match ACadSharp's ObjectType.
+// portable type codes.  The values here match the reference ObjectType.
 pub const OBJ_DICTIONARYWDFLT: i16 = 0x78;  // 120
 pub const OBJ_DICTIONARYVAR: i16 = 0x79;    // 121
 pub const OBJ_PLOTSETTINGS: i16 = 0x7A;     // 122

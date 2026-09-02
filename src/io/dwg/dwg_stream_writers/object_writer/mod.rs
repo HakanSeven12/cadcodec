@@ -4,7 +4,7 @@
 //! block headers, entities in each block, and non-graphical objects
 //! (dictionaries, layouts, etc.).
 //!
-//! Ported from ACadSharp `DwgObjectWriter` (partial class across
+//! Ported from the reference `DwgObjectWriter` (partial class across
 //! `DwgObjectWriter.cs`, `…Common.cs`, `…Entities.cs`, `…Objects.cs`).
 //!
 //! ## Record format
@@ -1317,7 +1317,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // ── R13/R14 Only: DimStyle fields ───────────────────────────
         // These fields are ONLY written for R13/R14 (not R2000+).
-        // Field order matches C# ACadSharp writeDimensionStyle() R13_14Only block.
+        // Field order matches the reference writeDimensionStyle() R13_14Only block.
         if self.version.r13_14_only() {
             // DIMTOL B 71
             self.writer.write_bit(ds.dimtol);
@@ -1430,7 +1430,7 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // ── R2000+ DimStyle fields ──────────────────────────────────
-        // Field order, data types, and version guards match C# ACadSharp
+        // Field order, data types, and version guards match the reference implementation
         // DwgObjectWriter.writeDimensionStyle() exactly.
         if self.version.r2000_plus() {
             // DIMPOST TV 3

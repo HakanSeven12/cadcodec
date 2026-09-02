@@ -1,7 +1,7 @@
 //! DXF code page ($DWGCODEPAGE) to encoding mapping.
 //!
 //! Maps DXF code page names to `encoding_rs` encodings, following the same
-//! mapping table used by ACadSharp's `CadUtils._dxfEncodingMap`.
+//! mapping table used by the reference `CadUtils._dxfEncodingMap`.
 
 use encoding_rs::Encoding;
 

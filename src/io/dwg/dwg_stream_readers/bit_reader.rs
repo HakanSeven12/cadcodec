@@ -4,7 +4,7 @@
 //! This reader tracks the current bit position and handles all the
 //! DWG-specific variable-length decodings.
 //!
-//! Based on ACadSharp's `DwgStreamReaderBase` and version-specific subclasses
+//! Based on the reference `DwgStreamReaderBase` and version-specific subclasses
 //! (AC12, AC15, AC18, AC21, AC24).
 
 use crate::types::{Color, DxfVersion, Transparency, Vector2, Vector3};
@@ -416,7 +416,7 @@ impl DwgBitReader {
         b0 | (b1 << 8)
     }
 
-    /// Read a raw long (RL type) — 4 bytes, little-endian, returns as i64 (matching ACadSharp's ReadRawLong → long).
+    /// Read a raw long (RL type) — 4 bytes, little-endian, returns as i64 (matching the reference ReadRawLong → long).
     pub fn read_raw_long(&mut self) -> i64 {
         let b0 = self.read_byte() as u32;
         let b1 = self.read_byte() as u32;
@@ -425,7 +425,7 @@ impl DwgBitReader {
         (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) as i32 as i64
     }
 
-    /// Read a raw unsigned long (RD is actually 4 bytes in ACadSharp's ReadRawULong).
+    /// Read a raw unsigned long (RD is actually 4 bytes in the reference ReadRawULong).
     pub fn read_raw_ulong(&mut self) -> u64 {
         let b0 = self.read_byte() as u64;
         let b1 = self.read_byte() as u64;

@@ -2,7 +2,7 @@
 //!
 //! The DWG format uses three CRC algorithms:
 //!
-//! - **CRC-16** (called "CRC8" in ACadSharp): CRC-16/ARC polynomial, used for
+//! - **CRC-16** (sometimes mislabeled "CRC8"): CRC-16/ARC polynomial, used for
 //!   file headers, handle section chunks, class section wrappers, and per-object CRC.
 //!   Default seed: `0xC0C1`.
 //!
@@ -88,7 +88,7 @@
 //! ## Verification
 //!
 //! This implementation has been verified against all 75 sample DWG files
-//! (AC1015 through AC1032) and cross-validated with ACadSharp's extracted
+//! (AC1015 through AC1032) and cross-validated against the reference
 //! CRC-64 values. All 75 files produce an exact match.
 
 /// Default CRC-16 seed used throughout the DWG format.
@@ -96,7 +96,7 @@ pub const CRC16_SEED: u16 = 0xC0C1;
 
 /// CRC-16 lookup table (CRC-16/ARC polynomial).
 ///
-/// This matches the `CRC.CrcTable` in ACadSharp.
+/// This matches the reference `CRC.CrcTable`.
 pub const CRC16_TABLE: [u16; 256] = [
     0x0000, 0xC0C1, 0xC181, 0x0140, 0xC301, 0x03C0, 0x0280, 0xC241,
     0xC601, 0x06C0, 0x0780, 0xC741, 0x0500, 0xC5C1, 0xC481, 0x0440,
@@ -951,7 +951,7 @@ mod tests {
 
     #[test]
     fn test_crc16_table_first_entries() {
-        // Verify first few table entries match ACadSharp
+        // Verify first few table entries match the reference table
         assert_eq!(CRC16_TABLE[0], 0x0000);
         assert_eq!(CRC16_TABLE[1], 0xC0C1);
         assert_eq!(CRC16_TABLE[2], 0xC181);

@@ -1568,7 +1568,7 @@ pub struct GeoDataData {
 
 /// Read the AcDbGeoData object body (after common non-entity data).
 ///
-/// Ported from ACadSharp `DwgObjectReader.readGeoData`. The field order is
+/// Ported from the reference `DwgObjectReader.readGeoData`. The field order is
 /// version-dependent: R2010/R2013 store the coordinate system as a MapGuide XML
 /// string, R2009 as a WKT PROJCS string. Trailing geo-mesh points/faces are not
 /// read (not needed for the coordinate system; the per-object reader is bounded).

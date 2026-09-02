@@ -1,6 +1,6 @@
 //! DWG section name constants, sentinels, and locator mappings
 //!
-//! Based on ACadSharp's `DwgSectionDefinition` class.
+//! Based on the reference `DwgSectionDefinition` class.
 //! These constants define the known section names used in DWG files,
 //! along with sentinel byte arrays that bracket section data in AC15 format.
 
