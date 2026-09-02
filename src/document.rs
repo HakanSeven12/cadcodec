@@ -3281,6 +3281,82 @@ impl CadDocument {
     ///
     /// This performs a simplified version of ACadSharp's two-phase build:
     ///
+    /// Whether any symbol-table entry carries a NULL handle (typical for
+    /// programmatically added entries: `Layer::new` + `layers.add` never
+    /// assigns one).
+    pub(crate) fn has_null_table_entries(&self) -> bool {
+        macro_rules! has_null {
+            ($table:expr) => {
+                $table.iter().any(|e| e.handle().is_null())
+            };
+        }
+        has_null!(self.layers)
+            || has_null!(self.line_types)
+            || has_null!(self.text_styles)
+            || has_null!(self.dim_styles)
+            || has_null!(self.app_ids)
+            || has_null!(self.views)
+            || has_null!(self.vports)
+            || has_null!(self.ucss)
+            || has_null!(self.vx_table)
+            || has_null!(self.block_records)
+    }
+
+    /// Assigns fresh handles to every symbol-table entry that still carries
+    /// a NULL handle.
+    ///
+    /// DWG table records must each carry a real handle - a record written
+    /// with handle 0 is dropped by the handle map and disappears from the
+    /// re-opened drawing. Programmatically added entries (e.g.
+    /// `Layer::new` + `layers.add`) arrive without one, so the DWG writer
+    /// calls this on a cloned document before writing (issue #51/#64
+    /// class of bug).
+    pub fn assign_table_entry_handles(&mut self) {
+        let mut missing_handles: Vec<(&'static str, String)> = Vec::new();
+        macro_rules! collect_missing {
+            ($tag:literal, $table:expr) => {
+                for entry in $table.iter() {
+                    if entry.handle().is_null() {
+                        missing_handles.push(($tag, entry.name().to_string()));
+                    }
+                }
+            };
+        }
+        collect_missing!("layers", self.layers);
+        collect_missing!("line_types", self.line_types);
+        collect_missing!("text_styles", self.text_styles);
+        collect_missing!("dim_styles", self.dim_styles);
+        collect_missing!("app_ids", self.app_ids);
+        collect_missing!("views", self.views);
+        collect_missing!("vports", self.vports);
+        collect_missing!("ucss", self.ucss);
+        collect_missing!("vx_table", self.vx_table);
+        collect_missing!("block_records", self.block_records);
+
+        for (tag, name) in missing_handles.drain(..) {
+            let new = self.allocate_handle();
+            macro_rules! apply_missing {
+                ($t:literal, $table:expr) => {
+                    if tag == $t {
+                        if let Some(entry) = $table.get_mut(&name) {
+                            entry.set_handle(new);
+                        }
+                    }
+                };
+            }
+            apply_missing!("layers", self.layers);
+            apply_missing!("line_types", self.line_types);
+            apply_missing!("text_styles", self.text_styles);
+            apply_missing!("dim_styles", self.dim_styles);
+            apply_missing!("app_ids", self.app_ids);
+            apply_missing!("views", self.views);
+            apply_missing!("vports", self.vports);
+            apply_missing!("ucss", self.ucss);
+            apply_missing!("vx_table", self.vx_table);
+            apply_missing!("block_records", self.block_records);
+        }
+    }
+
     /// 1. Assigns owner handles on model-space entities (owner = model space
     ///    block record handle) when the entity has no owner set.
     /// 2. Assigns owner handles on block-owned entities (owner = the block

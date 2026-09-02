@@ -562,11 +562,13 @@ impl MLine {
     }
 
     /// Closes the MLine.
+    ///
+    /// Sets the CLOSED flag regardless of vertex count so the state is never
+    /// silently dropped; `rebuild_geometry` guards its closed-segment math
+    /// with its own vertex-count check.
     pub fn close(&mut self) {
-        if self.vertices.len() >= 3 {
-            self.flags |= MLineFlags::CLOSED;
-            self.rebuild_geometry();
-        }
+        self.flags |= MLineFlags::CLOSED;
+        self.rebuild_geometry();
     }
 
     /// Opens the MLine.

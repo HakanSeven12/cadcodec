@@ -2201,11 +2201,15 @@ mod tests {
         table.set_uniform_row_height(1.0);
         table.set_uniform_column_width(2.0);
 
+        // The insertion point is the table's top-left corner: with the
+        // default horizontal (+X) and normal (+Z), rows flow downward (-Y),
+        // so the box spans y in [insert.y - height, insert.y] and
+        // x in [insert.x, insert.x + width].
         let bbox = table.bounding_box();
         assert_eq!(bbox.min.x, 5.0);
-        assert_eq!(bbox.min.y, 10.0);
         assert_eq!(bbox.max.x, 11.0); // 5 + 3*2
-        assert_eq!(bbox.max.y, 12.0); // 10 + 2*1
+        assert_eq!(bbox.max.y, 10.0); // insertion point = top edge
+        assert_eq!(bbox.min.y, 8.0); // 10 - 2*1
     }
 
     #[test]

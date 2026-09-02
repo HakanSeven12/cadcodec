@@ -66,6 +66,22 @@ impl DwgWriter {
         validate_version(document.version)?;
         let version = document.version;
 
+        // Programmatically added table entries may carry NULL handles
+        // (Layer::new + layers.add never assigns one). DWG table records
+        // must each carry a real handle - a record written under handle 0
+        // is dropped by the handle map and disappears from the re-opened
+        // drawing. Assign fresh handles on a cloned document up front so
+        // the controls, entries and handle map all agree (issue #51/#64
+        // class of bug).
+        let mut owned;
+        let document: &CadDocument = if document.has_null_table_entries() {
+            owned = document.clone();
+            owned.assign_table_entry_handles();
+            &owned
+        } else {
+            document
+        };
+
         let result = if uses_ac21_format(version) {
             write_ac21(&mut output, document, version)
         } else if uses_paged_format(version) {
