@@ -5562,6 +5562,40 @@ impl<'a> SectionReader<'a> {
             }
         }
 
+        // ── Post-pass: resolve the root dictionary handle ─────────────
+        // Unlike DWG, the DXF stream carries no NAMED OBJECTS DICTIONARY
+        // handle, so the header keeps the default (0x0C) set by
+        // initialize_defaults(). If the file's real root dictionary lives
+        // at another handle, the writer would emit the wrong dictionary
+        // first in the OBJECTS section and consumers would audit away the
+        // real root's children as orphans (issue #64 follow-up). Scan for
+        // the dictionary owned by NULL.
+        let current_root = document.header.named_objects_dict_handle;
+        let current_is_root = matches!(
+            document.objects.get(&current_root),
+            Some(crate::objects::ObjectType::Dictionary(dict)) if dict.owner.is_null()
+        );
+        if !current_is_root {
+            let mut best = Handle::NULL;
+            let mut best_count = 0usize;
+            for (handle, object) in &document.objects {
+                if let crate::objects::ObjectType::Dictionary(dict) = object {
+                    if dict.owner.is_null() {
+                        if dict.entries.len() > best_count
+                            || (dict.entries.len() == best_count
+                                && handle.value() > best.value())
+                        {
+                            best = *handle;
+                            best_count = dict.entries.len();
+                        }
+                    }
+                }
+            }
+            if !best.is_null() {
+                document.header.named_objects_dict_handle = best;
+            }
+        }
+
         Ok(())
     }
 
@@ -7915,7 +7949,16 @@ impl<'a> SectionReader<'a> {
                 break;
             }
 
-            if pair.code == 0 && pair.value_string == "LTYPE" {
+            if pair.code == 5 {
+                // Symbol table headers carry their control handle in code 5;
+                // adopt it so tables with non-default handles keep them
+                // (issue #64: dropped control handles caused duplicate handles
+                // between tables on round-trip).
+                if let Ok(handle) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                    document.line_types.set_handle(Handle::new(handle));
+                    document.header.linetype_control_handle = Handle::new(handle);
+                }
+            } else if pair.code == 0 && pair.value_string == "LTYPE" {
                 if let Some(linetype) = self.read_linetype_entry()? {
                     document.line_types.add_or_replace(linetype);
                     self.decoded_records = self.decoded_records.saturating_add(1);
@@ -8043,7 +8086,16 @@ impl<'a> SectionReader<'a> {
                 break;
             }
 
-            if pair.code == 0 && pair.value_string == "STYLE" {
+            if pair.code == 5 {
+                // Symbol table headers carry their control handle in code 5;
+                // adopt it so tables with non-default handles keep them
+                // (issue #64: dropped control handles caused duplicate handles
+                // between tables on round-trip).
+                if let Ok(handle) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                    document.text_styles.set_handle(Handle::new(handle));
+                    document.header.style_control_handle = Handle::new(handle);
+                }
+            } else if pair.code == 0 && pair.value_string == "STYLE" {
                 if let Some(style) = self.read_textstyle_entry()? {
                     document.text_styles.add_or_replace(style);
                     self.decoded_records = self.decoded_records.saturating_add(1);
@@ -8124,7 +8176,16 @@ impl<'a> SectionReader<'a> {
                 break;
             }
 
-            if pair.code == 0 && pair.value_string == "BLOCK_RECORD" {
+            if pair.code == 5 {
+                // Symbol table headers carry their control handle in code 5;
+                // adopt it so tables with non-default handles keep them
+                // (issue #64: dropped control handles caused duplicate handles
+                // between tables on round-trip).
+                if let Ok(handle) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                    document.block_records.set_handle(Handle::new(handle));
+                    document.header.block_control_handle = Handle::new(handle);
+                }
+            } else if pair.code == 0 && pair.value_string == "BLOCK_RECORD" {
                 if let Some(block_record) = self.read_block_record_entry()? {
                     let name = block_record.name.clone();
                     if let Err(_) = document.block_records.add(block_record.clone()) {
@@ -8237,7 +8298,16 @@ impl<'a> SectionReader<'a> {
                 break;
             }
 
-            if pair.code == 0 && pair.value_string == "DIMSTYLE" {
+            if pair.code == 5 {
+                // Symbol table headers carry their control handle in code 5;
+                // adopt it so tables with non-default handles keep them
+                // (issue #64: dropped control handles caused duplicate handles
+                // between tables on round-trip).
+                if let Ok(handle) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                    document.dim_styles.set_handle(Handle::new(handle));
+                    document.header.dimstyle_control_handle = Handle::new(handle);
+                }
+            } else if pair.code == 0 && pair.value_string == "DIMSTYLE" {
                 if let Some(dimstyle) = self.read_dimstyle_entry()? {
                     document.dim_styles.add_or_replace(dimstyle);
                     self.decoded_records = self.decoded_records.saturating_add(1);
@@ -8369,7 +8439,16 @@ impl<'a> SectionReader<'a> {
                 break;
             }
 
-            if pair.code == 0 && pair.value_string == "APPID" {
+            if pair.code == 5 {
+                // Symbol table headers carry their control handle in code 5;
+                // adopt it so tables with non-default handles keep them
+                // (issue #64: dropped control handles caused duplicate handles
+                // between tables on round-trip).
+                if let Ok(handle) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                    document.app_ids.set_handle(Handle::new(handle));
+                    document.header.appid_control_handle = Handle::new(handle);
+                }
+            } else if pair.code == 0 && pair.value_string == "APPID" {
                 if let Some(appid) = self.read_appid_entry()? {
                     document.app_ids.add_or_replace(appid);
                     self.decoded_records = self.decoded_records.saturating_add(1);
@@ -8406,7 +8485,16 @@ impl<'a> SectionReader<'a> {
                 break;
             }
 
-            if pair.code == 0 && pair.value_string == "VIEW" {
+            if pair.code == 5 {
+                // Symbol table headers carry their control handle in code 5;
+                // adopt it so tables with non-default handles keep them
+                // (issue #64: dropped control handles caused duplicate handles
+                // between tables on round-trip).
+                if let Ok(handle) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                    document.views.set_handle(Handle::new(handle));
+                    document.header.view_control_handle = Handle::new(handle);
+                }
+            } else if pair.code == 0 && pair.value_string == "VIEW" {
                 if let Some(view) = self.read_view_entry()? {
                     document.views.add_or_replace(view);
                     self.decoded_records = self.decoded_records.saturating_add(1);
@@ -8522,7 +8610,16 @@ impl<'a> SectionReader<'a> {
                 break;
             }
 
-            if pair.code == 0 && pair.value_string == "VPORT" {
+            if pair.code == 5 {
+                // Symbol table headers carry their control handle in code 5;
+                // adopt it so tables with non-default handles keep them
+                // (issue #64: dropped control handles caused duplicate handles
+                // between tables on round-trip).
+                if let Ok(handle) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                    document.vports.set_handle(Handle::new(handle));
+                    document.header.vport_control_handle = Handle::new(handle);
+                }
+            } else if pair.code == 0 && pair.value_string == "VPORT" {
                 if let Some(vport) = self.read_vport_entry()? {
                     document.vports.add_allow_duplicate(vport);
                     self.decoded_records = self.decoded_records.saturating_add(1);
@@ -8638,7 +8735,16 @@ impl<'a> SectionReader<'a> {
                 break;
             }
 
-            if pair.code == 0 && pair.value_string == "UCS" {
+            if pair.code == 5 {
+                // Symbol table headers carry their control handle in code 5;
+                // adopt it so tables with non-default handles keep them
+                // (issue #64: dropped control handles caused duplicate handles
+                // between tables on round-trip).
+                if let Ok(handle) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                    document.ucss.set_handle(Handle::new(handle));
+                    document.header.ucs_control_handle = Handle::new(handle);
+                }
+            } else if pair.code == 0 && pair.value_string == "UCS" {
                 if let Some(ucs) = self.read_ucs_entry()? {
                     document.ucss.add_or_replace(ucs);
                     self.decoded_records = self.decoded_records.saturating_add(1);

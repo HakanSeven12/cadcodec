@@ -2,7 +2,6 @@
 //! as the DIMSTYLE text style (group 340).
 
 use acadrust::entities::EntityType;
-use acadrust::tables::{};
 use acadrust::types::{DxfVersion, Handle};
 use acadrust::{CadDocument, DxfReader, DxfWriter};
 
@@ -74,4 +73,76 @@ fn repro_issue64() {
         format!("{:X}", ltype_handle.value()),
         "DIMSTYLE 340 points at the ByBlock linetype"
     );
+}
+
+#[test]
+fn issue64_root_dict_handle_resolved_on_read() {
+    use acadrust::objects::{Dictionary, ObjectType};
+
+    // The reporter's file keeps its NAMED OBJECTS DICTIONARY at #A while
+    // an unrelated dictionary (ACAD_GROUP) sits at #C - the handle the
+    // header is seeded with and that the DXF reader used to leave stale.
+    // The writer must emit the real root dictionary first in the OBJECTS
+    // section or consumers audit away its children as orphans.
+    let mut doc = CadDocument::with_version(DxfVersion::AC1024);
+
+    let mut nod = match doc.objects.remove(&Handle::new(0x0C)).unwrap() {
+        ObjectType::Dictionary(d) => d,
+        _ => panic!("expected default NOD at #C"),
+    };
+    nod.handle = Handle::new(0x0A);
+    doc.objects.insert(Handle::new(0x0A), ObjectType::Dictionary(nod));
+
+    let decoy = Dictionary {
+        handle: Handle::new(0x0C),
+        owner: Handle::new(0x0A),
+        ..Dictionary::new()
+    };
+    doc.objects
+        .insert(Handle::new(0x0C), ObjectType::Dictionary(decoy));
+
+    for object in doc.objects.values_mut() {
+        if let ObjectType::Dictionary(dict) = object {
+            if dict.owner == Handle::new(0x0C) {
+                dict.owner = Handle::new(0x0A);
+            }
+        }
+    }
+    assert_eq!(
+        doc.header.named_objects_dict_handle,
+        Handle::new(0x0C),
+        "header still carries the stale default"
+    );
+
+    let input = std::env::temp_dir().join("issue64_root_input.dxf");
+    DxfWriter::new(&doc).write_to_file(&input).unwrap();
+    let loaded = DxfReader::from_file(&input).unwrap().read().unwrap();
+
+    assert_eq!(
+        loaded.header.named_objects_dict_handle,
+        Handle::new(0x0A),
+        "reader must resolve the root dictionary"
+    );
+    match loaded.objects.get(&Handle::new(0x0A)) {
+        Some(ObjectType::Dictionary(dict)) => {
+            assert!(dict.owner.is_null(), "root dictionary owns itself")
+        }
+        _ => panic!("root dict handle must point at a dictionary"),
+    }
+
+    let output = std::env::temp_dir().join("issue64_root_output.dxf");
+    DxfWriter::new(&loaded).write_to_file(&output).unwrap();
+
+    let text = std::fs::read_to_string(&output).unwrap();
+    let lines: Vec<&str> = text.split("\r\n").collect();
+    let mut first_object = None;
+    for i in 0..lines.len() - 3 {
+        if lines[i] == "  0" && lines[i + 1] == "SECTION" && lines[i + 3] == "OBJECTS" {
+            first_object = Some((lines[i + 5].trim().to_string(), lines[i + 7].trim().to_string()));
+            break;
+        }
+    }
+    let (name, handle) = first_object.expect("OBJECTS section");
+    assert_eq!(name, "DICTIONARY", "root dictionary must be first");
+    assert_eq!(handle, "A", "first object is the real root dictionary");
 }
