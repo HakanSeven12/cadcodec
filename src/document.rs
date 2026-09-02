@@ -2794,6 +2794,13 @@ impl CadDocument {
     /// DWG reader records them so block base points etc. survive a round-trip)
     /// but are hidden here: they are block delimiters, not drawing entities, so
     /// a freshly-built document and a round-tripped one report the same set.
+    ///
+    /// Note that this covers *every* entity in the document, including geometry
+    /// stored inside block definitions (the BLOCKS section). CAD applications
+    /// only draw model-space (and paper-space) entities plus inserted block
+    /// references, so use [`model_space_entities`](Self::model_space_entities)
+    /// or [`entities_in_block`](Self::entities_in_block) to iterate the drawable
+    /// set (issue #52).
     pub fn entities(&self) -> impl Iterator<Item = &EntityType> {
         self.entities
             .iter()
@@ -2812,6 +2819,30 @@ impl CadDocument {
             }
         }
         self.entities.iter_mut().map(Arc::make_mut)
+    }
+
+    /// Iterate over the entities belonging to a named block record.
+    ///
+    /// This is the set of entities a CAD application associates with that
+    /// block — for `*Model_Space` (and the `*Paper_Space*` layout records)
+    /// this is what gets drawn; for regular block names it is the geometry of
+    /// the block *definition*, which is only rendered when the block is
+    /// INSERTed (issue #52).
+    pub fn entities_in_block(&self, block_name: &str) -> impl Iterator<Item = &EntityType> + '_ {
+        self.block_records
+            .get(block_name)
+            .into_iter()
+            .flat_map(|br| br.entity_handles.iter())
+            .filter_map(|handle| self.get_entity(*handle))
+    }
+
+    /// Iterate over the model-space entities — the primary drawable set.
+    ///
+    /// Equivalent to [`entities_in_block`](Self::entities_in_block) for
+    /// `*Model_Space`. Block-definition geometry and paper-space entities are
+    /// excluded, matching what CAD applications render by default (issue #52).
+    pub fn model_space_entities(&self) -> impl Iterator<Item = &EntityType> + '_ {
+        self.entities_in_block("*Model_Space")
     }
 
     /// Owner handle of a database object, for ownership-chain walks.
