@@ -1165,7 +1165,7 @@ pub struct SolidHistoryRevolve {
     pub operation_major: i32,
     pub operation_minor: i32,
     pub axis_point: Vector3,
-    pub direction: Vector2,
+    pub direction: Vector3,
     pub revolve_angle: f64,
     pub start_angle: f64,
     pub draft_angle: f64,

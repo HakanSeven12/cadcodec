@@ -2791,10 +2791,7 @@ impl<'a> SectionReader<'a> {
                         operation_major: fields.i32(section, 90),
                         operation_minor: fields.i32(section, 91),
                         axis_point: fields.point(section, 10),
-                        direction: Vector2::new(
-                            fields.f64(section, 11),
-                            fields.f64(section, 21),
-                        ),
+                        direction: fields.point(section, 11),
                         revolve_angle: fields.f64(section, 40),
                         start_angle: fields.f64(section, 41),
                         draft_angle: fields.f64(section, 43),
