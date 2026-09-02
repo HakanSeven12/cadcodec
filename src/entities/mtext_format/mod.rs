@@ -22,14 +22,14 @@
 //! | `\L` / `\l` | Underline on / off |
 //! | `\O` / `\o` | Overline on / off |
 //! | `\K` / `\k` | Strikethrough on / off |
-//! | `\C<n>;` | ACI color index |
+//! | `\C<n>;` | ACI color index (0 = ByBlock, 256 = ByLayer) |
 //! | `\c<n>;` | True-color RGB (packed BGR) |
 //! | `\H<n>;` / `\H<n>x;` | Height absolute / relative |
 //! | `\W<n>;` / `\W<n>x;` | Width factor absolute / relative |
 //! | `\T<n>;` / `\T<n>x;` | Tracking absolute / relative |
 //! | `\Q<n>;` | Oblique angle |
 //! | `\A<n>;` | Line alignment (0=bottom, 1=middle, 2=top) |
-//! | `\f<family>|b0/b1|i0/i1|...;` | Font with bold/italic |
+//! | `\f<family>|b0/b1|i0/i1|c<n>|p<n>|...;` | Font with bold/italic/charset/pitch flags |
 //! | `\F<N><name>.shx;` | Font by SHX name |
 //! | `\F<n>;` | Fraction style (0–3) |
 //! | `\S<num>/<den>;` | Stacking (fractions, limits) |
