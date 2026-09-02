@@ -12,7 +12,7 @@ Supports DXF (ASCII & Binary) and DWG (R13â€“R2018) files.
 
 ```toml
 [dependencies]
-acadrust = "0.5.1"
+acadrust = "0.5.2"
 ```
 
 ```rust
@@ -145,6 +145,10 @@ Full API docs: [docs.rs/acadrust](https://docs.rs/acadrust)
 
 ## Changelog
 
+
+### 0.5.2
+
+- **DIMSTYLE text-style regression (issue #64)** - Fixed a 0.5.1 regression where a DXF round-trip wrote a ByBlock linetype handle as the DIMSTYLE text style (group 340): when the input file replaced the default Standard text style at a colliding handle, the surviving default DIMSTYLE kept pointing at the stale numeric handle. Stale text-style references are now re-pointed at the file's same-named text style on read.
 
 ### 0.5.1
 
@@ -300,4 +304,5 @@ MPL-2.0 â€” see [LICENSE](LICENSE).
 ## Acknowledgments
 
 - [ACadSharp](https://github.com/DomCR/ACadSharp) â€” the C# library that inspired this project
+
 
