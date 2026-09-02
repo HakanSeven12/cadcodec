@@ -750,4 +750,42 @@ fn rehandle_colliding_default_entries(
             }
         }
     }
+
+    rewire_stale_dimstyle_text_styles(document);
+}
+
+/// Re-point DIMSTYLE text-style handles that no longer resolve to a text
+/// style.
+///
+/// The default Standard DIMSTYLE wires its `dimtxsty_handle` to the default
+/// Standard TEXT STYLE handle. When the input file replaces that text style
+/// with its own record at a different handle, the surviving default dimstyle
+/// is left pointing at a numeric handle the file has since given to an
+/// unrelated record - e.g. the ByBlock linetype - and the writer emits a
+/// `340` that consumers resolve to the wrong table (issue #64). Re-point
+/// such stale handles at the file's text style of the same name.
+fn rewire_stale_dimstyle_text_styles(document: &mut CadDocument) {
+    let text_style_handles: std::collections::HashSet<u64> = document
+        .text_styles
+        .iter()
+        .map(|style| style.handle.value())
+        .collect();
+
+    let mut stale_names: Vec<String> = Vec::new();
+    for style in document.dim_styles.iter() {
+        let handle = style.dimtxsty_handle;
+        if !handle.is_null() && !text_style_handles.contains(&handle.value()) {
+            stale_names.push(style.name().to_string());
+        }
+    }
+    for name in stale_names {
+        // Re-point at the text style with the same name as the dimstyle
+        // (the default wiring is Standard -> Standard); if no such text
+        // style exists, leave the handle alone rather than guessing.
+        if let Some(new) = document.text_styles.get(&name).map(|s| s.handle) {
+            if let Some(style) = document.dim_styles.get_mut(&name) {
+                style.dimtxsty_handle = new;
+            }
+        }
+    }
 }
