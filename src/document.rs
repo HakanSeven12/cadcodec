@@ -3448,6 +3448,8 @@ impl CadDocument {
     ///
     /// Call this once after loading (the DXF reader calls it automatically).
     pub fn resolve_references(&mut self) {
+        self.synchronize_handle_allocator();
+
         // --- 1. Find the max handle in use across the whole document ---
         let mut max_handle: u64 = self.next_handle;
 
@@ -3668,23 +3670,42 @@ impl CadDocument {
             self.vx_table.set_handle(h); self.header.vpent_hdr_control_handle = h;
         }
 
-        // --- 1c. Resolve block entity/end handle collisions ---
-        // block_entity_handle and block_end_handle are pre-allocated during
-        // initialize_defaults() and may collide with entry/entity handles
-        // read from the file.
+        // --- 1c. Resolve missing or colliding BLOCK/ENDBLK handles ---
+        // Reserve table controls as well as entry/entity/object identities,
+        // then reserve each marker as it is accepted. This catches collisions
+        // between two markers, not just marker-to-record collisions.
+        for handle in [
+            self.vports.handle(),
+            self.line_types.handle(),
+            self.layers.handle(),
+            self.text_styles.handle(),
+            self.views.handle(),
+            self.ucss.handle(),
+            self.app_ids.handle(),
+            self.dim_styles.handle(),
+            self.block_records.handle(),
+            self.vx_table.handle(),
+        ] {
+            if !handle.is_null() {
+                used_handles.insert(handle.value());
+            }
+        }
         for br in self.block_records.iter_mut() {
-            if !br.block_entity_handle.is_null()
-                && used_handles.contains(&br.block_entity_handle.value())
+            if br.block_entity_handle.is_null()
+                || used_handles.contains(&br.block_entity_handle.value())
             {
                 let h = Handle::new(self.next_handle); self.next_handle += 1;
                 br.block_entity_handle = h;
             }
-            if !br.block_end_handle.is_null()
-                && used_handles.contains(&br.block_end_handle.value())
+            used_handles.insert(br.block_entity_handle.value());
+
+            if br.block_end_handle.is_null()
+                || used_handles.contains(&br.block_end_handle.value())
             {
                 let h = Handle::new(self.next_handle); self.next_handle += 1;
                 br.block_end_handle = h;
             }
+            used_handles.insert(br.block_end_handle.value());
         }
 
         // --- 1d. Resolve object handle collisions ---

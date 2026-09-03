@@ -1746,6 +1746,7 @@ impl<'a> SectionReader<'a> {
         use crate::types::Vector3;
 
         let mut block_name = String::new();
+        let mut alternate_block_name = String::new();
         let mut base_point = Vector3::new(0.0, 0.0, 0.0);
         let mut description = String::new();
         let mut xref_path = String::new();
@@ -1771,9 +1772,7 @@ impl<'a> SectionReader<'a> {
                 }
                 3 => {
                     // Block name (alternate)
-                    if block_name.is_empty() {
-                        block_name = pair.value_string.clone();
-                    }
+                    alternate_block_name = pair.value_string.clone();
                 }
                 4 => {
                     // Description
@@ -1802,6 +1801,32 @@ impl<'a> SectionReader<'a> {
                 }
                 70 => { if let Some(v) = pair.as_i16() { block_flags = v; } }
                 _ => {}
+            }
+        }
+
+        // Some legacy DXF producers use `$MODEL_SPACE` / `$PAPER_SPACE` as
+        // the BLOCK marker name (code 2), while the BLOCK_RECORD table and
+        // alternate name (code 3) use the canonical `*...` spelling. Resolve
+        // only those aliases so the marker updates the existing space record
+        // instead of creating a duplicate block with a null marker handle.
+        if block_name.is_empty() {
+            block_name = alternate_block_name.clone();
+        }
+        let canonical_space_name = if block_name.eq_ignore_ascii_case("$MODEL_SPACE") {
+            Some("*Model_Space")
+        } else if block_name.eq_ignore_ascii_case("$PAPER_SPACE") {
+            Some("*Paper_Space")
+        } else {
+            None
+        };
+        if let Some(canonical_name) = canonical_space_name {
+            let alternate_matches = !alternate_block_name.is_empty()
+                && alternate_block_name.eq_ignore_ascii_case(canonical_name)
+                && document.block_records.get(&alternate_block_name).is_some();
+            if alternate_matches {
+                block_name = alternate_block_name;
+            } else if document.block_records.get(canonical_name).is_some() {
+                block_name = canonical_name.to_string();
             }
         }
 
@@ -1857,12 +1882,12 @@ impl<'a> SectionReader<'a> {
                             block_record.flags.has_attributes = (block_flags & 2) != 0;
                             block_record.flags.is_xref = (block_flags & 4) != 0;
                             block_record.flags.is_xref_overlay = (block_flags & 8) != 0;
-                            if !handle.is_null() {
-                                block_record.block_entity_handle = handle;
-                            }
-                            if !block_end.common.handle.is_null() {
-                                block_record.block_end_handle = block_end.common.handle;
-                            }
+                            // The BLOCKS section is authoritative for marker
+                            // identities. Keep missing source handles null so
+                            // the post-read pass can assign fresh handles after
+                            // it has seen every identity in the file.
+                            block_record.block_entity_handle = handle;
+                            block_record.block_end_handle = block_end.common.handle;
                         }
 
                         // Note: Block and BlockEnd are block definition markers, not drawing entities.
