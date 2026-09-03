@@ -1978,6 +1978,56 @@ impl CadDocument {
         handle
     }
 
+    /// Advance the allocator above every stored record identity.
+    ///
+    /// File readers populate tables and objects through several paths, not all
+    /// of which call `allocate_handle()`. Synchronizing before a repair pass
+    /// prevents freshly assigned handles from colliding with parsed records.
+    pub(crate) fn synchronize_handle_allocator(&mut self) {
+        let mut next_handle = self.next_handle;
+        macro_rules! include_handle {
+            ($handle:expr) => {{
+                next_handle = next_handle.max($handle.value().saturating_add(1));
+            }};
+        }
+        macro_rules! include_table {
+            ($table:expr) => {{
+                include_handle!($table.handle());
+                for entry in $table.iter() {
+                    include_handle!(entry.handle());
+                }
+            }};
+        }
+
+        include_table!(self.layers);
+        include_table!(self.line_types);
+        include_table!(self.text_styles);
+        include_table!(self.dim_styles);
+        include_table!(self.app_ids);
+        include_table!(self.views);
+        include_table!(self.vports);
+        include_table!(self.ucss);
+        include_table!(self.vx_table);
+        include_table!(self.block_records);
+
+        for record in self.block_records.iter() {
+            include_handle!(record.block_entity_handle);
+            include_handle!(record.block_end_handle);
+            for handle in &record.entity_handles {
+                include_handle!(*handle);
+            }
+        }
+        for entity in &self.entities {
+            include_handle!(entity.common().handle);
+        }
+        for handle in self.objects.keys() {
+            include_handle!(*handle);
+        }
+
+        self.next_handle = next_handle;
+        self.header.handle_seed = self.header.handle_seed.max(next_handle);
+    }
+
     /// Get the next handle value (without allocating)
     pub fn next_handle(&self) -> u64 {
         self.next_handle
@@ -2315,7 +2365,7 @@ impl CadDocument {
             // collide with it.
             if h.value() >= self.next_handle {
                 self.next_handle = h.value() + 1;
-                self.header.handle_seed = self.next_handle;
+                self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
             }
             h
         };
@@ -2389,7 +2439,7 @@ impl CadDocument {
             let handle = entity.common().handle;
             if handle.value() >= self.next_handle {
                 self.next_handle = handle.value() + 1;
-                self.header.handle_seed = self.next_handle;
+                self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
             }
             handle
         };
@@ -2486,7 +2536,7 @@ impl CadDocument {
         self.record_entity_before(handle, None);
         if handle.value() >= self.next_handle {
             self.next_handle = handle.value() + 1;
-            self.header.handle_seed = self.next_handle;
+            self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
         }
         let idx = self.entities.len();
         self.entities.push(entity);
@@ -2628,7 +2678,7 @@ impl CadDocument {
             let h = entity.common().handle;
             if h.value() >= self.next_handle {
                 self.next_handle = h.value() + 1;
-                self.header.handle_seed = self.next_handle;
+                self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
             }
             h
         };
@@ -4149,6 +4199,9 @@ impl CadDocument {
                             _ => {}
                         }
                     }
+                    ObjectType::DictionaryVariable(value) => {
+                        remap_object_handle(&mut value.owner_handle);
+                    }
                     ObjectType::TableContent(value) => {
                         value.visit_object_handles_mut(
                             &mut remap_object_handle,
@@ -4514,6 +4567,7 @@ impl CadDocument {
         self.resolve_book_colors();
         self.resolve_xrecord_names();
         self.resolve_xrecord_backed_properties();
+        self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
     }
 
     pub(crate) fn resolve_book_colors(&mut self) {
