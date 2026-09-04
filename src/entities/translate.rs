@@ -437,6 +437,7 @@ pub(crate) fn translate_body(e: &mut Body, offset: Vector3) {
 }
 
 pub(crate) fn translate_surface(e: &mut crate::entities::Surface, offset: Vector3) {
+    super::transform::transform_loft_placement(e, &Transform::from_translation(offset));
     e.point_of_reference = e.point_of_reference + offset;
     super::transform::compose_acis_placement(&mut e.acis_data, &Transform::from_translation(offset));
     for wire in &mut e.wires {

@@ -1978,6 +1978,56 @@ impl CadDocument {
         handle
     }
 
+    /// Advance the allocator above every stored record identity.
+    ///
+    /// File readers populate tables and objects through several paths, not all
+    /// of which call `allocate_handle()`. Synchronizing before a repair pass
+    /// prevents freshly assigned handles from colliding with parsed records.
+    pub(crate) fn synchronize_handle_allocator(&mut self) {
+        let mut next_handle = self.next_handle;
+        macro_rules! include_handle {
+            ($handle:expr) => {{
+                next_handle = next_handle.max($handle.value().saturating_add(1));
+            }};
+        }
+        macro_rules! include_table {
+            ($table:expr) => {{
+                include_handle!($table.handle());
+                for entry in $table.iter() {
+                    include_handle!(entry.handle());
+                }
+            }};
+        }
+
+        include_table!(self.layers);
+        include_table!(self.line_types);
+        include_table!(self.text_styles);
+        include_table!(self.dim_styles);
+        include_table!(self.app_ids);
+        include_table!(self.views);
+        include_table!(self.vports);
+        include_table!(self.ucss);
+        include_table!(self.vx_table);
+        include_table!(self.block_records);
+
+        for record in self.block_records.iter() {
+            include_handle!(record.block_entity_handle);
+            include_handle!(record.block_end_handle);
+            for handle in &record.entity_handles {
+                include_handle!(*handle);
+            }
+        }
+        for entity in &self.entities {
+            include_handle!(entity.common().handle);
+        }
+        for handle in self.objects.keys() {
+            include_handle!(*handle);
+        }
+
+        self.next_handle = next_handle;
+        self.header.handle_seed = self.header.handle_seed.max(next_handle);
+    }
+
     /// Get the next handle value (without allocating)
     pub fn next_handle(&self) -> u64 {
         self.next_handle
@@ -2315,7 +2365,7 @@ impl CadDocument {
             // collide with it.
             if h.value() >= self.next_handle {
                 self.next_handle = h.value() + 1;
-                self.header.handle_seed = self.next_handle;
+                self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
             }
             h
         };
@@ -2389,7 +2439,7 @@ impl CadDocument {
             let handle = entity.common().handle;
             if handle.value() >= self.next_handle {
                 self.next_handle = handle.value() + 1;
-                self.header.handle_seed = self.next_handle;
+                self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
             }
             handle
         };
@@ -2486,7 +2536,7 @@ impl CadDocument {
         self.record_entity_before(handle, None);
         if handle.value() >= self.next_handle {
             self.next_handle = handle.value() + 1;
-            self.header.handle_seed = self.next_handle;
+            self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
         }
         let idx = self.entities.len();
         self.entities.push(entity);
@@ -2628,7 +2678,7 @@ impl CadDocument {
             let h = entity.common().handle;
             if h.value() >= self.next_handle {
                 self.next_handle = h.value() + 1;
-                self.header.handle_seed = self.next_handle;
+                self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
             }
             h
         };
@@ -2794,6 +2844,13 @@ impl CadDocument {
     /// DWG reader records them so block base points etc. survive a round-trip)
     /// but are hidden here: they are block delimiters, not drawing entities, so
     /// a freshly-built document and a round-tripped one report the same set.
+    ///
+    /// Note that this covers *every* entity in the document, including geometry
+    /// stored inside block definitions (the BLOCKS section). CAD applications
+    /// only draw model-space (and paper-space) entities plus inserted block
+    /// references, so use [`model_space_entities`](Self::model_space_entities)
+    /// or [`entities_in_block`](Self::entities_in_block) to iterate the drawable
+    /// set (issue #52).
     pub fn entities(&self) -> impl Iterator<Item = &EntityType> {
         self.entities
             .iter()
@@ -2812,6 +2869,30 @@ impl CadDocument {
             }
         }
         self.entities.iter_mut().map(Arc::make_mut)
+    }
+
+    /// Iterate over the entities belonging to a named block record.
+    ///
+    /// This is the set of entities a CAD application associates with that
+    /// block — for `*Model_Space` (and the `*Paper_Space*` layout records)
+    /// this is what gets drawn; for regular block names it is the geometry of
+    /// the block *definition*, which is only rendered when the block is
+    /// INSERTed (issue #52).
+    pub fn entities_in_block(&self, block_name: &str) -> impl Iterator<Item = &EntityType> + '_ {
+        self.block_records
+            .get(block_name)
+            .into_iter()
+            .flat_map(|br| br.entity_handles.iter())
+            .filter_map(|handle| self.get_entity(*handle))
+    }
+
+    /// Iterate over the model-space entities — the primary drawable set.
+    ///
+    /// Equivalent to [`entities_in_block`](Self::entities_in_block) for
+    /// `*Model_Space`. Block-definition geometry and paper-space entities are
+    /// excluded, matching what CAD applications render by default (issue #52).
+    pub fn model_space_entities(&self) -> impl Iterator<Item = &EntityType> + '_ {
+        self.entities_in_block("*Model_Space")
     }
 
     /// Owner handle of a database object, for ownership-chain walks.
@@ -3279,7 +3360,7 @@ impl CadDocument {
 
     /// Resolve handle references after reading a DXF file.
     ///
-    /// This performs a simplified version of ACadSharp's two-phase build:
+    /// This performs a simplified version of the two-phase build:
     ///
     /// Whether any symbol-table entry carries a NULL handle (typical for
     /// programmatically added entries: `Layer::new` + `layers.add` never
@@ -3367,6 +3448,8 @@ impl CadDocument {
     ///
     /// Call this once after loading (the DXF reader calls it automatically).
     pub fn resolve_references(&mut self) {
+        self.synchronize_handle_allocator();
+
         // --- 1. Find the max handle in use across the whole document ---
         let mut max_handle: u64 = self.next_handle;
 
@@ -3587,23 +3670,42 @@ impl CadDocument {
             self.vx_table.set_handle(h); self.header.vpent_hdr_control_handle = h;
         }
 
-        // --- 1c. Resolve block entity/end handle collisions ---
-        // block_entity_handle and block_end_handle are pre-allocated during
-        // initialize_defaults() and may collide with entry/entity handles
-        // read from the file.
+        // --- 1c. Resolve missing or colliding BLOCK/ENDBLK handles ---
+        // Reserve table controls as well as entry/entity/object identities,
+        // then reserve each marker as it is accepted. This catches collisions
+        // between two markers, not just marker-to-record collisions.
+        for handle in [
+            self.vports.handle(),
+            self.line_types.handle(),
+            self.layers.handle(),
+            self.text_styles.handle(),
+            self.views.handle(),
+            self.ucss.handle(),
+            self.app_ids.handle(),
+            self.dim_styles.handle(),
+            self.block_records.handle(),
+            self.vx_table.handle(),
+        ] {
+            if !handle.is_null() {
+                used_handles.insert(handle.value());
+            }
+        }
         for br in self.block_records.iter_mut() {
-            if !br.block_entity_handle.is_null()
-                && used_handles.contains(&br.block_entity_handle.value())
+            if br.block_entity_handle.is_null()
+                || used_handles.contains(&br.block_entity_handle.value())
             {
                 let h = Handle::new(self.next_handle); self.next_handle += 1;
                 br.block_entity_handle = h;
             }
-            if !br.block_end_handle.is_null()
-                && used_handles.contains(&br.block_end_handle.value())
+            used_handles.insert(br.block_entity_handle.value());
+
+            if br.block_end_handle.is_null()
+                || used_handles.contains(&br.block_end_handle.value())
             {
                 let h = Handle::new(self.next_handle); self.next_handle += 1;
                 br.block_end_handle = h;
             }
+            used_handles.insert(br.block_end_handle.value());
         }
 
         // --- 1d. Resolve object handle collisions ---
@@ -4118,6 +4220,9 @@ impl CadDocument {
                             _ => {}
                         }
                     }
+                    ObjectType::DictionaryVariable(value) => {
+                        remap_object_handle(&mut value.owner_handle);
+                    }
                     ObjectType::TableContent(value) => {
                         value.visit_object_handles_mut(
                             &mut remap_object_handle,
@@ -4483,6 +4588,7 @@ impl CadDocument {
         self.resolve_book_colors();
         self.resolve_xrecord_names();
         self.resolve_xrecord_backed_properties();
+        self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
     }
 
     pub(crate) fn resolve_book_colors(&mut self) {

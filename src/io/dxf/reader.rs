@@ -345,9 +345,10 @@ impl DxfReader {
             }
         }
 
-        // Post-read resolution: re-handle surviving defaults that collide
-        // with file-sourced handles, then assign owner handles and update
-        // next_handle.
+        // Post-read resolution: advance the allocator past every file-sourced
+        // identity before re-handling surviving defaults, then assign owners
+        // and repair cross-references.
+        document.synchronize_handle_allocator();
         rehandle_colliding_default_entries(&mut document, &default_entry_handles);
         document.resolve_references();
 

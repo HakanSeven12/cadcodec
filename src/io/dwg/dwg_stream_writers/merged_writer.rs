@@ -20,7 +20,7 @@
 //! - **AC21/AC24** (R2007+): Three-stream merge. Text stream is appended
 //!   between main and handles with a modular-short size and a `true` bit flag.
 //!
-//! Based on ACadSharp's `DwgMergedStreamWriter` and `DwgmMergedStreamWriterAC14`.
+//! Based on the reference `DwgMergedStreamWriter` and `DwgmMergedStreamWriterAC14`.
 
 use crate::types::{Color, DxfVersion, Vector2, Vector3};
 use crate::types::Transparency;

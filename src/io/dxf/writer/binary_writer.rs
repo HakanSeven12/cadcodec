@@ -36,6 +36,36 @@ impl<W: Write> DxfBinaryWriter<W> {
         self.writer.write_u8(0)?;
         Ok(())
     }
+
+    /// Preserved DXF pairs store their values as text, but their binary
+    /// representation still follows the group code's numeric or chunk type.
+    /// Return false only for values that retain the null-string layout.
+    fn write_typed_text(&mut self, code: i32, value: &str) -> Result<bool> {
+        use crate::error::DxfError;
+        use crate::io::dxf::GroupCodeValueType;
+
+        let invalid = || DxfError::Parse(format!("Invalid text value for binary DXF group {code}"));
+        let text = value.trim();
+        match GroupCodeValueType::from_raw_code(code) {
+            GroupCodeValueType::String | GroupCodeValueType::Handle => return Ok(false),
+            GroupCodeValueType::Bool => self.write_bool(code, text.parse::<i64>().map_err(|_| invalid())? != 0)?,
+            GroupCodeValueType::Byte | GroupCodeValueType::Int16 => self.write_i16(code, text.parse().map_err(|_| invalid())?)?,
+            GroupCodeValueType::Int32 => self.write_i32(code, text.parse().map_err(|_| invalid())?)?,
+            GroupCodeValueType::Int64 => self.write_i64(code, text.parse().map_err(|_| invalid())?)?,
+            GroupCodeValueType::Double | GroupCodeValueType::Point3D => self.write_double(code, text.parse().map_err(|_| invalid())?)?,
+            GroupCodeValueType::BinaryData => {
+                if text.len() % 2 != 0 { return Err(invalid()); }
+                let data = text.as_bytes().chunks_exact(2).map(|pair| {
+                    let high = (pair[0] as char).to_digit(16).ok_or_else(invalid)?;
+                    let low = (pair[1] as char).to_digit(16).ok_or_else(invalid)?;
+                    Ok(((high << 4) | low) as u8)
+                }).collect::<Result<Vec<_>>>()?;
+                self.write_binary(code, &data)?;
+            }
+            GroupCodeValueType::None => return Err(DxfError::InvalidDxfCode(code)),
+        }
+        Ok(true)
+    }
     
     /// Get the inner writer
     pub fn into_inner(self) -> W {
@@ -45,6 +75,7 @@ impl<W: Write> DxfBinaryWriter<W> {
 
 impl<W: Write> DxfStreamWriter for DxfBinaryWriter<W> {
     fn write_string(&mut self, code: i32, value: &str) -> Result<()> {
+        if self.write_typed_text(code, value)? { return Ok(()); }
         self.write_code(code)?;
         // Sanitize embedded newlines to DXF paragraph markers, matching the
         // ASCII writer.  While binary DXF uses null-terminated strings (so raw
@@ -63,6 +94,7 @@ impl<W: Write> DxfStreamWriter for DxfBinaryWriter<W> {
     }
 
     fn write_xrecord_string(&mut self, code: i32, value: &str) -> Result<()> {
+        if self.write_typed_text(code, value)? { return Ok(()); }
         self.write_code(code)?;
         self.write_null_string(value)
     }
@@ -99,9 +131,24 @@ impl<W: Write> DxfStreamWriter for DxfBinaryWriter<W> {
     }
     
     fn write_bool(&mut self, code: i32, value: bool) -> Result<()> {
-        self.write_code(code)?;
-        self.writer.write_u8(if value { 1 } else { 0 })?;
-        Ok(())
+        use crate::io::dxf::GroupCodeValueType;
+
+        // Logical flags also occur in integer groups, including history
+        // flags 280/281. Their binary width follows the group code, not the
+        // Rust value type; only groups 290-299 use a single byte.
+        let value = u8::from(value);
+        match GroupCodeValueType::from_raw_code(code) {
+            GroupCodeValueType::Bool => {
+                self.write_code(code)?;
+                self.writer.write_u8(value)?;
+                Ok(())
+            }
+            GroupCodeValueType::Byte | GroupCodeValueType::Int16 => self.write_i16(code, i16::from(value)),
+            GroupCodeValueType::Int32 => self.write_i32(code, i32::from(value)),
+            GroupCodeValueType::Int64 => self.write_i64(code, i64::from(value)),
+            GroupCodeValueType::Double => self.write_double(code, f64::from(value)),
+            _ => Err(crate::error::DxfError::InvalidDxfCode(code)),
+        }
     }
     
     fn write_handle(&mut self, code: i32, handle: Handle) -> Result<()> {
@@ -129,10 +176,17 @@ impl<W: Write> DxfStreamWriter for DxfBinaryWriter<W> {
     }
     
     fn write_binary(&mut self, code: i32, data: &[u8]) -> Result<()> {
-        self.write_code(code)?;
-        // Write length as a byte, then the data
-        self.writer.write_u8(data.len() as u8)?;
-        self.writer.write_all(data)?;
+        // Each binary group has a one-byte length. Repeat the group instead
+        // of truncating the length when a caller supplies a larger payload.
+        if data.is_empty() {
+            self.write_code(code)?;
+            self.writer.write_u8(0)?;
+        }
+        for chunk in data.chunks(255) {
+            self.write_code(code)?;
+            self.writer.write_u8(chunk.len() as u8)?;
+            self.writer.write_all(chunk)?;
+        }
         Ok(())
     }
     

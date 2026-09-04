@@ -52,7 +52,7 @@ impl LineWeight {
     // In the DWG LAYER combined BS (R2000+), lineweight is stored as a
     // 5-bit TABLE INDEX (0-31), **not** the raw weight value.
     //
-    // Mapping (matches ACadSharp's CadUtils.ToIndex / ToValue):
+    // Mapping (matches the reference CadUtils.ToIndex / ToValue):
     //   Indices 0..23  → standard weights (0, 5, 9, 13, 15, …, 200, 211)
     //   Index   29     → ByLayer  (-1)
     //   Index   30     → ByBlock  (-2)

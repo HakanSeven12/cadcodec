@@ -267,7 +267,7 @@ pub fn reed_solomon_encode(
 /// De-interleaves `encoded` into `buffer` by reading every `factor`-th byte
 /// and copying `block_size` data bytes per stream (parity bytes are discarded).
 ///
-/// This matches ACadSharp's `reedSolomonDecoding()` method.
+/// This matches the reference `reedSolomonDecoding()` method.
 ///
 /// # Panics
 /// Panics if `buffer.len() < factor * block_size`.

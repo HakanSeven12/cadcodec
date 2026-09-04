@@ -128,7 +128,7 @@ impl DwgVersion {
     /// Whether the Classes/Header sections contain an extra 4-byte RL field
     /// after the section-size RL.
     ///
-    /// The full condition (from ACadSharp) is:
+    /// The full condition is:
     ///   `(version >= AC1024 && maintenance_version > 3) || version > AC1027`
     ///
     /// In practice this means:

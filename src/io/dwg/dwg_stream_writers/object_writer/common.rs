@@ -417,7 +417,7 @@ impl<'a> DwgObjectWriter<'a> {
         // other entity writes false.
         //
         // Mirror the reader (see read_common_entity_data): write it for R2013+
-        // as the spec — and ACadSharp / LibreDWG — do, except for MULTILEADER,
+        // as the spec — and LibreDWG — do, except for MULTILEADER,
         // which the reader skips because some writers omit it there. It was once
         // skipped for every preview-bearing entity instead; that mis-modelled
         // the format and desynced IMAGE / WIPEOUT (evidence in the reader).
@@ -965,7 +965,7 @@ impl<'a> DwgObjectWriter<'a> {
     // ── class_type_code ─────────────────────────────────────────────
     /// Look up the DXF class number for an UNLISTED object type.
     ///
-    /// In C# ACadSharp, types not in the `ObjectType` enum (UNLISTED)
+    /// In the reference implementation, types not in the `ObjectType` enum (UNLISTED)
     /// **always** use their DXF class number (500+) as the DWG type
     /// code — regardless of version.  Only fixed types (0–82 in the
     /// ODA spec) use literal type codes.

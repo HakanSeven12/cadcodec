@@ -5,7 +5,7 @@
 //! by the object reader to locate individual objects in the AcDb:AcDbObjects
 //! section.
 //!
-//! Mirrors ACadSharp's `DwgHandleReader`.
+//! Mirrors the reference `DwgHandleReader`.
 //!
 //! ## Section layout
 //!
@@ -53,7 +53,7 @@ pub fn read_handles(data: &[u8]) -> Result<HashMap<u64, i64>> {
         }
 
         // Data bytes = size − 2 (subtract the 2-byte size header).
-        // This matches ACadSharp's `maxSectionOffset = size - 2`.
+        // This matches the reference `maxSectionOffset = size - 2`.
         let data_bytes = size - 2;
         let chunk_end = (pos + data_bytes).min(data.len());
 

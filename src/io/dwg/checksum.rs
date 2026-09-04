@@ -23,7 +23,7 @@ pub fn magic_sequence() -> [u8; 256] {
 
 /// Compute the Adler-32 variant checksum used for DWG page checksums.
 ///
-/// This is compatible with `DwgCheckSumCalculator.Calculate()` in ACadSharp.
+/// This is compatible with the reference `DwgCheckSumCalculator.Calculate()`.
 /// It processes data in chunks of 5552 (0x15B0) bytes to prevent overflow.
 ///
 /// # Arguments
@@ -51,7 +51,7 @@ pub fn adler32_checksum(seed: u32, data: &[u8]) -> u32 {
 
 /// Calculate padding needed to align `length + 0x20` to a 0x20-byte boundary.
 ///
-/// This matches `DwgCheckSumCalculator.CompressionCalculator()` in ACadSharp.
+/// This matches the reference `DwgCheckSumCalculator.CompressionCalculator()`.
 ///
 /// # Returns
 /// Number of padding bytes needed (0–31).
@@ -61,7 +61,7 @@ pub fn compression_padding(length: usize) -> usize {
 
 /// Apply XOR mask to a buffer using `position ^ 0x4164536B` as a repeating 4-byte pattern.
 ///
-/// This matches `DwgFileHeaderWriterBase.applyMask()` in ACadSharp.
+/// This matches the reference `DwgFileHeaderWriterBase.applyMask()`.
 /// The mask is computed ONCE from `0x4164536B ^ stream_position` and applied
 /// uniformly to every 4-byte group in the buffer. Buffer length must be a
 /// multiple of 4.
@@ -80,7 +80,7 @@ pub fn apply_mask(buffer: &mut [u8], stream_position: u64) {
 
 /// Apply the 256-byte magic sequence XOR to an entire buffer.
 ///
-/// This matches `DwgFileHeaderWriterBase.applyMagicSequence()` in ACadSharp.
+/// This matches the reference `DwgFileHeaderWriterBase.applyMagicSequence()`.
 /// Used for encrypting the 0x6C-byte inner file header in AC18 format.
 pub fn apply_magic_sequence(buffer: &mut [u8]) {
     let seq = magic_sequence();

@@ -18,7 +18,7 @@
 //! [Second file header copy]
 //! ```
 //!
-//! Based on ACadSharp's `DwgFileHeaderWriterAC18`.
+//! Based on the reference `DwgFileHeaderWriterAC18`.
 
 use std::io::{Write, Seek, SeekFrom, Cursor};
 use indexmap::IndexMap;

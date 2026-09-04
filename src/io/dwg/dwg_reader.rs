@@ -1788,7 +1788,7 @@ impl<R: Read + Seek> DwgReader<R> {
         );
 
         // Note: The exact CRC-64 algorithm used by Autodesk for this field is
-        // undocumented. Neither ACadSharp nor any known open reference validates
+        // undocumented. No known open reference validates
         // this value. It is stored for informational/round-trip purposes.
 
         self.notifications.notify(

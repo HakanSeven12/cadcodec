@@ -1156,6 +1156,58 @@ pub struct SolidHistoryLoft {
     pub operation_minor: i32,
     pub cross_sections: Vec<crate::entities::EmbeddedEntity>,
     pub guides: Vec<crate::entities::EmbeddedEntity>,
+    /// Optional construction settings retained in a versioned extension record.
+    /// The native history stream remains unchanged for other consumers.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub parameters: Option<SolidHistoryLoftParameters>,
+}
+
+/// Parametric loft settings. Angles are radians; magnitudes are nonnegative.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
+pub struct SolidHistoryLoftParameters {
+    pub path_entity: Option<crate::entities::EmbeddedEntity>,
+    /// 0 ruled, 1 smooth, 2 first, 3 last, 4 ends, 5 all, 6 draft angles.
+    pub normals: i32,
+    pub start_draft_angle: f64,
+    pub end_draft_angle: f64,
+    pub start_magnitude: f64,
+    pub end_magnitude: f64,
+    /// Continuity and dimensionless bulge at point ends only.
+    pub start_continuity: i32,
+    pub end_continuity: i32,
+    pub start_bulge: f64,
+    pub end_bulge: f64,
+    pub closed: bool,
+    pub periodic: bool,
+    pub surface: bool,
+    pub align_direction: bool,
+    /// Number of embedded members in each joined cross section. Empty means
+    /// one independent section per embedded entity.
+    pub section_counts: Vec<usize>,
+}
+
+impl Default for SolidHistoryLoftParameters {
+    fn default() -> Self {
+        Self {
+            path_entity: None,
+            normals: 1,
+            start_draft_angle: std::f64::consts::FRAC_PI_2,
+            end_draft_angle: std::f64::consts::FRAC_PI_2,
+            start_magnitude: 0.0,
+            end_magnitude: 0.0,
+            start_continuity: 1,
+            end_continuity: 1,
+            start_bulge: 0.5,
+            end_bulge: 0.5,
+            closed: false,
+            periodic: true,
+            surface: false,
+            align_direction: true,
+            section_counts: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

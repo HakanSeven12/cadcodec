@@ -837,7 +837,7 @@ impl DwgFileHeaderWriterAC21 {
     ///
     /// The `target_page_size` determines the correction factor: we compute the
     /// maximum correction factor that fills the page without exceeding it.
-    /// This matches how AutoCAD/ACadSharp compute the factor (spec §5.3).
+    /// This matches how AutoCAD computes the factor (spec §5.3).
     ///
     /// Returns the encoded bytes and metadata (does NOT write to stream).
     fn encode_system_page(

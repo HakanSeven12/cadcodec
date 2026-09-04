@@ -1,7 +1,7 @@
 //! DWG Classes section reader
 //!
 //! Reads the AcDb:Classes section from a DWG file, producing a
-//! `DxfClassCollection`. Mirrors ACadSharp's `DwgClassesReader`.
+//! `DxfClassCollection`. Mirrors the reference `DwgClassesReader`.
 //!
 //! ## Section layout
 //!

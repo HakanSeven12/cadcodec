@@ -17,7 +17,7 @@
 //! DwgWriter::write_to_file("output.dwg", &doc).unwrap();
 //! ```
 //!
-//! Based on ACadSharp's `DwgWriter` class.
+//! Based on the reference `DwgWriter` class.
 
 use std::fs::File;
 use std::io::{BufWriter, Cursor, Seek, Write};
@@ -61,6 +61,9 @@ impl DwgWriter {
 
     /// Write a DWG file to any `Write + Seek` output.
     pub fn write_to_writer<W: Write + Seek>(mut output: W, document: &CadDocument) -> Result<()> {
+        let mut prepared = crate::io::loft_parameters::prepared(document);
+        prepare_surface_classes(&mut prepared);
+        let document = prepared.as_ref();
         let perf = std::env::var_os("PERF").is_some();
         let started = web_time::Instant::now();
         validate_version(document.version)?;
@@ -118,7 +121,9 @@ impl DwgWriter {
         document: &CadDocument,
     ) -> Result<()> {
         validate_version(document.version)?;
-        write_ac21_impl(&mut output, document, document.version, true)
+        let mut prepared = crate::io::loft_parameters::prepared(document);
+        prepare_surface_classes(&mut prepared);
+        write_ac21_impl(&mut output, prepared.as_ref(), document.version, true)
     }
 
     /// Write a DWG file to a byte vector (useful for testing).
@@ -126,6 +131,38 @@ impl DwgWriter {
         let mut buffer = Cursor::new(Vec::new());
         Self::write_to_writer(&mut buffer, document)?;
         Ok(buffer.into_inner())
+    }
+}
+
+/// Surface records use class numbers, not fixed object codes. Documents created
+/// from scratch or opened before a surface subtype was added may lack its class.
+/// Append only missing classes on the output copy, retaining existing class
+/// order, numbers, and metadata for every other object in the drawing.
+fn prepare_surface_classes(document: &mut std::borrow::Cow<'_, CadDocument>) {
+    use crate::entities::{EntityType, SurfaceKind};
+
+    let mut missing = Vec::new();
+    for entity in document.entities() {
+        let EntityType::Surface(surface) = entity else { continue; };
+        let name = surface.kind.dxf_name();
+        if document.classes.contains(name) || missing.iter().any(|(dxf, _)| *dxf == name) {
+            continue;
+        }
+        let cpp = match surface.kind {
+            SurfaceKind::Generic => "AcDbSurface",
+            SurfaceKind::Plane => "AcDbPlaneSurface",
+            SurfaceKind::Extruded => "AcDbExtrudedSurface",
+            SurfaceKind::Lofted => "AcDbLoftedSurface",
+            SurfaceKind::Revolved => "AcDbRevolvedSurface",
+            SurfaceKind::Swept => "AcDbSweptSurface",
+            SurfaceKind::Nurb => "AcDbNurbSurface",
+        };
+        missing.push((name, cpp));
+    }
+    if missing.is_empty() { return; }
+    let output = document.to_mut();
+    for (name, cpp) in missing {
+        output.classes.add_or_update(crate::classes::DxfClass::new_entity(name, cpp));
     }
 }
 
@@ -811,7 +848,7 @@ fn write_ac21_impl<W: Write + Seek>(
 /// Build ObjFreeSpace section data.
 ///
 /// Contains approximate object count and a fixed data template.
-/// Matches ACadSharp's `writeObjFreeSpace`.
+/// Matches the reference `writeObjFreeSpace`.
 fn build_obj_free_space(
     version: DxfVersion,
     document: &CadDocument,

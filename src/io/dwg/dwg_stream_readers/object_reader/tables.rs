@@ -5,7 +5,7 @@
 //! common data (already consumed by the caller), then the table-entry-
 //! specific fields, and return a struct with the parsed data.
 //!
-//! Based on ACadSharp's `DwgObjectReader.cs` table entry methods.
+//! Based on the reference `DwgObjectReader.cs` table entry methods.
 
 use crate::io::dwg::dwg_version::DwgVersion;
 use crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader;
@@ -1129,7 +1129,7 @@ pub fn read_dimstyle(
     };
 
     // R13/R14 only: the older DimStyle field block. Field order/types mirror
-    // the writer's r13_14_only block (matches ACadSharp). Without this the
+    // the writer's r13_14_only block (matches the reference implementation). Without this the
     // whole record was skipped, leaving DIMTAD/DIMASZ/DIMGAP at their defaults
     // (0 / 0.18 / 0.09) — so a leader that hooks its text via DIMTAD never
     // drew the underline. dimblk names are strings here (handles only R2000+).

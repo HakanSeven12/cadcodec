@@ -1,7 +1,7 @@
 //! Stub object types for DXF objects that need basic round-trip support.
 //!
-//! These are minimal representations of DXF objects that ACadSharp supports
-//! but that don't require full rich data models for typical usage.
+//! These are minimal representations of supported DXF objects
+//! that don't require full rich data models for typical usage.
 
 use crate::types::{Color, Handle, Matrix4, Vector2, Vector3};
 

@@ -79,20 +79,25 @@ impl<'a> DxfWriter<'a> {
 
     /// Write DXF content to a stream writer
     fn write_dxf<W: DxfStreamWriter>(&self, writer: &mut W) -> Result<()> {
-        let handle_start = compute_max_handle(&self.document);
-        let extra_handles = count_extra_handles(&self.document, self.document.version);
+        let prepared = crate::io::loft_parameters::prepared(self.document);
+        self.write_prepared_dxf(writer, prepared.as_ref())
+    }
+
+    fn write_prepared_dxf<W: DxfStreamWriter>(&self, writer: &mut W, document: &CadDocument) -> Result<()> {
+        let handle_start = compute_max_handle(document);
+        let extra_handles = count_extra_handles(document, document.version);
         let handle_seed = handle_start + extra_handles + 1;
         let mut section_writer = SectionWriter::new(writer, handle_start, handle_seed);
-        section_writer.set_version(self.document.version);
-        section_writer.build_valid_handles(&self.document);
+        section_writer.set_version(document.version);
+        section_writer.build_valid_handles(document);
 
         // Write all sections
-        section_writer.write_header(&self.document)?;
-        section_writer.write_classes(&self.document)?;
-        section_writer.write_tables(&self.document)?;
-        section_writer.write_blocks(&self.document)?;
-        section_writer.write_entities(&self.document)?;
-        section_writer.write_objects(&self.document)?;
+        section_writer.write_header(document)?;
+        section_writer.write_classes(document)?;
+        section_writer.write_tables(document)?;
+        section_writer.write_blocks(document)?;
+        section_writer.write_entities(document)?;
+        section_writer.write_objects(document)?;
         section_writer.write_acdsdata()?;
 
         // Write EOF

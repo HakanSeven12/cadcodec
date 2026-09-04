@@ -357,6 +357,10 @@ pub enum MTextColor {
     Index(u16),
     /// True color value as packed 24-bit integer (r << 16 | g << 8 | b)
     TrueColor(u32),
+    /// Explicit `\C256;` — use the layer color.
+    ByLayer,
+    /// Explicit `\C0;` — use the block/entity color.
+    ByBlock,
 }
 
 impl Default for MTextColor {
@@ -366,15 +370,13 @@ impl Default for MTextColor {
 }
 
 impl MTextColor {
-    /// Create from an ACI index (1–255).
+    /// Create from an ACI index (0–256).
     pub fn from_index(index: i32) -> Self {
-        if (1..=255).contains(&index) {
-            MTextColor::Index(index as u16)
-        } else if index == 0 || index == 256 {
-            // 0 = by-block, 256 = by-entity — both mean default
-            MTextColor::None
-        } else {
-            MTextColor::Index(index.unsigned_abs().min(255) as u16)
+        match index {
+            0 => MTextColor::ByBlock,
+            256 => MTextColor::ByLayer,
+            1..=255 => MTextColor::Index(index as u16),
+            _ => MTextColor::None,
         }
     }
 
@@ -428,6 +430,8 @@ impl std::fmt::Display for MTextColor {
             MTextColor::None => write!(f, "None"),
             MTextColor::Index(i) => write!(f, "Index({})", i),
             MTextColor::TrueColor(v) => write!(f, "TrueColor({})", v),
+            MTextColor::ByLayer => write!(f, "ByLayer"),
+            MTextColor::ByBlock => write!(f, "ByBlock"),
         }
     }
 }
@@ -436,7 +440,11 @@ impl std::fmt::Display for MTextColor {
 // Font
 // ============================================================================
 
-/// Font specification: font family name and optional bold/italic flags.
+/// Font specification: font family name and optional pipe-separated flags.
+///
+/// Flags the format model does not know about are kept verbatim in
+/// [`extra`](Self::extra) so parse→serialize round-trips stay faithful even
+/// for flags added by newer AutoCAD versions.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MTextFont {
@@ -448,6 +456,21 @@ pub struct MTextFont {
     pub bold: bool,
     /// Italic flag from `\f...|i1|...;`
     pub italic: bool,
+    /// Whether a `|b0`/`|b1` flag was present (explicit vs inherited).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub bold_explicit: bool,
+    /// Whether a `|i0`/`|i1` flag was present (explicit vs inherited).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub italic_explicit: bool,
+    /// Character set / code page from `|c<n>;` (e.g. `134` = GB/Chinese).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub charset: Option<u16>,
+    /// Pitch / font family from `|p<n>;` (0 = default, 1 = fixed, 2 = variable).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub pitch: Option<u8>,
+    /// Any other pipe flags (e.g. `|e<n>`) preserved verbatim.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extra: Vec<String>,
 }
 
 impl MTextFont {
@@ -456,8 +479,7 @@ impl MTextFont {
         MTextFont {
             name: name.into(),
             style: style.into(),
-            bold: false,
-            italic: false,
+            ..Default::default()
         }
     }
 
@@ -466,8 +488,7 @@ impl MTextFont {
         MTextFont {
             name: name.into(),
             style: String::new(),
-            bold: false,
-            italic: false,
+            ..Default::default()
         }
     }
 
@@ -478,6 +499,9 @@ impl MTextFont {
             style: String::new(),
             bold,
             italic,
+            bold_explicit: true,
+            italic_explicit: true,
+            ..Default::default()
         }
     }
 }
@@ -1017,6 +1041,12 @@ impl MTextDocument {
                     MTextColor::TrueColor(v) => {
                         write!(result, "{};", v).ok();
                     }
+                    MTextColor::ByLayer => {
+                        result.push_str("256;");
+                    }
+                    MTextColor::ByBlock => {
+                        result.push_str("0;");
+                    }
                     MTextColor::None => {
                         result.push_str("0;");
                     }
@@ -1033,6 +1063,12 @@ impl MTextDocument {
                     }
                     MTextColor::TrueColor(v) => {
                         write!(result, "{};", v).ok();
+                    }
+                    MTextColor::ByLayer => {
+                        result.push_str("256;");
+                    }
+                    MTextColor::ByBlock => {
+                        result.push_str("0;");
                     }
                     MTextColor::None => {
                         result.push(';');
@@ -1055,15 +1091,29 @@ impl MTextDocument {
                 if !font.name.is_empty() {
                     result.push_str("\\f");
                     result.push_str(&font.name);
-                    if font.bold {
-                        result.push_str("|b1");
+                    if font.bold_explicit {
+                        result.push_str(if font.bold { "|b1" } else { "|b0" });
                     }
-                    if font.italic {
-                        result.push_str("|i1");
+                    if font.italic_explicit {
+                        result.push_str(if font.italic { "|i1" } else { "|i0" });
+                    }
+                    if let Some(cs) = font.charset {
+                        result.push('|');
+                        result.push('c');
+                        result.push_str(&cs.to_string());
+                    }
+                    if let Some(p) = font.pitch {
+                        result.push('|');
+                        result.push('p');
+                        result.push_str(&p.to_string());
                     }
                     if !font.style.is_empty() {
                         result.push('|');
                         result.push_str(&font.style);
+                    }
+                    for flag in &font.extra {
+                        result.push('|');
+                        result.push_str(flag);
                     }
                     result.push(';');
                 }

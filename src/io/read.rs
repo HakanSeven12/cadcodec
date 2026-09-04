@@ -188,7 +188,8 @@ pub struct ReadOutcome {
 }
 
 impl ReadOutcome {
-    pub fn new(document: CadDocument, stats: ReadStats) -> Self {
+    pub fn new(mut document: CadDocument, stats: ReadStats) -> Self {
+        super::loft_parameters::restore(&mut document);
         Self { document, stats }
     }
 }

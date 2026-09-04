@@ -10,7 +10,7 @@
 //! The reader dispatches by type code to specific entity/table/object
 //! readers (implemented in sibling modules in later phases).
 //!
-//! Based on ACadSharp's `DwgObjectReader.cs`.
+//! Based on the reference `DwgObjectReader.cs`.
 
 pub mod associative;
 pub mod common;
@@ -287,7 +287,7 @@ impl DwgObjectReader {
                 let total_size_bits = temp.read_raw_long() as i64;
                 data_start_bits = temp.position_in_bits();
 
-                // Per-object RL convention (matches ACadSharp):
+                // Per-object RL convention (matches the reference implementation):
                 // RL = absolute bit position of handle stream start (from bit 0).
                 // Flag bit is at RL - 1.  Handles start at bit RL (NOT byte-aligned).
                 flag_position = total_size_bits - 1;
@@ -512,7 +512,7 @@ impl DwgObjectReader {
         // the AcDs data store (3DSOLID/REGION/BODY/SURFACE SAB blobs). Captured
         // so the AcDs blob→entity attach can honour object-stream order.
         //
-        // Read it for everything the spec covers — as ACadSharp
+        // Read it for everything the spec covers — as the reference implementation
         // (`readReactorsAndDictionaryHandle`) and LibreDWG
         // (`common_entity_data.spec`: `SINCE (R_2013) FIELD_B (has_ds_data)`)
         // both do — except MULTILEADER, which some writers omit it for.

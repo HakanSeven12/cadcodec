@@ -3,9 +3,8 @@
 //! A pure Rust library for reading and writing CAD files in **DXF** and **DWG** formats.
 //!
 //! acadrust provides comprehensive support for both file formats with a focus on
-//! correctness, type safety, and completeness.  Inspired by
-//! [ACadSharp](https://github.com/DomCR/ACadSharp), it brings full-featured CAD
-//! file manipulation to the Rust ecosystem.
+//! correctness, type safety, and completeness — full-featured CAD file
+//! manipulation for the Rust ecosystem.
 //!
 //! ## Highlights
 //!
@@ -27,7 +26,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! acadrust = { version = "0.5.3", features = ["serde"] }
+//! acadrust = { version = "0.5.4", features = ["serde"] }
 //! ```
 //!
 //! ### Serialize an entity to JSON

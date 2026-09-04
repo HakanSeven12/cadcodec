@@ -23,7 +23,7 @@
 //! - **Handle delta**: unsigned modular short (7-bit continuation, MSB flag)
 //! - **Offset delta**: signed modular short (7-bit continuation, bit 6 = sign on last byte)
 //!
-//! Based on ACadSharp's `DwgHandleWriter`.
+//! Based on the reference `DwgHandleWriter`.
 
 use crate::io::dwg::crc::{crc16, CRC16_SEED};
 

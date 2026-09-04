@@ -1,6 +1,6 @@
 //! Parse notification / diagnostic system.
 //!
-//! Mirrors ACadSharp's `NotificationEventHandler` pattern.  Non-fatal issues
+//! Mirrors the classic `NotificationEventHandler` pattern.  Non-fatal issues
 //! encountered during reading (or writing) are collected as `Notification`
 //! items rather than being silently dropped or causing hard errors.
 //!

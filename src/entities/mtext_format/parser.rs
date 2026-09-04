@@ -621,16 +621,17 @@ impl MTextParser {
         self.current_props_mut().second_color = None;
         self.current_props_mut().color_rgb = None;
 
-        // Read color1. ACI runs 0..=256 (0 ByBlock, 256 ByLayer both mean
-        // "inherit" here); an out-of-range value is invalid and ignored.
+        // Read color1. ACI runs 0..=256 where 0 = ByBlock and 256 = ByLayer
+        // (both are explicit inheritance overrides, distinct from "no code");
+        // an out-of-range value is invalid and ignored.
         if let Some(c1) = self.parse_numeric_semicolon_value() {
-            if c1 != 0 && c1 != 256 && c1 <= 256 {
+            if (0..=256).contains(&c1) {
                 self.current_props_mut().color = Some(MTextColor::from_index(c1));
             }
 
             // Read color2 (ending color for gradient)
             if let Some(c2) = self.parse_numeric_semicolon_value() {
-                if c2 != 0 && c2 != 256 && c2 <= 256 {
+                if (0..=256).contains(&c2) {
                     self.current_props_mut().second_color = Some(MTextColor::from_index(c2));
                 }
             }
@@ -652,7 +653,11 @@ impl MTextParser {
         }
     }
 
-    /// Parse font with pipe flags: \f{name}|b0/b1|i0/i1|...;
+    /// Parse font with pipe flags: \f{name}|b0/b1|i0/i1|c<n>|p<n>|...;
+    ///
+    /// Flags the model knows (`b`, `i`, `c` = charset, `p` = pitch) map onto
+    /// typed fields; everything else is preserved verbatim in
+    /// [`MTextFont::extra`] so a later serialize restores the exact spec.
     fn parse_font_pipe(&mut self) {
         let spec = self.parse_semicolon_value();
         let parts: Vec<&str> = spec.split([',', '|']).collect();
@@ -663,26 +668,69 @@ impl MTextParser {
         }
 
         let mut bold = false;
+        let mut bold_explicit = false;
         let mut italic = false;
+        let mut italic_explicit = false;
+        let mut charset = None;
+        let mut pitch = None;
+        let mut extra = Vec::new();
 
         for part in parts.iter().skip(1) {
             let part = part.trim();
-            if part == "b1" {
-                bold = true;
-            } else if part == "i1" {
-                // Only single char 'i' + digit is italic
-                if part.len() == 2
-                    && part
-                        .as_bytes()
-                        .get(1)
-                        .map_or(false, |&b| b.is_ascii_digit())
-                {
+            match part {
+                "b0" => {
+                    bold = false;
+                    bold_explicit = true;
+                }
+                "b1" => {
+                    bold = true;
+                    bold_explicit = true;
+                }
+                "i0" => {
+                    italic = false;
+                    italic_explicit = true;
+                }
+                "i1" => {
                     italic = true;
+                    italic_explicit = true;
+                }
+                "" => {}
+                other => {
+                    let parsed = match (other.strip_prefix('c'), other.strip_prefix('p')) {
+                        (Some(value), _) => value
+                            .trim()
+                            .parse::<u16>()
+                            .ok()
+                            .map(|v| {
+                                charset = Some(v);
+                            }),
+                        (_, Some(value)) => value
+                            .trim()
+                            .parse::<u8>()
+                            .ok()
+                            .map(|v| {
+                                pitch = Some(v);
+                            }),
+                        _ => None,
+                    };
+                    if parsed.is_none() {
+                        extra.push(other.to_string());
+                    }
                 }
             }
         }
 
-        self.current_props_mut().font = Some(MTextFont::with_flags(name, bold, italic));
+        self.current_props_mut().font = Some(MTextFont {
+            name: name.to_string(),
+            bold,
+            italic,
+            bold_explicit,
+            italic_explicit,
+            charset,
+            pitch,
+            extra,
+            ..Default::default()
+        });
     }
 
     /// Parse font by SHX name: \FN{name}.shx;
@@ -1161,8 +1209,64 @@ mod tests {
             Some(MTextColor::Index(1))
         );
         assert_eq!(doc.paragraphs[0].spans[1].text, " normal");
-        // After \C0;; the color is reset to None (by-block/default)
-        assert!(doc.paragraphs[0].spans[1].properties.color.is_none());
+        // \C0; is ACI 0 = ByBlock — an explicit inheritance override, not a
+        // bare "unspecified" color.
+        assert_eq!(
+            doc.paragraphs[0].spans[1].properties.color,
+            Some(MTextColor::ByBlock)
+        );
+    }
+
+    #[test]
+    fn test_parse_color_bylayer_byblock() {
+        // \C256; = ByLayer (use the layer color), \C0; = ByBlock. Both must
+        // stay distinguishable from "no color code" (None) — issue #56.
+        let doc = parse_mtext(r"{\C256;White layer text}", false);
+        assert_eq!(
+            doc.paragraphs[0].spans[0].properties.color,
+            Some(MTextColor::ByLayer)
+        );
+
+        let doc = parse_mtext(r"{\C0;By block text}", false);
+        assert_eq!(
+            doc.paragraphs[0].spans[0].properties.color,
+            Some(MTextColor::ByBlock)
+        );
+    }
+
+    #[test]
+    fn test_parse_color_bylayer_roundtrip() {
+        // \C256; must survive a parse→serialize round-trip so the text keeps
+        // resolving to the layer color (issue #56).
+        let input = r"\fSimSun|b1|i0|c134|p2;\C256;副斜井1820";
+        let doc = parse_mtext(input, false);
+        let out = doc.to_mtext_string();
+        assert!(out.contains("\\C256;"), "ByLayer override dropped: {out}");
+        assert!(out.contains("SimSun|b1|i0|c134|p2"), "font flags dropped: {out}");
+
+        let rt = parse_mtext(&out, false);
+        assert_eq!(rt.to_mtext_string(), out, "round-trip unstable");
+        assert_eq!(
+            rt.paragraphs[0].spans[0].properties.color,
+            Some(MTextColor::ByLayer)
+        );
+    }
+
+    #[test]
+    fn test_parse_font_pipe_flags_preserved() {
+        // Charset (c), pitch (p) and unknown flags survive round-trips
+        // verbatim; explicit italic-off is preserved too.
+        let doc = parse_mtext(r"{\fArial|b0|i0|c238|p2|e1|ş|字体|🙂|c悪|p悪;Text}", false);
+        let font = doc.paragraphs[0].spans[0].properties.font.as_ref().unwrap();
+        assert!(!font.bold && font.bold_explicit);
+        assert!(!font.italic && font.italic_explicit);
+        assert_eq!(font.charset, Some(238));
+        assert_eq!(font.pitch, Some(2));
+        assert_eq!(font.extra, vec!["e1", "ş", "字体", "🙂", "c悪", "p悪"]);
+
+        let out = doc.to_mtext_string();
+        assert!(out.contains("Arial|b0|i0|c238|p2|e1|ş|字体|🙂|c悪|p悪"), "flags lost: {out}");
+        assert_eq!(parse_mtext(&out, false).to_mtext_string(), out);
     }
 
     #[test]
