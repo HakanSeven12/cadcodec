@@ -11,6 +11,8 @@
 pub mod dxf;
 pub mod dwg;
 pub mod read;
+mod loft_parameters;
+mod loft_surface_curves;
 
 #[cfg(feature = "import")]
 pub mod import;

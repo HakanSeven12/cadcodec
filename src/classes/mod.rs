@@ -420,6 +420,9 @@ fn default_classes() -> Vec<DxfClass> {
             true,
         ),
 
+        // Native loft sheets must retain their subtype in DWG class streams.
+        ("LOFTEDSURFACE", "AcDbLoftedSurface", 0, "ObjectDBX Classes", true),
+
         // ── Object classes ──────────────────────────────────────────
         ("ACDBASSOCDEPENDENCY", "AcDbAssocDependency", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCVALUEDEPENDENCY", "AcDbAssocValueDependency", 0, "ObjectDBX Classes", false),

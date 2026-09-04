@@ -536,6 +536,7 @@ pub fn read_solid_history_data(
                 operation_minor,
                 cross_sections,
                 guides,
+                parameters: None,
             })
         }
         "ACSH_REVOLVE_CLASS" => {

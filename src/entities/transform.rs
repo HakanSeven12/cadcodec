@@ -963,7 +963,20 @@ pub(crate) fn transform_body(e: &mut Body, transform: &Transform) {
     }
 }
 
+/// Keep embedded loft curves in their local frame while moving their placement.
+pub(crate) fn transform_loft_placement(e: &mut crate::entities::Surface, transform: &Transform) {
+    if let crate::entities::SurfaceData::Lofted { loft_transform, .. } = &mut e.surface_data {
+        let previous = *loft_transform;
+        *loft_transform = std::array::from_fn(|index| {
+            let row = index % 4;
+            let column = index / 4;
+            (0..4).map(|inner| transform.matrix.m[row][inner] * previous[column * 4 + inner]).sum()
+        });
+    }
+}
+
 pub(crate) fn transform_surface(e: &mut crate::entities::Surface, transform: &Transform) {
+    transform_loft_placement(e, transform);
     e.point_of_reference = transform.apply(e.point_of_reference);
     compose_acis_placement(&mut e.acis_data, transform);
     for wire in &mut e.wires {

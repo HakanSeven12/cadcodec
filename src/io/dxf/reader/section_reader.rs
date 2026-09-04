@@ -54,6 +54,41 @@ fn append_hex_bytes(target: &mut Vec<u8>, value: &str) {
     }
 }
 
+fn loft_reference_xdata(
+    data: &ExtendedData,
+) -> Option<(Vec<Handle>, Vec<Handle>, Option<Handle>)> {
+    let record = data.get_record("CADCODEC_LOFT_REFERENCES")?;
+    let mut values = record.values.iter();
+    if values.next() != Some(&XDataValue::Integer16(1)) {
+        return None;
+    }
+    let mut counts = [0usize; 3];
+    for count in &mut counts {
+        let XDataValue::Integer32(value) = values.next()? else {
+            return None;
+        };
+        *count = usize::try_from(*value).ok()?;
+    }
+    if counts[2] > 1
+        || counts.iter().try_fold(0usize, |sum, count| sum.checked_add(*count))?
+            != values.len()
+    {
+        return None;
+    }
+    let handles: Vec<Handle> = values
+        .map(|value| match value {
+            XDataValue::Handle(handle) => Some(*handle),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let guide_end = counts[0] + counts[1];
+    Some((
+        handles[..counts[0]].to_vec(),
+        handles[counts[0]..guide_end].to_vec(),
+        handles.get(guide_end).copied(),
+    ))
+}
+
 fn semantic_property_from_pair(
     subclass: &str,
     pair: &super::stream_reader::DxfCodePair,
@@ -2763,10 +2798,10 @@ impl<'a> SectionReader<'a> {
                 let cross_sizes = fields.values(section, 94);
                 let mut cross_sections = Vec::with_capacity(cross_types.len());
                 for (index, type_value) in cross_types.iter().enumerate() {
-                    let entity_type = type_value.parse().unwrap_or(0);
+                    let entity_type = type_value.trim().parse().unwrap_or(0);
                     let bit_length = cross_sizes
                         .get(index)
-                        .and_then(|value| value.parse().ok())
+                        .and_then(|value| value.trim().parse().ok())
                         .unwrap_or(0);
                     if let Some(entity) = decode_list(entity_type, bit_length) {
                         cross_sections.push(entity);
@@ -2776,10 +2811,10 @@ impl<'a> SectionReader<'a> {
                 let guide_sizes = fields.values(section, 97);
                 let mut guides = Vec::with_capacity(guide_types.len());
                 for (index, type_value) in guide_types.iter().enumerate() {
-                    let entity_type = type_value.parse().unwrap_or(0);
+                    let entity_type = type_value.trim().parse().unwrap_or(0);
                     let bit_length = guide_sizes
                         .get(index)
-                        .and_then(|value| value.parse().ok())
+                        .and_then(|value| value.trim().parse().ok())
                         .unwrap_or(0);
                     if let Some(entity) = decode_list(entity_type, bit_length) {
                         guides.push(entity);
@@ -2792,6 +2827,7 @@ impl<'a> SectionReader<'a> {
                         operation_minor: fields.i32(section, 91),
                         cross_sections,
                         guides,
+                        ..Default::default()
                     }),
                 )
             }
@@ -14152,7 +14188,7 @@ impl<'a> SectionReader<'a> {
                 // Database handle
                 1005 => {
                     if let Some(ref mut record) = current_record {
-                        if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
+                        if let Ok(h) = u64::from_str_radix(pair.value_string.trim(), 16) {
                             record.add_value(XDataValue::Handle(Handle::new(h)));
                         }
                     }
@@ -15578,6 +15614,11 @@ impl<'a> SectionReader<'a> {
         let mut sweep_entity_bits = 0usize;
         let mut path_entity_type = 0i32;
         let mut path_entity_bits = 0usize;
+        // Native loft input records use 90/91/92 for section/guide/path
+        // entity types, then 90 for bit length and 310 for body chunks.
+        let mut loft_entities: Vec<(i32, i32, usize, Vec<u8>)> = Vec::new();
+        let mut loft_expecting_length = false;
+        let mut loft_options_seen = false;
         let mut proxy_graphics_size = 0usize;
         let mut proxy_graphics = Vec::new();
         let swept_has_class_version =
@@ -15724,7 +15765,28 @@ impl<'a> SectionReader<'a> {
                     ..
                 } => match pair.code {
                     40 => matrix.push(pair.as_double().unwrap_or(0.0)),
+                    90 if loft_expecting_length => {
+                        if let Some((_, _, bits, _)) = loft_entities.last_mut() {
+                            *bits = pair.as_i32().unwrap_or(0).max(0) as usize;
+                        }
+                        loft_expecting_length = false;
+                    }
+                    90..=92 if !loft_options_seen => {
+                        loft_entities.push((
+                            pair.code,
+                            pair.as_i32().unwrap_or(0),
+                            0,
+                            Vec::new(),
+                        ));
+                        loft_expecting_length = true;
+                    }
+                    310 if !loft_options_seen => {
+                        if let Some((_, _, _, bytes)) = loft_entities.last_mut() {
+                            append_hex_bytes(bytes, &pair.value_string);
+                        }
+                    }
                     70 => {
+                        loft_options_seen = true;
                         *plane_normal_lofting_type =
                             pair.as_i32().unwrap_or(0)
                     }
@@ -15741,6 +15803,9 @@ impl<'a> SectionReader<'a> {
                     296 => *ruled_surface = pair.as_i16().unwrap_or(0) != 0,
                     297 => *virtual_guide = pair.as_i16().unwrap_or(0) != 0,
                     310 => {
+                        // Older codec output put ungrouped handles after the
+                        // options. Preserve them, but never interpret native
+                        // embedded-entity chunks as database references.
                         let handle = parse_dxf_handle(&pair.value_string);
                         if path_curve.is_none() {
                             cross_sections.push(handle);
@@ -15929,8 +15994,48 @@ impl<'a> SectionReader<'a> {
                 fill_matrix(&mut options.sweep_entity_transform, &option_sweep_matrix);
                 fill_matrix(&mut options.path_entity_transform, &option_path_matrix);
             }
-            SurfaceData::Lofted { loft_transform, .. } => {
+            SurfaceData::Lofted {
+                loft_transform,
+                cross_section_entities,
+                guide_entities,
+                path_entity,
+                cross_sections,
+                guide_curves,
+                path_curve,
+                ..
+            } => {
                 fill_matrix(loft_transform, &matrix);
+                let dwg_version =
+                    crate::io::dwg::DwgVersion::from_dxf_version(dxf_version)
+                        .unwrap_or(crate::io::dwg::DwgVersion::AC24);
+                for (group, entity_type, bit_length, bytes) in loft_entities {
+                    if bytes.len() < bit_length.div_ceil(8) {
+                        continue;
+                    }
+                    if let Some(entity) =
+                        crate::io::dwg::embedded_entity::decode_embedded_entity(
+                            entity_type,
+                            bit_length,
+                            bytes,
+                            dwg_version,
+                            dxf_version,
+                        )
+                    {
+                        match group {
+                            90 => cross_section_entities.push(entity),
+                            91 => guide_entities.push(entity),
+                            92 => *path_entity = Some(entity),
+                            _ => {}
+                        }
+                    }
+                }
+                if let Some((sections, guides, path)) =
+                    loft_reference_xdata(&surface.common.extended_data)
+                {
+                    *cross_sections = sections;
+                    *guide_curves = guides;
+                    *path_curve = path;
+                }
             }
             SurfaceData::Revolved {
                 revolve_entity,

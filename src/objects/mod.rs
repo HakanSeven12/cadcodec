@@ -71,7 +71,7 @@ pub use dynamic_block::{
     BlockTwoPointParameter, BlockUserParameter, BlockXYParameter, DynamicBlockData,
     DynamicBlockObject, SolidHistory, SolidHistoryBoolean, SolidHistoryBox, SolidHistoryBrep,
     SolidHistoryChamfer, SolidHistoryCone, SolidHistoryCylinder, SolidHistoryFillet, SolidHistoryLoft,
-    SolidHistoryNodeBase, SolidHistoryOperation, SolidHistoryPyramid, SolidHistoryRevolve,
+    SolidHistoryLoftParameters, SolidHistoryNodeBase, SolidHistoryOperation, SolidHistoryPyramid, SolidHistoryRevolve,
     SolidHistorySphere, SolidHistorySweep, SolidHistoryTorus,
 };
 pub use field::{Field, FieldChildValue, FieldList};

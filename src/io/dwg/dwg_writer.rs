@@ -61,6 +61,8 @@ impl DwgWriter {
 
     /// Write a DWG file to any `Write + Seek` output.
     pub fn write_to_writer<W: Write + Seek>(mut output: W, document: &CadDocument) -> Result<()> {
+        let prepared = crate::io::loft_parameters::prepared(document);
+        let document = prepared.as_ref();
         let perf = std::env::var_os("PERF").is_some();
         let started = web_time::Instant::now();
         validate_version(document.version)?;
@@ -118,7 +120,8 @@ impl DwgWriter {
         document: &CadDocument,
     ) -> Result<()> {
         validate_version(document.version)?;
-        write_ac21_impl(&mut output, document, document.version, true)
+        let prepared = crate::io::loft_parameters::prepared(document);
+        write_ac21_impl(&mut output, prepared.as_ref(), document.version, true)
     }
 
     /// Write a DWG file to a byte vector (useful for testing).

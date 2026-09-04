@@ -22,7 +22,7 @@ use crate::objects::{
 };
 use crate::tables::*;
 use crate::types::{Color, DxfVersion, Handle, LineWeight, Vector3};
-use crate::xdata::{ExtendedData, XDataValue};
+use crate::xdata::{ExtendedData, ExtendedDataRecord, XDataValue};
 
 use std::collections::{HashMap, HashSet};
 use super::stream_writer::{DxfStreamWriter, DxfStreamWriterExt};
@@ -104,6 +104,10 @@ pub struct SectionWriter<'a, W: DxfStreamWriter> {
     text_style_names: HashMap<Handle, String>,
     /// Block-record names needed by legacy TABLE INSERT data.
     block_record_names: HashMap<Handle, String>,
+    /// Typed inputs for loft surfaces whose native data contains references.
+    loft_input_entities: HashMap<Handle, EmbeddedEntity>,
+    /// Extra registration required by the loft-reference XDATA extension.
+    loft_reference_appid: Option<Handle>,
 }
 
 impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
@@ -124,6 +128,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             normal_plotstyle_handle: Handle::NULL,
             text_style_names: HashMap::new(),
             block_record_names: HashMap::new(),
+            loft_input_entities: HashMap::new(),
+            loft_reference_appid: None,
         }
     }
 
@@ -183,6 +189,45 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 for attribute in &insert.attributes {
                     set.insert(attribute.common.handle);
                 }
+            }
+        }
+        self.loft_input_entities.clear();
+        for entity in &document.entities {
+            let EntityType::Surface(Surface {
+                surface_data: SurfaceData::Lofted {
+                    cross_sections, guide_curves, path_curve, ..
+                }, ..
+            }) = entity.as_ref() else {
+                continue;
+            };
+            let handles = cross_sections.iter().chain(guide_curves).chain(path_curve.iter());
+            if handles.clone().next().is_some()
+                && document.app_ids.get("CADCODEC_LOFT_REFERENCES").is_none()
+                && self.loft_reference_appid.is_none()
+            {
+                let handle = self.allocate_handle();
+                self.loft_reference_appid = Some(handle);
+                self.handle_seed += 1;
+                set.insert(handle);
+            }
+            for handle in handles {
+                let Some(entity) = document.get_entity(*handle) else {
+                    continue;
+                };
+                let embedded = match entity {
+                    EntityType::Point(value) => EmbeddedEntity::Point(value.clone()),
+                    EntityType::Line(value) => EmbeddedEntity::Line(value.clone()),
+                    EntityType::Arc(value) => EmbeddedEntity::Arc(value.clone()),
+                    EntityType::Circle(value) => EmbeddedEntity::Circle(value.clone()),
+                    EntityType::Ellipse(value) => EmbeddedEntity::Ellipse(value.clone()),
+                    EntityType::Spline(value) => EmbeddedEntity::Spline(value.clone()),
+                    EntityType::LwPolyline(value) => EmbeddedEntity::LwPolyline(value.clone()),
+                    EntityType::Region(value) => EmbeddedEntity::Region(value.clone()),
+                    EntityType::Ray(value) => EmbeddedEntity::Ray(value.clone()),
+                    EntityType::XLine(value) => EmbeddedEntity::XLine(value.clone()),
+                    _ => continue,
+                };
+                self.loft_input_entities.insert(*handle, embedded);
             }
         }
         // Table record handles
@@ -1072,7 +1117,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     /// Write APPID table
     fn write_appid_table(&mut self, document: &CadDocument) -> Result<()> {
         let table_handle = document.app_ids.handle();
-        self.write_table_header("APPID", document.app_ids.len(), table_handle, document)?;
+        self.write_table_header(
+            "APPID",
+            document.app_ids.len() + usize::from(self.loft_reference_appid.is_some()),
+            table_handle,
+            document,
+        )?;
 
         // The ACAD RegApp record must be the table's first entry: CAD
         // applications map XDATA applications by table index and require
@@ -1091,6 +1141,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 continue;
             }
             self.write_appid_entry(appid, table_handle, document)?;
+        }
+        if let Some(handle) = self.loft_reference_appid {
+            let mut appid = AppId::new("CADCODEC_LOFT_REFERENCES");
+            appid.handle = handle;
+            self.write_appid_entry(&appid, table_handle, document)?;
         }
 
         self.write_table_end()?;
@@ -1528,7 +1583,33 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 | EntityType::AttributeEntity(_)
                 | EntityType::Unknown(_)
         ) {
-            self.write_xdata(&entity.common().extended_data)?;
+            if let EntityType::Surface(Surface {
+                surface_data: SurfaceData::Lofted {
+                    cross_sections, guide_curves, path_curve, ..
+                }, ..
+            }) = entity
+            {
+                let mut data = entity.common().extended_data.clone();
+                data.remove_record("CADCODEC_LOFT_REFERENCES");
+                if !cross_sections.is_empty() || !guide_curves.is_empty() || path_curve.is_some() {
+                    // Database references are separate from native embedded
+                    // curve bodies. Keep their roles in registered XDATA,
+                    // using real handle values so insert/clone remapping works.
+                    let mut record = ExtendedDataRecord::new("CADCODEC_LOFT_REFERENCES");
+                    record.values = vec![
+                        XDataValue::Integer16(1),
+                        XDataValue::Integer32(cross_sections.len() as i32),
+                        XDataValue::Integer32(guide_curves.len() as i32),
+                        XDataValue::Integer32(i32::from(path_curve.is_some())),
+                    ];
+                    record.values.extend(cross_sections.iter().chain(guide_curves)
+                        .chain(path_curve.iter()).copied().map(XDataValue::Handle));
+                    data.add_record(record);
+                }
+                self.write_xdata(&data)?;
+            } else {
+                self.write_xdata(&entity.common().extended_data)?;
+            }
         }
         Ok(())
     }
@@ -9532,7 +9613,20 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 let dwg_version =
                     crate::io::dwg::DwgVersion::from_dxf_version(self.dxf_version)
                         .unwrap_or(crate::io::dwg::DwgVersion::AC24);
-                for entity in cross_section_entities {
+                let resolve_inputs = |embedded: &[EmbeddedEntity], handles: &[Handle]| {
+                    if embedded.is_empty() {
+                        handles.iter().map(|handle| self.loft_input_entities.get(handle).cloned())
+                            .collect::<Option<Vec<_>>>().unwrap_or_default()
+                    } else {
+                        embedded.to_vec()
+                    }
+                };
+                let section_entities = resolve_inputs(cross_section_entities, cross_sections);
+                let guide_entities = resolve_inputs(guide_entities, guide_curves);
+                let path_entity = path_entity.clone().or_else(|| {
+                    path_curve.and_then(|handle| self.loft_input_entities.get(&handle).cloned())
+                });
+                for entity in &section_entities {
                     let encoded =
                         crate::io::dwg::embedded_entity::encode_embedded_entity(
                             entity,
@@ -9541,40 +9635,40 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                         );
                     self.writer.write_i32(90, encoded.type_code)?;
                     self.writer
-                        .write_i32(90, (encoded.bytes.len() * 8) as i32)?;
+                        .write_i32(90, encoded.bit_length as i32)?;
                     for chunk in encoded.bytes.chunks(127) {
                         self.writer.write_binary(310, chunk)?;
                     }
                 }
-                for entity in guide_entities {
+                for entity in &guide_entities {
                     let encoded =
                         crate::io::dwg::embedded_entity::encode_embedded_entity(
                             entity,
                             dwg_version,
                             self.dxf_version,
                         );
-                    self.writer.write_i32(90, encoded.type_code)?;
+                    self.writer.write_i32(91, encoded.type_code)?;
                     self.writer
-                        .write_i32(90, (encoded.bytes.len() * 8) as i32)?;
+                        .write_i32(90, encoded.bit_length as i32)?;
                     for chunk in encoded.bytes.chunks(127) {
                         self.writer.write_binary(310, chunk)?;
                     }
                 }
-                if let Some(entity) = path_entity {
+                if let Some(entity) = &path_entity {
                     let encoded =
                         crate::io::dwg::embedded_entity::encode_embedded_entity(
                             entity,
                             dwg_version,
                             self.dxf_version,
                         );
-                    self.writer.write_i32(90, encoded.type_code)?;
+                    self.writer.write_i32(92, encoded.type_code)?;
                     self.writer
-                        .write_i32(90, (encoded.bytes.len() * 8) as i32)?;
+                        .write_i32(90, encoded.bit_length as i32)?;
                     for chunk in encoded.bytes.chunks(127) {
                         self.writer.write_binary(310, chunk)?;
                     }
                 }
-                self.writer.write_i32(70, *plane_normal_lofting_type)?;
+                self.writer.write_i16(70, *plane_normal_lofting_type as i16)?;
                 self.writer.write_double(41, *start_draft_angle)?;
                 self.writer.write_double(42, *end_draft_angle)?;
                 self.writer.write_double(43, *start_draft_magnitude)?;
@@ -9587,15 +9681,6 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_bool(295, *solid)?;
                 self.writer.write_bool(296, *ruled_surface)?;
                 self.writer.write_bool(297, *virtual_guide)?;
-                for handle in cross_sections {
-                    self.writer.write_handle(310, *handle)?;
-                }
-                for handle in guide_curves {
-                    self.writer.write_handle(310, *handle)?;
-                }
-                if let Some(handle) = path_curve {
-                    self.writer.write_handle(350, *handle)?;
-                }
             }
             SurfaceData::Revolved {
                 revolve_entity,
