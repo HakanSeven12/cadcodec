@@ -542,7 +542,7 @@ pub fn read_solid_history_data(
             let operation_major = reader.read_bit_long();
             let operation_minor = reader.read_bit_long();
             let axis_point = reader.read_3bit_double();
-            let direction = reader.read_2raw_double();
+            let direction = reader.read_3raw_double();
             let revolve_angle = reader.read_bit_double();
             let start_angle = reader.read_bit_double();
             let draft_angle = reader.read_bit_double();

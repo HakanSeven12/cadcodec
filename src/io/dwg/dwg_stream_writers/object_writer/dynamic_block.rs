@@ -400,7 +400,7 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_bit_long(value.operation_major);
                 self.writer.write_bit_long(value.operation_minor);
                 self.writer.write_3bit_double(value.axis_point);
-                self.writer.write_2raw_double(value.direction);
+                self.writer.write_3raw_double(value.direction);
                 self.writer.write_bit_double(value.revolve_angle);
                 self.writer.write_bit_double(value.start_angle);
                 self.writer.write_bit_double(value.draft_angle);

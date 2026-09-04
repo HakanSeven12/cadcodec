@@ -2458,9 +2458,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_i32(90, value.operation_major)?;
                 self.writer.write_i32(91, value.operation_minor)?;
                 self.writer.write_point3d(10, value.axis_point)?;
-                self.writer.write_double(11, value.direction.x)?;
-                self.writer.write_double(21, value.direction.y)?;
-                self.writer.write_double(31, 0.0)?;
+                self.writer.write_point3d(11, value.direction)?;
                 self.writer.write_double(40, value.revolve_angle)?;
                 self.writer.write_double(41, value.start_angle)?;
                 self.writer.write_double(43, value.draft_angle)?;
