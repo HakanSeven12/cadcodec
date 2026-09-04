@@ -15727,19 +15727,19 @@ impl<'a> SectionReader<'a> {
                     49 => options.align_angle = pair.as_double().unwrap_or(0.0),
                     46 => option_sweep_matrix.push(pair.as_double().unwrap_or(0.0)),
                     47 => option_path_matrix.push(pair.as_double().unwrap_or(0.0)),
-                    290 => options.is_solid = pair.as_i16().unwrap_or(0) != 0,
+                    290 => options.is_solid = pair.as_bool().unwrap_or(false),
                     70 => options.sweep_alignment_flags = pair.as_i16().unwrap_or(0),
                     71 => options.path_flags = pair.as_i16().unwrap_or(0),
-                    292 => options.align_start = pair.as_i16().unwrap_or(0) != 0,
-                    293 => options.bank = pair.as_i16().unwrap_or(0) != 0,
-                    294 => options.base_point_set = pair.as_i16().unwrap_or(0) != 0,
+                    292 => options.align_start = pair.as_bool().unwrap_or(false),
+                    293 => options.bank = pair.as_bool().unwrap_or(false),
+                    294 => options.base_point_set = pair.as_bool().unwrap_or(false),
                     295 => {
                         options.sweep_entity_transform_computed =
-                            pair.as_i16().unwrap_or(0) != 0
+                            pair.as_bool().unwrap_or(false)
                     }
                     296 => {
                         options.path_entity_transform_computed =
-                            pair.as_i16().unwrap_or(0) != 0
+                            pair.as_bool().unwrap_or(false)
                     }
                     _ => {
                         self.try_read_common_entity_code(&pair, &mut surface.common)?;
@@ -15914,16 +15914,16 @@ impl<'a> SectionReader<'a> {
                     49 => options.align_angle = pair.as_double().unwrap_or(0.0),
                     46 => option_sweep_matrix.push(pair.as_double().unwrap_or(0.0)),
                     47 => option_path_matrix.push(pair.as_double().unwrap_or(0.0)),
-                    290 => options.is_solid = pair.as_i16().unwrap_or(0) != 0,
+                    290 => options.is_solid = pair.as_bool().unwrap_or(false),
                     70 => options.sweep_alignment_flags = pair.as_i16().unwrap_or(0),
                     71 => options.path_flags = pair.as_i16().unwrap_or(0),
-                    292 => options.align_start = pair.as_i16().unwrap_or(0) != 0,
-                    293 => options.bank = pair.as_i16().unwrap_or(0) != 0,
-                    294 => options.base_point_set = pair.as_i16().unwrap_or(0) != 0,
+                    292 => options.align_start = pair.as_bool().unwrap_or(false),
+                    293 => options.bank = pair.as_bool().unwrap_or(false),
+                    294 => options.base_point_set = pair.as_bool().unwrap_or(false),
                     295 => options.sweep_entity_transform_computed =
-                        pair.as_i16().unwrap_or(0) != 0,
+                        pair.as_bool().unwrap_or(false),
                     296 => options.path_entity_transform_computed =
-                        pair.as_i16().unwrap_or(0) != 0,
+                        pair.as_bool().unwrap_or(false),
                     _ => {
                         self.try_read_common_entity_code(&pair, &mut surface.common)?;
                     }
