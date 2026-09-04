@@ -13,6 +13,7 @@ pub mod dwg;
 pub mod read;
 mod loft_parameters;
 mod loft_surface_curves;
+mod surface_history;
 
 #[cfg(feature = "import")]
 pub mod import;

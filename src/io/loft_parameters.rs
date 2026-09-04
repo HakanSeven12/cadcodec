@@ -196,7 +196,8 @@ pub(crate) fn prepared(document: &CadDocument) -> Cow<'_, CadDocument> {
         (loft.parameters.is_some() || has_record(document, object.xdictionary_handle, KEY))
             .then(|| (*handle, loft.parameters.clone()))
     }).collect::<Vec<_>>();
-    if settings.is_empty() && !super::loft_surface_curves::has_inputs(document) { return Cow::Borrowed(document); }
+    if settings.is_empty() && !super::loft_surface_curves::has_inputs(document)
+        && !super::surface_history::has_references(document) { return Cow::Borrowed(document); }
     let mut output = document.clone();
     for (node, settings) in settings {
         let previous = match output.objects.get(&node) {
@@ -230,11 +231,13 @@ pub(crate) fn prepared(document: &CadDocument) -> Cow<'_, CadDocument> {
         output.objects.insert(dictionary.handle, ObjectType::Dictionary(dictionary));
     }
     super::loft_surface_curves::store(&mut output);
+    super::surface_history::store(&mut output);
     Cow::Owned(output)
 }
 
 pub(crate) fn restore(document: &mut CadDocument) {
     super::loft_surface_curves::restore(document);
+    super::surface_history::restore(document);
     let restored = document.objects.iter().filter_map(|(handle, object)| {
         let ObjectType::DynamicBlock(object) = object else { return None; };
         if !matches!(object.data, DynamicBlockData::SolidHistoryNode(SolidHistoryOperation::Loft(_))) {
