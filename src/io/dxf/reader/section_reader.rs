@@ -934,7 +934,7 @@ fn dynamic_dxf_eval(fields: &DynamicDxfFields) -> BlockEvalExpression {
         node_id: fields
             .values(section, 90)
             .first()
-            .and_then(|value| value.parse().ok())
+            .and_then(|value| value.trim().parse().ok())
             .unwrap_or(0),
     }
 }
@@ -1136,7 +1136,7 @@ fn dynamic_dxf_history_base(fields: &DynamicDxfFields) -> SolidHistoryNodeBase {
     let section = "AcDbShHistoryNode";
     let mut transform = [0.0; 16];
     for (target, source) in transform.iter_mut().zip(fields.values(section, 40)) {
-        *target = source.parse().unwrap_or(0.0);
+        *target = source.trim().parse().unwrap_or(0.0);
     }
     let color = if fields.values(section, 420).is_empty() {
         Color::from_index(fields.i16(section, 62))
@@ -1165,51 +1165,62 @@ fn dynamic_dxf_history_sweep(
         .iter_mut()
         .zip(fields.values(section, 46))
     {
-        *target = source.parse().unwrap_or(0.0);
+        *target = source.trim().parse().unwrap_or(0.0);
     }
     for (target, source) in path_entity_transform
         .iter_mut()
         .zip(fields.values(section, 47))
     {
-        *target = source.parse().unwrap_or(0.0);
+        *target = source.trim().parse().unwrap_or(0.0);
     }
-    let mut binary = Vec::new();
-    for value in fields.values(section, 310) {
-        append_hex_bytes(&mut binary, value);
+    // Group 90 is reused for the operation version and both embedded body
+    // sizes. Keep the profile/path boundaries explicit, including absent
+    // entities, and accept the padded integer text emitted by DXF writers.
+    let mut bodies = [(0, 0usize, Vec::new()), (0, 0usize, Vec::new())];
+    let mut current_body = None;
+    let mut operation_major = 0;
+    for (code, value) in fields.sections.get(section).into_iter().flatten() {
+        match *code {
+            92 | 93 => {
+                let index = usize::from(*code == 93);
+                bodies[index].0 = value.trim().parse().unwrap_or(0);
+                current_body = Some(index);
+            }
+            90 => {
+                if let Some(index) = current_body {
+                    bodies[index].1 = value.trim().parse().unwrap_or(0);
+                } else {
+                    operation_major = value.trim().parse().unwrap_or(0);
+                }
+            }
+            310 => {
+                if let Some(index) = current_body {
+                    append_hex_bytes(&mut bodies[index].2, value);
+                }
+            }
+            _ => {}
+        }
     }
-    let first_bits = fields
-        .values(section, 90)
-        .get(1)
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let second_bits = fields
-        .values(section, 90)
-        .get(2)
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let split = first_bits.div_ceil(8).min(binary.len());
-    let second_end = split
-        .saturating_add(second_bits.div_ceil(8))
-        .min(binary.len());
+    let [(profile_type, profile_bits, profile_bytes), (path_type, path_bits, path_bytes)] = bodies;
     let dwg_version = crate::io::dwg::DwgVersion::from_dxf_version(dxf_version)
         .unwrap_or(crate::io::dwg::DwgVersion::AC24);
     let sweep_entity = crate::io::dwg::embedded_entity::decode_embedded_entity(
-        fields.i32(section, 92),
-        first_bits,
-        binary[..split].to_vec(),
+        profile_type,
+        profile_bits,
+        profile_bytes,
         dwg_version,
         dxf_version,
     );
     let path_entity = crate::io::dwg::embedded_entity::decode_embedded_entity(
-        fields.i32(section, 93),
-        second_bits,
-        binary[split..second_end].to_vec(),
+        path_type,
+        path_bits,
+        path_bytes,
         dwg_version,
         dxf_version,
     );
     SolidHistorySweep {
         base: dynamic_dxf_history_base(fields),
-        operation_major: fields.i32(section, 90),
+        operation_major,
         operation_minor: fields.i32(section, 91),
         direction: fields.point(section, 10),
         sweep_entity,
@@ -15165,10 +15176,11 @@ impl<'a> SectionReader<'a> {
     }
 
     /// Read modeler geometry (ACIS) data — shared between 3DSOLID, REGION, BODY
-    fn read_modeler_geometry(&mut self) -> Result<(EntityCommon, String, String)> {
+    fn read_modeler_geometry(&mut self) -> Result<(EntityCommon, String, String, Option<Handle>)> {
         let mut common = EntityCommon::new();
         let mut acis_data = String::new();
         let mut uid = String::new();
+        let mut history_handle = None;
         let mut acis_version: u8 = 1; // default to Version 1 (encoded)
 
         while let Some(pair) = self.reader.read_pair()? {
@@ -15182,6 +15194,10 @@ impl<'a> SectionReader<'a> {
                     acis_data.push('\n');
                 }
                 2 => uid = pair.value_string.clone(),
+                350 => {
+                    let handle = parse_dxf_handle(&pair.value_string);
+                    history_handle = (!handle.is_null()).then_some(handle);
+                }
                 70 => {
                     if let Some(v) = pair.as_i16() {
                         acis_version = v as u8;
@@ -15199,34 +15215,37 @@ impl<'a> SectionReader<'a> {
         // Normalise: strip "End-of-ACIS-data" / "End-of-ASM-data" terminator.
         acis_data = crate::entities::solid3d::AcisData::strip_sat_terminator(&acis_data);
 
-        Ok((common, uid, acis_data))
+        Ok((common, uid, acis_data, history_handle))
     }
 
     /// Read a 3DSOLID entity
     fn read_solid3d(&mut self) -> Result<Option<Solid3D>> {
-        let (common, uid, acis_data) = self.read_modeler_geometry()?;
+        let (common, uid, acis_data, history_handle) = self.read_modeler_geometry()?;
         let mut solid = Solid3D::new();
         solid.common = common;
         solid.uid = uid;
         solid.acis_data.sat_data = acis_data;
+        solid.history_handle = history_handle;
         Ok(Some(solid))
     }
 
     /// Read a REGION entity
     fn read_region(&mut self) -> Result<Option<Region>> {
-        let (common, _uid, acis_data) = self.read_modeler_geometry()?;
+        let (common, _uid, acis_data, history_handle) = self.read_modeler_geometry()?;
         let mut region = Region::new();
         region.common = common;
         region.acis_data.sat_data = acis_data;
+        region.history_handle = history_handle;
         Ok(Some(region))
     }
 
     /// Read a BODY entity
     fn read_body(&mut self) -> Result<Option<Body>> {
-        let (common, _uid, acis_data) = self.read_modeler_geometry()?;
+        let (common, _uid, acis_data, history_handle) = self.read_modeler_geometry()?;
         let mut body = Body::new();
         body.common = common;
         body.acis_data.sat_data = acis_data;
+        body.history_handle = history_handle;
         Ok(Some(body))
     }
 
