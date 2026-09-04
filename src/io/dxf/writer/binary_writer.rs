@@ -99,9 +99,24 @@ impl<W: Write> DxfStreamWriter for DxfBinaryWriter<W> {
     }
     
     fn write_bool(&mut self, code: i32, value: bool) -> Result<()> {
-        self.write_code(code)?;
-        self.writer.write_u8(if value { 1 } else { 0 })?;
-        Ok(())
+        use crate::io::dxf::GroupCodeValueType;
+
+        // Logical flags also occur in integer groups, including history
+        // flags 280/281. Their binary width follows the group code, not the
+        // Rust value type; only groups 290-299 use a single byte.
+        let value = u8::from(value);
+        match GroupCodeValueType::from_raw_code(code) {
+            GroupCodeValueType::Bool => {
+                self.write_code(code)?;
+                self.writer.write_u8(value)?;
+                Ok(())
+            }
+            GroupCodeValueType::Byte | GroupCodeValueType::Int16 => self.write_i16(code, i16::from(value)),
+            GroupCodeValueType::Int32 => self.write_i32(code, i32::from(value)),
+            GroupCodeValueType::Int64 => self.write_i64(code, i64::from(value)),
+            GroupCodeValueType::Double => self.write_double(code, f64::from(value)),
+            _ => Err(crate::error::DxfError::InvalidDxfCode(code)),
+        }
     }
     
     fn write_handle(&mut self, code: i32, handle: Handle) -> Result<()> {
