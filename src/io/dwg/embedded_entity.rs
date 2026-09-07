@@ -1,8 +1,8 @@
 //! Codec for type-specific entity bodies embedded in 3D construction data.
 
 use crate::entities::{
-    AcisVersion, Arc, Circle, Ellipse, EmbeddedEntity, Line, LwPolyline, LwVertex, Point, Ray, Region, Spline,
-    XLine,
+    AcisVersion, Arc, Circle, Ellipse, EmbeddedEntity, Line, LwPolyline, LwVertex, Point, Ray,
+    Region, Spline, XLine,
 };
 use crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader;
 use crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader;
@@ -104,9 +104,9 @@ pub(crate) fn decode_embedded_entity(
             if DwgVersion::from_dxf_version(dxf_version).ok() != Some(version) {
                 return Some(preserve_unknown());
             }
-            let Some(data) = entities::read_inline_acis_entity(
-                &mut reader, version, dxf_version, bit_length,
-            ) else {
+            let Some(data) =
+                entities::read_inline_acis_entity(&mut reader, version, dxf_version, bit_length)
+            else {
                 return Some(preserve_unknown());
             };
             let mut entity = Region::new();
@@ -349,10 +349,7 @@ pub(crate) fn encode_embedded_entity(
 }
 
 /// Append a byte-sized embedded body to the enclosing bitstream.
-pub(crate) fn write_embedded_bytes(
-    writer: &mut DwgMergedWriter,
-    encoded: &EncodedEmbeddedEntity,
-) {
+pub(crate) fn write_embedded_bytes(writer: &mut DwgMergedWriter, encoded: &EncodedEmbeddedEntity) {
     writer.write_bytes(&encoded.bytes);
 }
 
@@ -456,13 +453,12 @@ fn write_spline(
     dxf_version: DxfVersion,
 ) {
     let r2013_plus = version.r2013_plus(dxf_version);
-    let scenario = if !entity.fit_points.is_empty()
-        && (!r2013_plus || entity.knot_parameterization != 15)
-    {
-        2
-    } else {
-        1
-    };
+    let scenario =
+        if !entity.fit_points.is_empty() && (!r2013_plus || entity.knot_parameterization != 15) {
+            2
+        } else {
+            1
+        };
     if r2013_plus {
         let mut flags = entity.dwg_flags1;
         if entity.cv_frame_visible {
