@@ -628,7 +628,7 @@ impl SatDocument {
         index
     }
 
-    /// Add an ACIS 7 explicit pcurve on an existing spline-surface record.
+    /// Add an ACIS 7 explicit pcurve on an existing analytic or spline surface.
     /// Knot parameters must already match the owning edge. The final pair
     /// are UV offsets, not an active parameter interval.
     #[allow(clippy::too_many_arguments)]
@@ -647,22 +647,38 @@ impl SatDocument {
         let support = self
             .record(support_surface as usize)
             .expect("pcurve support surface");
-        assert_eq!(support.entity_type, "spline-surface");
-        let support_sense = support.tokens[1].clone();
-        let subtype_index = self
-            .records
-            .iter()
-            .take(support_surface as usize)
-            .map(|record| {
-                record
-                    .tokens
-                    .windows(2)
-                    .filter(|pair| {
-                        pair[0].as_ident() == Some("{") && pair[1].as_ident() != Some("ref")
-                    })
-                    .count()
-            })
-            .sum::<usize>();
+        let id = |value: &str| SatToken::Ident(value.to_string());
+        let support_tokens = match support.entity_type.as_str() {
+            "spline-surface" => {
+                let start = support.tokens.iter().position(|token| token.as_ident() == Some("{"))
+                    .expect("spline support subtype");
+                let end = support.tokens.iter().rposition(|token| token.as_ident() == Some("}"))
+                    .expect("spline support subtype end");
+                let subtype_index = if support.tokens.get(start + 1).and_then(SatToken::as_ident) == Some("ref") {
+                    support.tokens[start + 2].as_integer().expect("spline support subtype reference")
+                } else {
+                    self.records.iter().take(support_surface as usize).map(|record| {
+                        record.tokens.windows(2).filter(|pair| {
+                            pair[0].as_ident() == Some("{") && pair[1].as_ident() != Some("ref")
+                        }).count()
+                    }).sum::<usize>() as i64
+                };
+                let mut tokens = vec![id("spline"), support.tokens[1].clone(), id("{"), id("ref"), SatToken::Integer(subtype_index), id("}")];
+                tokens.extend_from_slice(&support.tokens[end + 1..]);
+                tokens
+            }
+            "plane-surface" | "cone-surface" | "sphere-surface" | "torus-surface" => {
+                // An explicit pcurve embeds the surface geometry, without the
+                // SURFACE entity's common pointer. Analytic surfaces have no
+                // spline subtype to reference; retain their native frame,
+                // radii, parameter sense and bounded intervals verbatim.
+                let name = support.entity_type.strip_suffix("-surface").unwrap();
+                let mut tokens = vec![id(name)];
+                tokens.extend_from_slice(&support.tokens[1..]);
+                tokens
+            }
+            _ => panic!("unsupported pcurve support surface: {}", support.entity_type),
+        };
         let index = self.records.len() as i32;
         let mut record = SatRecord::new(index, "pcurve");
         record.attribute = SatPointer::NULL;
@@ -701,15 +717,7 @@ impl SatDocument {
             }
         }
         record.tokens.push(SatToken::Float(fit_tol));
-        record.tokens.extend([
-            id("spline"),
-            support_sense,
-            id("{"),
-            id("ref"),
-            SatToken::Integer(subtype_index as i64),
-            id("}"),
-        ]);
-        record.tokens.extend((0..4).map(|_| id("I")));
+        record.tokens.extend(support_tokens);
         record.tokens.push(id("}"));
         record.tokens.push(SatToken::Float(offsets.0));
         record.tokens.push(SatToken::Float(offsets.1));
