@@ -345,6 +345,21 @@ pub struct EntityCommon {
 }
 
 impl EntityCommon {
+    fn preserve_storage_data_from(&mut self, source: &Self) {
+        self.linetype_handle = source.linetype_handle;
+        self.graphic_data = source.graphic_data.clone();
+        self.color_book_handle = source.color_book_handle;
+        self.face_visual_style_handle = source.face_visual_style_handle;
+        self.edge_visual_style_handle = source.edge_visual_style_handle;
+        self.material_flags = source.material_flags;
+        self.material_handle = source.material_handle;
+        self.shadow_flags = source.shadow_flags;
+        self.plotstyle_flags = source.plotstyle_flags;
+        self.plotstyle_handle = source.plotstyle_handle;
+        self.entity_mode = source.entity_mode;
+        self.has_ds_data = source.has_ds_data;
+    }
+
     /// Create new common entity data with defaults
     pub fn new() -> Self {
         EntityCommon {
@@ -498,6 +513,25 @@ pub enum EntityType {
 }
 
 impl EntityType {
+    /// Restore storage-only data omitted from serde after editing the public
+    /// representation of an entity. The source and destination must have the
+    /// same variant and identity; callers remain responsible for that check.
+    pub fn preserve_storage_data_from(&mut self, source: &Self) {
+        self.common_mut()
+            .preserve_storage_data_from(source.common());
+        match (self, source) {
+            (Self::Extended(value), Self::Extended(source)) => {
+                value.data.preserve_storage_data_from(&source.data);
+            }
+            (Self::Unknown(value), Self::Unknown(source)) => {
+                value.raw_dwg_data = source.raw_dwg_data.clone();
+                value.raw_dxf_codes = source.raw_dxf_codes.clone();
+                value.dwg_source_version = source.dwg_source_version;
+            }
+            _ => {}
+        }
+    }
+
     /// Get a reference to the entity trait object
     pub fn as_entity(&self) -> &dyn Entity {
         match self {
@@ -712,5 +746,36 @@ impl EntityType {
             EntityType::Extended(e) => &mut e.common,
             EntityType::Unknown(e) => &mut e.common,
         }
+    }
+}
+
+#[cfg(test)]
+mod storage_data_tests {
+    use super::*;
+
+    #[test]
+    fn public_record_edit_can_preserve_opaque_entity_data() {
+        let mut source = UnknownEntity::new("CUSTOM_ENTITY");
+        source.common.graphic_data = Some(vec![1, 2, 3]);
+        source.raw_dwg_data = Some(vec![4, 5, 6]);
+        source.raw_dxf_codes = Some(vec![(100, "payload".into())]);
+        let source = EntityType::Unknown(source);
+
+        let mut edited = source.clone();
+        if let EntityType::Unknown(value) = &mut edited {
+            value.common.layer = "Edited".into();
+            value.common.graphic_data = None;
+            value.raw_dwg_data = None;
+            value.raw_dxf_codes = None;
+        }
+        edited.preserve_storage_data_from(&source);
+
+        let EntityType::Unknown(edited) = edited else {
+            unreachable!()
+        };
+        assert_eq!(edited.common.layer, "Edited");
+        assert_eq!(edited.common.graphic_data, Some(vec![1, 2, 3]));
+        assert_eq!(edited.raw_dwg_data, Some(vec![4, 5, 6]));
+        assert_eq!(edited.raw_dxf_codes, Some(vec![(100, "payload".into())]));
     }
 }

@@ -34,6 +34,23 @@ pub enum ExtendedEntityData {
     RegisteredClass(RegisteredClassEntityData),
 }
 
+impl ExtendedEntityData {
+    pub(crate) fn preserve_storage_data_from(&mut self, source: &Self) {
+        match (self, source) {
+            (Self::LayoutPrintConfig(value), Self::LayoutPrintConfig(source)) => {
+                value.raw_dwg_data = source.raw_dwg_data.clone();
+                value.raw_dwg_version = source.raw_dwg_version;
+            }
+            (Self::Format(value), Self::Format(source)) => {
+                value.raw_dwg_data = source.raw_dwg_data.clone();
+                value.raw_dwg_version = source.raw_dwg_version;
+                value.raw_dxf_codes = source.raw_dxf_codes.clone();
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SectionObjectData {
