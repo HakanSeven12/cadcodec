@@ -9719,35 +9719,22 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     ///
     /// When only SAB binary data is present (no SAT text), attempts to
     /// convert via `SabReader` before falling back to an empty entry.
-    /// Also downgrades ACIS v600+ SAT text to v400 record layout.
     fn write_acis_data(&mut self, acis: &AcisData) -> Result<()> {
         let converted;
         let data: &str = if acis.sat_data.is_empty() && !acis.sab_data.is_empty() {
             // SAB binary only — convert via SabReader.
             match crate::entities::acis::SabReader::read(&acis.sab_data) {
-                Ok(mut doc) => {
-                    let source_major = doc.header.version.major;
-                    doc.header.version = crate::entities::acis::SatVersion::V4_0;
-                    doc.header.num_records = doc.records.len();
-                    doc.records.retain(|r| r.entity_type != "asmheader");
-                    if source_major >= 6 {
-                        crate::entities::acis::downgrade_records_to_v400(&mut doc.records);
-                    }
+                Ok(doc) => {
                     converted = doc.to_sat_string();
                     &converted
                 }
                 Err(_) => "",
             }
         } else if !acis.sat_data.is_empty() {
-            // SAT text present — parse and downgrade v600+ records to v400.
-            // Some SAT data has a v400 version header but v600 record layouts
-            // (e.g. ACIS Builder 6.00). detect and fix based on actual content.
+            // Preserve the source SAT schema. Downgrading newer SAT records
+            // loses relationships required by the legacy 3DSOLID path.
             match crate::entities::acis::SatDocument::parse(&acis.sat_data) {
-                Ok(mut doc) => {
-                    doc.header.version = crate::entities::acis::SatVersion::V4_0;
-                    doc.header.num_records = doc.records.len();
-                    doc.records.retain(|r| r.entity_type != "asmheader");
-                    crate::entities::acis::downgrade_records_to_v400(&mut doc.records);
+                Ok(doc) => {
                     converted = doc.to_sat_string();
                     &converted
                 }

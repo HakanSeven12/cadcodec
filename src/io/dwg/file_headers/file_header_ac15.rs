@@ -226,13 +226,9 @@ impl DwgFileHeaderWriterAC15 {
             .map_or(0i32, |(r, _)| r.seeker as i32);
         buf.write_i32::<LittleEndian>(preview_seeker)?;
 
-        // 0x11: writer DWG/maintenance version. R13 uses zeroes; the
-        // later AC15 variants use the canonical AutoCAD 2000-era pair.
-        if self.version == DxfVersion::AC1012 {
-            buf.extend_from_slice(&[0, 0]);
-        } else {
-            buf.extend_from_slice(&[0x21, 0x1D]);
-        }
+        // 0x11: application/version bytes. The AC15 reader and known-good
+        // R2000 fixtures use this fixed pair for the whole R13-R2000 family.
+        buf.extend_from_slice(&[0x1B, 0x19]);
 
         // 0x13: Compact DWG code-page index.
         buf.write_u16::<LittleEndian>(self.code_page)?;
@@ -392,6 +388,8 @@ mod tests {
 
         let data = output.into_inner();
         assert_eq!(&data[0..6], b"AC1015");
+        assert_eq!(data[0x0B], 15);
+        assert_eq!(&data[0x11..0x13], &[0x1B, 0x19]);
     }
 
     #[test]

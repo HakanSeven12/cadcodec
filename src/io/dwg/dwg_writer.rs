@@ -77,13 +77,20 @@ impl DwgWriter {
         // the controls, entries and handle map all agree (issue #51/#64
         // class of bug).
         let mut owned;
-        let document: &CadDocument = if document.has_null_table_entries() {
-            owned = document.clone();
-            owned.assign_table_entry_handles();
-            &owned
-        } else {
-            document
-        };
+        let document: &CadDocument =
+            if document.has_null_table_entries() || document.version < DxfVersion::AC1027 {
+                owned = document.clone();
+                if owned.has_null_table_entries() {
+                    owned.assign_table_entry_handles();
+                }
+                if owned.version < DxfVersion::AC1027 {
+                    owned.classes.retain_legacy_dwg_classes();
+                    prepare_legacy_document(&mut owned);
+                }
+                &owned
+            } else {
+                document
+            };
 
         let result = if uses_ac21_format(version) {
             write_ac21(&mut output, document, version)
@@ -169,6 +176,35 @@ fn prepare_surface_classes(document: &mut std::borrow::Cow<'_, CadDocument>) {
         output
             .classes
             .add_or_update(crate::classes::DxfClass::new_entity(name, cpp));
+    }
+}
+
+/// Remove default objects that use post-R2000 binary layouts.
+///
+/// The modern document initializer adds `ACAD_MLEADERSTYLE` and
+/// `ACAD_TABLESTYLE`. Their object encodings are not valid in AC15 streams,
+/// so their root-dictionary entries and owned objects must be removed together.
+fn prepare_legacy_document(document: &mut CadDocument) {
+    use crate::objects::ObjectType;
+
+    let root_handle = document.header.named_objects_dict_handle;
+    let mut obsolete = Vec::new();
+    if let Some(ObjectType::Dictionary(root)) = document.objects.get_mut(&root_handle) {
+        root.entries.retain(|(name, handle)| {
+            let remove = matches!(name.as_str(), "ACAD_MLEADERSTYLE" | "ACAD_TABLESTYLE");
+            if remove {
+                obsolete.push(*handle);
+            }
+            !remove
+        });
+    }
+
+    for handle in obsolete {
+        if let Some(ObjectType::Dictionary(dictionary)) = document.objects.remove(&handle) {
+            for (_, child) in dictionary.entries {
+                document.objects.remove(&child);
+            }
+        }
     }
 }
 
@@ -535,7 +571,13 @@ fn write_ac15<W: Write + Seek>(
     version: DxfVersion,
 ) -> Result<()> {
     let mut fhw = DwgFileHeaderWriterAC15::new(version);
-    fhw.set_maintenance_version(document.maintenance_version);
+    // New documents do not carry source maintenance metadata. AC15 files use
+    // the established R2000-era default rather than zero.
+    fhw.set_maintenance_version(if document.maintenance_version == 0 {
+        15
+    } else {
+        document.maintenance_version
+    });
     fhw.set_code_page(crate::io::dxf::code_page::dwg_code_page_index(
         &document.header.code_page,
     ));
@@ -1731,6 +1773,19 @@ mod tests {
         let bytes = DwgWriter::write_to_vec(&doc2).unwrap();
         // Verify non-trivial output
         assert!(bytes.len() > 200, "DWG file should be non-trivial");
+    }
+
+    #[test]
+    fn test_pre_r2013_write_uses_legacy_document_profile() {
+        let mut doc = CadDocument::new();
+        doc.version = DxfVersion::AC1015;
+
+        let bytes = DwgWriter::write_to_vec(&doc).unwrap();
+        let mut reader = crate::io::dwg::DwgReader::from_stream(std::io::Cursor::new(bytes));
+        let decoded = reader.read().unwrap();
+
+        assert_eq!(decoded.classes.len(), 38);
+        assert_eq!(decoded.objects.len(), 13);
     }
 
     #[test]

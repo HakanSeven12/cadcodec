@@ -5486,12 +5486,13 @@ impl<'a> DwgObjectWriter<'a> {
                 // SAT text — all DWG versions use the same encoding:
                 // BL-sized blocks of encrypted bytes (cipher: 159 - byte)
                 // terminated by BL(0).  Per LibreDWG dwg.spec.
-                // DWG SAT blocks are terminated by the following BL(0), not by
-                // the DXF `End-of-ACIS-data` text record.  Including that record
-                // makes some ODA readers continue past the SAT body and interpret
-                // the wireframe payload as modeler data.
                 let stripped = AcisData::strip_sat_terminator(&sat_text);
-                let plain = stripped.as_bytes();
+                // R13-R2010 inline modeler streams need both the SAT end
+                // marker and the following empty DWG block. Without the SAT
+                // marker, readers may reject an otherwise valid object.
+                let mut full = stripped;
+                full.push_str("End-of-ACIS-data\n");
+                let plain = full.as_bytes();
 
                 // Encrypt with selective 159-substitution cipher
                 // (per LibreDWG dwg.spec: bytes <= 32 pass through, bytes > 32: 159 - byte)
