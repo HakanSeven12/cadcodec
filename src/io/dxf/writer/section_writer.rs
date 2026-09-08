@@ -9712,47 +9712,29 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     /// Write ACIS data (shared by Solid3D, Region, Body)
     ///
     /// SAT text is split by newlines; each line becomes a separate DXF
-    /// group-code entry using group code 1.  Lines longer than 255
-    /// characters are subdivided into 255-char sub-chunks: the first
+    /// group-code entry using group code 1. Lines longer than 2049 bytes
+    /// are subdivided into 2049-byte sub-chunks: the first
     /// sub-chunk uses group code 1 and continuation sub-chunks use
     /// group code 3.
     ///
     /// When only SAB binary data is present (no SAT text), attempts to
     /// convert via `SabReader` before falling back to an empty entry.
-    /// Also downgrades ACIS v600+ SAT text to v400 record layout.
     fn write_acis_data(&mut self, acis: &AcisData) -> Result<()> {
         let converted;
         let data: &str = if acis.sat_data.is_empty() && !acis.sab_data.is_empty() {
             // SAB binary only — convert via SabReader.
             match crate::entities::acis::SabReader::read(&acis.sab_data) {
-                Ok(mut doc) => {
-                    let source_major = doc.header.version.major;
-                    doc.header.version = crate::entities::acis::SatVersion::V4_0;
-                    doc.header.num_records = doc.records.len();
-                    doc.records.retain(|r| r.entity_type != "asmheader");
-                    if source_major >= 6 {
-                        crate::entities::acis::downgrade_records_to_v400(&mut doc.records);
-                    }
+                Ok(doc) => {
                     converted = doc.to_sat_string();
                     &converted
                 }
                 Err(_) => "",
             }
         } else if !acis.sat_data.is_empty() {
-            // SAT text present — parse and downgrade v600+ records to v400.
-            // Some SAT data has a v400 version header but v600 record layouts
-            // (e.g. ACIS Builder 6.00). detect and fix based on actual content.
-            match crate::entities::acis::SatDocument::parse(&acis.sat_data) {
-                Ok(mut doc) => {
-                    doc.header.version = crate::entities::acis::SatVersion::V4_0;
-                    doc.header.num_records = doc.records.len();
-                    doc.records.retain(|r| r.entity_type != "asmheader");
-                    crate::entities::acis::downgrade_records_to_v400(&mut doc.records);
-                    converted = doc.to_sat_string();
-                    &converted
-                }
-                Err(_) => &acis.sat_data,
-            }
+            // Keep the original token stream. Re-serializing expands compact
+            // ACIS booleans and can make legacy readers reject freeform
+            // spline and p-curve payloads.
+            &acis.sat_data
         } else {
             &acis.sat_data
         };
@@ -9778,16 +9760,19 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         let mut any_written = false;
         for line in encoded.lines() {
-            if line.len() <= 255 {
+            if line.len() <= 2049 {
                 // Whole line fits in one chunk → group code 1
                 self.writer.write_string(1, line)?;
             } else {
-                // Split into 255-char sub-chunks:
+                // Split into 2049-byte sub-chunks without breaking UTF-8:
                 // first sub-chunk → gc 1, continuations → gc 3
                 let mut remaining = line;
                 let mut first = true;
                 while !remaining.is_empty() {
-                    let end = remaining.len().min(255);
+                    let mut end = remaining.len().min(2049);
+                    while !remaining.is_char_boundary(end) {
+                        end -= 1;
+                    }
                     let (chunk, rest) = remaining.split_at(end);
                     if first {
                         self.writer.write_string(1, chunk)?;

@@ -211,6 +211,63 @@ impl DxfClassCollection {
         self.name_index.clear();
     }
 
+    /// Retain the class table understood by pre-R2013 DWG writers.
+    ///
+    /// Modern proxy classes use layouts that the AC15 CLASSES stream cannot
+    /// encode. Their presence can make a reader reject the complete drawing,
+    /// including otherwise valid primitive entities.
+    pub fn retain_legacy_dwg_classes(&mut self) {
+        const LEGACY: &[&str] = &[
+            "ACDBDICTIONARYWDFLT",
+            "DICTIONARYVAR",
+            "LAYOUT",
+            "ACDBPLACEHOLDER",
+            "PLOTSETTINGS",
+            "SCALE",
+            "MESH",
+            "ACAD_TABLE",
+            "WIPEOUT",
+            "IMAGE",
+            "PDFREFERENCE",
+            "DWFREFERENCE",
+            "DGNREFERENCE",
+            "MULTILEADER",
+            "OLE2FRAME",
+            "MLINE",
+            "TABLESTYLE",
+            "MATERIAL",
+            "VISUALSTYLE",
+            "MLEADERSTYLE",
+            "CELLSTYLEMAP",
+            "XRECORD",
+            "SORTENTSTABLE",
+            "WIPEOUTVARIABLES",
+            "DIMASSOC",
+            "TABLECONTENT",
+            "TABLEGEOMETRY",
+            "RASTERVARIABLES",
+            "IMAGEDEF",
+            "IMAGEDEF_REACTOR",
+            "DBCOLOR",
+            "GEODATA",
+            "PDFDEFINITION",
+            "DWFDEFINITION",
+            "DGNDEFINITION",
+            "SPATIAL_FILTER",
+            "GROUP",
+            "MLINESTYLE",
+        ];
+
+        self.entries
+            .retain(|class| LEGACY.contains(&class.dxf_name.to_ascii_uppercase().as_str()));
+        self.name_index.clear();
+        for (index, class) in self.entries.iter_mut().enumerate() {
+            class.class_number = 500 + index as i16;
+            self.name_index
+                .insert(class.dxf_name.to_ascii_uppercase(), index);
+        }
+    }
+
     /// Populate with default class definitions that AutoCAD expects.
     ///
     /// This mirrors the reference `DxfClassCollection.UpdateDxfClasses()`.

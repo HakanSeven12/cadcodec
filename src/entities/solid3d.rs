@@ -480,7 +480,6 @@ impl AcisData {
     /// wireframe anchor — bodies baked at world coordinates would otherwise
     /// report (0,0,0).
     pub fn geometry_centre(&self) -> Option<Vector3> {
-        use crate::entities::acis::SatToken;
         let doc = self.parse()?;
         let (m, tr, s) = doc.placement();
         let mut min = [f64::MAX; 3];
@@ -490,15 +489,18 @@ impl AcisData {
             if rec.entity_type != "point" {
                 continue;
             }
-            // SAB tokenizes the coordinate as one Position; SAT text as three
-            // trailing floats (after the bookkeeping ints).
+            // SAT text stores a point as three trailing floats; SAB stores it
+            // as a coordinate tag. Both forms are exposed by SatToken's typed
+            // accessors while retaining the original SAB bytes for writing.
             let mut p: Option<[f64; 3]> = None;
             let mut floats: Vec<f64> = Vec::with_capacity(4);
             for t in &rec.tokens {
-                match t {
-                    SatToken::Position(x, y, z) => p = Some([*x, *y, *z]),
-                    SatToken::Float(f) => floats.push(*f),
-                    _ => {}
+                if let Some((components, len)) = t.coordinate_components() {
+                    if len == 3 {
+                        p = Some(components);
+                    }
+                } else if let Some(value) = t.as_float() {
+                    floats.push(value);
                 }
             }
             let Some([x, y, z]) = p.or_else(|| {
@@ -1237,6 +1239,24 @@ mod tests {
         assert!(solid.has_acis_data());
         assert!(solid.acis_data.is_binary);
         assert_eq!(solid.acis_data.sab_data, sab);
+    }
+
+    #[test]
+    fn test_geometry_centre_decodes_sab_coordinate_tokens() {
+        use crate::entities::acis::{SabReader, SabWriter, SatDocument, SatToken};
+
+        let mut doc = SatDocument::new_body();
+        doc.add_point(0.0, 0.0, 0.0);
+        doc.add_point(4.0, 8.0, 12.0);
+        let sab = SabWriter::write(&doc);
+        let parsed = SabReader::read(&sab).expect("parse SAB");
+        assert!(matches!(
+            parsed.records_of_type("point")[0].tokens[1],
+            SatToken::Sab { tag: 0x13, .. }
+        ));
+
+        let acis = AcisData::from_sab(sab);
+        assert_eq!(acis.geometry_centre(), Some(Vector3::new(2.0, 4.0, 6.0)));
     }
 
     #[test]

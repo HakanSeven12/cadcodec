@@ -848,6 +848,24 @@ fn dxf_roundtrip(doc: CadDocument) -> CadDocument {
     reader.read().expect("DXF read failed")
 }
 
+#[test]
+fn dxf_acis_preserves_tokens_and_splits_at_utf8_boundaries() {
+    use acadrust::entities::solid3d::{AcisVersion, Solid3D};
+
+    let first_chunk = "x".repeat(2048);
+    let remainder = "é compact_bool F";
+    let mut solid = Solid3D::new();
+    solid.acis_data.version = AcisVersion::Version2;
+    solid.acis_data.sat_data = format!("{first_chunk}{remainder}\n");
+
+    let mut doc = CadDocument::with_version(DxfVersion::AC1021);
+    doc.add_entity(EntityType::Solid3D(solid)).unwrap();
+
+    let output = String::from_utf8(DxfWriter::new(&doc).write_to_vec().unwrap()).unwrap();
+    let expected = format!("  1\r\n{first_chunk}\r\n  3\r\n{remainder}\r\n");
+    assert!(output.contains(&expected));
+}
+
 /// DWG write → read roundtrip with entity count check.
 fn dwg_roundtrip(doc: &CadDocument) -> CadDocument {
     let bytes = DwgWriter::write_to_vec(doc).expect("DWG write failed");
@@ -1331,7 +1349,24 @@ fn dwg_roundtrip_deep_r2000() {
     let (doc, _) = build_rich_document(DxfVersion::AC1015);
     let rt = dwg_roundtrip(&doc);
     let report = compare_documents(&doc, &rt);
-    // Known issues: Shape name (1)
+    assert_eq!(rt.classes.len(), 38);
+    assert_eq!(rt.objects.len(), 13);
+
+    let expected_profile_changes = ["Object count mismatch:", "Class count mismatch:"];
+    let unexpected = DiffReport {
+        differences: report
+            .differences
+            .iter()
+            .filter(|difference| {
+                !expected_profile_changes
+                    .iter()
+                    .any(|prefix| difference.starts_with(prefix))
+            })
+            .cloned()
+            .collect(),
+    };
+
+    // Known issue: Shape name (1)
     let max_known = 1;
     if !report.is_empty() {
         eprintln!(
@@ -1341,11 +1376,11 @@ fn dwg_roundtrip_deep_r2000() {
         );
     }
     assert!(
-        report.differences.len() <= max_known,
+        unexpected.differences.len() <= max_known,
         "DWG R2000 roundtrip REGRESSION: {} diffs (expected ≤ {}):\n{}",
-        report.differences.len(),
+        unexpected.differences.len(),
         max_known,
-        report.summary()
+        unexpected.summary()
     );
 }
 
