@@ -1406,9 +1406,7 @@ impl<'a> DwgObjectWriter<'a> {
 
     // ── Layout (extends PlotSettings) ───────────────────────────────
     //
-    // Field order must match C# DwgObjectWriter.Objects.cs writeLayout()
-    // exactly. Layout extends PlotSettings, so PlotSettings fields come
-    // first, then Layout-specific fields.
+    // Layout extends PlotSettings, so PlotSettings fields come first.
 
     fn write_layout(&mut self, layout: &Layout) {
         // For pre-R2004, LAYOUT is an UNLISTED type — must use the DXF
@@ -1442,16 +1440,16 @@ impl<'a> DwgObjectWriter<'a> {
         // ── Layout-specific data ──
         // Layout name (TV)
         self.writer.write_variable_text(&layout.name);
-        // Tab order (BL 71)
-        self.writer.write_bit_long(layout.tab_order as i32);
+        // Tab order (BS 71)
+        self.writer.write_bit_short(layout.tab_order);
         // Layout flags (BS 70)
         self.writer.write_bit_short(layout.flags);
 
-        // UCS origin (3BD 13) — layout UCS origin
+        // Insertion base (3BD 12)
         self.writer.write_3bit_double(crate::types::Vector3::new(
-            layout.ucs_origin.0,
-            layout.ucs_origin.1,
-            layout.ucs_origin.2,
+            layout.insertion_base.0,
+            layout.insertion_base.1,
+            layout.insertion_base.2,
         ));
 
         // Min limits (2RD 10)
@@ -1461,11 +1459,11 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_raw_double(layout.max_limits.0);
         self.writer.write_raw_double(layout.max_limits.1);
 
-        // Insertion base (3BD 12)
+        // UCS origin (3BD 13)
         self.writer.write_3bit_double(crate::types::Vector3::new(
-            layout.insertion_base.0,
-            layout.insertion_base.1,
-            layout.insertion_base.2,
+            layout.ucs_origin.0,
+            layout.ucs_origin.1,
+            layout.ucs_origin.2,
         ));
 
         // X axis direction (3BD)

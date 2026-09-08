@@ -36,7 +36,7 @@ use crate::io::read::{push_read_diagnostic, ReadDiagnostic, ReadStage};
 use crate::notification::{NotificationCollection, NotificationType};
 use crate::types::Handle;
 use crate::types::LineWeight;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Pending vertex data collected during Pass 2, keyed by owner (parent polyline) handle.
 enum PendingVertex {
@@ -69,6 +69,7 @@ struct Pass2Output {
     eed_by_handle: HashMap<Handle, Vec<(u64, Vec<u8>)>>,
     xdic_by_handle: HashMap<Handle, Handle>,
     reactors_by_handle: HashMap<Handle, Vec<Handle>>,
+    dwg_data_store_handles: HashSet<Handle>,
     context_scales: HashMap<Handle, Handle>,
     block_visibility_params: HashMap<Handle, crate::objects::BlockVisibilityParameter>,
     block_representations: HashMap<Handle, Handle>,
@@ -98,6 +99,7 @@ impl Pass2Output {
             eed_by_handle: HashMap::new(),
             xdic_by_handle: HashMap::new(),
             reactors_by_handle: HashMap::new(),
+            dwg_data_store_handles: HashSet::new(),
             context_scales: HashMap::new(),
             block_visibility_params: HashMap::new(),
             block_representations: HashMap::new(),
@@ -1503,6 +1505,9 @@ impl DwgDocumentBuilder {
                 document
                     .reactors_by_handle
                     .extend(chunk.output.reactors_by_handle.drain());
+                document
+                    .dwg_data_store_handles
+                    .extend(chunk.output.dwg_data_store_handles.drain());
                 document
                     .context_scales
                     .extend(chunk.output.context_scales.drain());
@@ -4615,6 +4620,11 @@ impl DwgDocumentBuilder {
                 .obj_reader
                 .read_common_non_entity_data(&mut reader, type_code);
             let owner_handle = Handle::from(non_entity_data.owner_handle);
+            if non_entity_data.has_ds_data {
+                document
+                    .dwg_data_store_handles
+                    .insert(Handle::from(non_entity_data.common.handle));
+            }
             // Save raw EED blobs for DWG round-trip write-back
             if !non_entity_data.common.eed_raw.is_empty() {
                 document.eed_by_handle.insert(
@@ -4746,7 +4756,7 @@ impl DwgDocumentBuilder {
                         .xdictionary_handle
                         .map(Handle::from);
                     obj.flags = data.flags;
-                    obj.tab_order = data.tab_order as i16;
+                    obj.tab_order = data.tab_order;
                     obj.min_limits = data.min_limits;
                     obj.max_limits = data.max_limits;
                     obj.insertion_base = (

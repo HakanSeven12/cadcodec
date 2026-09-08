@@ -27,7 +27,7 @@ use crate::tables::*;
 use crate::types::{Color, DxfVersion, Handle, Vector2, Vector3};
 use crate::xdata::XDataValue;
 use crate::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "serde")]
@@ -1199,6 +1199,11 @@ pub struct CadDocument {
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) raw_acds_fingerprint: Vec<(u64, usize, u64)>,
 
+    /// Non-entity objects whose source record points into the AcDs data store.
+    /// Retained for same-version saves together with the original section.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) dwg_data_store_handles: HashSet<Handle>,
+
     /// Section-view style (`AcDbSectionViewStyle`) display fields, decoded from
     /// the DWG for rendering section marks (arrow size, label height, …). A file
     /// normally has one; the first decoded is kept. `None` for new/DXF documents
@@ -1371,6 +1376,7 @@ impl CadDocument {
             acis_sab_handles: Vec::new(),
             raw_acds_data: None,
             raw_acds_fingerprint: Vec::new(),
+            dwg_data_store_handles: HashSet::new(),
             section_view_style: None,
             view_rep_refs: std::collections::HashMap::new(),
             section_view_reps: Vec::new(),

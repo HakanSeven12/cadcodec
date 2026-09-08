@@ -230,10 +230,7 @@ fn acds_data<'a>(
             .iter()
             .map(|(handle, bytes)| (*handle, bytes.as_slice())),
     );
-    if document.dwg_source_version == Some(version)
-        && !fingerprint.is_empty()
-        && fingerprint == document.raw_acds_fingerprint
-    {
+    if document.dwg_source_version == Some(version) && fingerprint == document.raw_acds_fingerprint {
         if let Some(raw) = document.raw_acds_data.as_deref() {
             return std::borrow::Cow::Borrowed(raw.as_slice());
         }
@@ -805,7 +802,9 @@ fn write_ac18<W: Write + Seek>(
     )?;
 
     // ── Section: AcDsPrototype_1b (AC1027+ ACIS SAB storage) ──
-    if !sab_entries.is_empty() {
+    if !sab_entries.is_empty()
+        || (document.dwg_source_version == Some(version) && document.raw_acds_data.is_some())
+    {
         let acds_data = acds_data(document, version, &sab_entries);
         fhw.add_section(
             output,
@@ -923,7 +922,9 @@ fn write_ac21_impl<W: Write + Seek>(
     fhw.add_section(output, section_names::ACDB_OBJECTS, &obj_data)?;
 
     // AcDsPrototype_1b (AC1027+ ACIS SAB storage)
-    if !sab_entries.is_empty() {
+    if !sab_entries.is_empty()
+        || (document.dwg_source_version == Some(version) && document.raw_acds_data.is_some())
+    {
         let acds_data = acds_data(document, version, &sab_entries);
         fhw.add_section(output, section_names::ACDS_PROTOTYPE, &acds_data)?;
     }
@@ -1622,6 +1623,30 @@ mod tests {
     #[test]
     fn test_validate_version_r2010_ok() {
         assert!(validate_version(DxfVersion::AC1024).is_ok());
+    }
+
+    #[test]
+    fn same_version_roundtrip_preserves_non_entity_data_store_section() {
+        use crate::io::dwg::DwgReader;
+        use crate::objects::ObjectType;
+        use std::sync::Arc;
+
+        let mut document = CadDocument::with_version(DxfVersion::AC1032);
+        let layout_handle = document
+            .objects
+            .iter()
+            .find_map(|(handle, object)| matches!(object, ObjectType::Layout(_)).then_some(*handle))
+            .expect("default layout");
+        document.dwg_source_version = Some(DxfVersion::AC1032);
+        document.dwg_data_store_handles.insert(layout_handle);
+        document.raw_acds_data = Some(Arc::new(build_acds_prototype(&[])));
+
+        let bytes = DwgWriter::write_to_vec(&document).expect("write drawing");
+        let mut reader = DwgReader::from_stream(std::io::Cursor::new(bytes));
+        let roundtripped = reader.read().expect("read drawing");
+
+        assert!(roundtripped.raw_acds_data.is_some());
+        assert!(roundtripped.dwg_data_store_handles.contains(&layout_handle));
     }
 
     #[test]

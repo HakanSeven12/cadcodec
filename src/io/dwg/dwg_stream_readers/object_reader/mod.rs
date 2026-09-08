@@ -132,6 +132,7 @@ pub struct NonEntityCommonData {
     pub reactors: Vec<u64>,
     /// XDictionary handle (if present)
     pub xdictionary_handle: Option<u64>,
+    pub has_ds_data: bool,
 }
 
 /// DWG Object Reader — iterates the object section by handle map.
@@ -504,89 +505,11 @@ impl DwgObjectReader {
             }
         };
 
-        // R2013+: `has_ds_data` bit — set when the entity's geometry lives in
-        // the AcDs data store (3DSOLID/REGION/BODY/SURFACE SAB blobs). Captured
-        // so the AcDs blob→entity attach can honour object-stream order.
-        //
-        // Read it for everything the spec covers — as the reference implementation
-        // (`readReactorsAndDictionaryHandle`) and LibreDWG
-        // (`common_entity_data.spec`: `SINCE (R_2013) FIELD_B (has_ds_data)`)
-        // both do — except MULTILEADER, which some writers omit it for.
-        //
-        // This was previously gated on `!has_graphic`, on the theory that
-        // entities carrying a preview omit the bit. That is not the
-        // distinction: in one and the same drawing, WIPEOUT and IMAGE carry a
-        // preview AND write the bit, while MULTILEADER carries a preview and
-        // omits it. So the old gate desynced every preview-bearing IMAGE and
-        // WIPEOUT (fade/insertion/handles decoded to garbage, images silently
-        // vanished) just to keep MULTILEADER aligned.
-        //
-        // The skip cannot be deferred and validated later: the missing bit
-        // shifts the variable-length fields that follow (bit-shorts, ENC
-        // colour), so the divergence grows past one bit and no downstream
-        // anchor can recover it. It must be decided here, and `type_code` is
-        // already normalised to the stable OBJ_* constants for class-based
-        // entities, so keying on it is portable across files.
+        // R2013+: modeler geometry may live in the AcDs data store. The flag is
+        // part of every entity header, including entities with preview data.
         let mut has_ds_data = false;
         if self.version.r2013_plus(self.dxf_version) {
-            if type_code == common::OBJ_MULTILEADER {
-                // Some writers emit the has_ds bit for MULTILEADER, some omit it,
-                // within the same DWG version — so a fixed rule mis-decodes one
-                // family or the other. Decide by peeking the object's
-                // class_version (the first main-stream field after the common
-                // data): with the wrong choice the 1-bit shift cascades through
-                // the variable-length ENC colour and the version reads garbage.
-                // The peek walks the MAIN stream only — the handle reads
-                // interleaved in the common data live in the handle stream and
-                // don't move the main cursor, so replicating just the main reads
-                // lands exactly on the version either way.
-                let r2007 = self.version.r2007_plus();
-                let r2010 = self.version.r2010_plus();
-                let start = reader.position_in_bits();
-                let peek = |reader: &mut DwgMergedReader, read_ds: bool| -> i16 {
-                    if read_ds {
-                        let _ = reader.read_bit();
-                    }
-                    let _ = reader.read_en_color(); // colour (ENC, variable)
-                    let _ = reader.read_bit_double(); // linetype scale
-                    let _ = reader.main_mut().read_2bits(); // linetype flags
-                    if r2007 {
-                        let _ = reader.main_mut().read_2bits(); // material flags
-                        let _ = reader.read_byte(); // shadow flags
-                    }
-                    let _ = reader.main_mut().read_2bits(); // plotstyle flags
-                    if r2010 {
-                        // Three visual-style presence bits (their handles, when
-                        // set, are in the handle stream — skipped here).
-                        let _ = reader.read_bit();
-                        let _ = reader.read_bit();
-                        let _ = reader.read_bit();
-                    }
-                    let _ = reader.read_bit_short(); // invisibility
-                    let _ = reader.read_byte(); // lineweight
-                    reader.read_bit_short() // MULTILEADER class_version
-                };
-                let plausible = |v: i16| (0..=10).contains(&v);
-                let v_with = peek(reader, true);
-                reader.set_position_in_bits(start);
-                let v_without = peek(reader, false);
-                reader.set_position_in_bits(start);
-                // Decide by which offset decodes the class_version sanely.
-                // AutoCAD only ever writes 2, so an exact 2 outranks the
-                // broader 0..=10 plausibility band — a 1-bit misalignment can
-                // still decode to a "plausible" small integer (e.g. the BS
-                // '10' code = 0), which the old rule wrongly trusted.
-                let consume = if (v_with == 2) != (v_without == 2) {
-                    v_with == 2
-                } else {
-                    plausible(v_with) && !plausible(v_without)
-                };
-                if consume {
-                    has_ds_data = reader.read_bit();
-                }
-            } else {
-                has_ds_data = reader.read_bit();
-            }
+            has_ds_data = reader.read_bit();
         }
 
         // R13-R14: layer + linetype
@@ -806,15 +729,14 @@ impl DwgObjectReader {
         };
 
         // R2013+: binary data flag
-        if self.version.r2013_plus(self.dxf_version) {
-            let _has_binary_data = reader.read_bit();
-        }
+        let has_ds_data = self.version.r2013_plus(self.dxf_version) && reader.read_bit();
 
         NonEntityCommonData {
             common,
             owner_handle,
             reactors,
             xdictionary_handle,
+            has_ds_data,
         }
     }
 
