@@ -9712,8 +9712,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     /// Write ACIS data (shared by Solid3D, Region, Body)
     ///
     /// SAT text is split by newlines; each line becomes a separate DXF
-    /// group-code entry using group code 1.  Lines longer than 255
-    /// characters are subdivided into 255-char sub-chunks: the first
+    /// group-code entry using group code 1. Lines longer than 2049 bytes
+    /// are subdivided into 2049-byte sub-chunks: the first
     /// sub-chunk uses group code 1 and continuation sub-chunks use
     /// group code 3.
     ///
@@ -9731,15 +9731,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 Err(_) => "",
             }
         } else if !acis.sat_data.is_empty() {
-            // Preserve the source SAT schema. Downgrading newer SAT records
-            // loses relationships required by the legacy 3DSOLID path.
-            match crate::entities::acis::SatDocument::parse(&acis.sat_data) {
-                Ok(doc) => {
-                    converted = doc.to_sat_string();
-                    &converted
-                }
-                Err(_) => &acis.sat_data,
-            }
+            // Keep the original token stream. Re-serializing expands compact
+            // ACIS booleans and can make legacy readers reject freeform
+            // spline and p-curve payloads.
+            &acis.sat_data
         } else {
             &acis.sat_data
         };
@@ -9765,16 +9760,19 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         let mut any_written = false;
         for line in encoded.lines() {
-            if line.len() <= 255 {
+            if line.len() <= 2049 {
                 // Whole line fits in one chunk → group code 1
                 self.writer.write_string(1, line)?;
             } else {
-                // Split into 255-char sub-chunks:
+                // Split into 2049-byte sub-chunks without breaking UTF-8:
                 // first sub-chunk → gc 1, continuations → gc 3
                 let mut remaining = line;
                 let mut first = true;
                 while !remaining.is_empty() {
-                    let end = remaining.len().min(255);
+                    let mut end = remaining.len().min(2049);
+                    while !remaining.is_char_boundary(end) {
+                        end -= 1;
+                    }
                     let (chunk, rest) = remaining.split_at(end);
                     if first {
                         self.writer.write_string(1, chunk)?;
