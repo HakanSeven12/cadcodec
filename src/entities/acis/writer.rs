@@ -100,9 +100,8 @@ impl SatWriter {
             match base_entity_type(&record.entity_type) {
                 "lump" => Some(1),
                 "shell" => Some(2),
-                "body" | "subshell" | "wire" | "face" | "loop" | "vertex"
-                | "coedge" | "edge" | "point" | "transform" | "surface"
-                | "curve" | "pcurve" => Some(0),
+                "body" | "subshell" | "wire" | "face" | "loop" | "vertex" | "coedge" | "edge"
+                | "point" | "transform" | "surface" | "curve" | "pcurve" => Some(0),
                 _ => None,
             }
         } else {
@@ -263,12 +262,7 @@ impl SatDocument {
     }
 
     /// Add a plane-surface record and return its index.
-    pub fn add_plane_surface(
-        &mut self,
-        root: [f64; 3],
-        normal: [f64; 3],
-        u_dir: [f64; 3],
-    ) -> i32 {
+    pub fn add_plane_surface(&mut self, root: [f64; 3], normal: [f64; 3], u_dir: [f64; 3]) -> i32 {
         let index = self.records.len() as i32;
         let mut record = SatRecord::new(index, "plane-surface");
         record.attribute = SatPointer::NULL;
@@ -293,11 +287,7 @@ impl SatDocument {
     }
 
     /// Add a straight-curve record and return its index.
-    pub fn add_straight_curve(
-        &mut self,
-        root: [f64; 3],
-        direction: [f64; 3],
-    ) -> i32 {
+    pub fn add_straight_curve(&mut self, root: [f64; 3], direction: [f64; 3]) -> i32 {
         let index = self.records.len() as i32;
         let mut record = SatRecord::new(index, "straight-curve");
         record.attribute = SatPointer::NULL;
@@ -351,7 +341,7 @@ impl SatDocument {
         let radius = (major_axis[0] * major_axis[0]
             + major_axis[1] * major_axis[1]
             + major_axis[2] * major_axis[2])
-        .sqrt();
+            .sqrt();
         record.tokens.push(SatToken::Float(radius));
         // cone-surface uses `forward` (not `forward_v` like plane/sphere)
         record.tokens.push(SatToken::Ident("forward".to_string()));
@@ -480,14 +470,21 @@ impl SatDocument {
         record.tokens.push(id("forward"));
         record.tokens.push(id("{"));
         record.tokens.push(id("exactcur"));
-        record.tokens.push(id("full"));
-        record.tokens.push(id(if rational { "nurbs" } else { "nubs" }));
+        record.tokens.push(SatToken::Enum("full".to_string()));
+        record
+            .tokens
+            .push(id(if rational { "nurbs" } else { "nubs" }));
         record.tokens.push(SatToken::Integer(degree as i64));
-        record.tokens.push(id(if closed { "closed" } else { "open" }));
+        record.tokens.push(SatToken::Enum(
+            if closed { "closed" } else { "open" }.to_string(),
+        ));
         record.tokens.push(SatToken::Integer(knots.len() as i64));
-        for &(knot, multiplicity) in knots {
+        for (position, &(knot, multiplicity)) in knots.iter().enumerate() {
             record.tokens.push(SatToken::Float(knot));
-            record.tokens.push(SatToken::Integer(multiplicity as i64));
+            let implicit = i32::from(position == 0 || position + 1 == knots.len());
+            record
+                .tokens
+                .push(SatToken::Integer((multiplicity - implicit) as i64));
         }
         for (position, point) in control.iter().enumerate() {
             record.tokens.push(SatToken::Float(point[0]));
@@ -512,12 +509,12 @@ impl SatDocument {
             id("I"),
         ]);
         record.tokens.extend([
-            SatToken::Float(0.0),
-            SatToken::Float(0.0),
-            SatToken::Float(0.0),
-            SatToken::False,
+            SatToken::Integer(0),
+            SatToken::Integer(0),
+            SatToken::Integer(0),
+            id("F"),
             SatToken::Float(1.0),
-            SatToken::False,
+            id("F"),
             SatToken::Float(0.0),
         ]);
         record.tokens.push(id("}"));
@@ -531,10 +528,10 @@ impl SatDocument {
 
     /// Add an exact NURBS `spline-surface` record and return its index.
     ///
-    /// Emits the `exact_spl_sur` form used for a free-form (non-analytic)
+    /// Emits the ACIS 7 `exactsur` form used for a free-form (non-analytic)
     /// surface — a `bs3_surface` with a fit tolerance:
-    /// `spline-surface … forward_v { exact_spl_sur nubs|nurbs deg_u deg_v
-    /// u_clo v_clo none none n_u n_v (uknot mult)… (vknot mult)… ctrl… tol } I I I I`.
+    /// Input knot runs include the complete clamped endpoint multiplicities;
+    /// ACIS omits one endpoint repetition on each end of each axis.
     ///
     /// * `rational` — `false` = `nubs` (control points are x y z); `true` =
     ///   `nurbs` (each control point carries a trailing weight).
@@ -569,25 +566,43 @@ impl SatDocument {
         let id = |s: &str| SatToken::Ident(s.to_string());
 
         record.tokens.push(SatToken::Pointer(SatPointer::NULL)); // v700 sentinel
-        record.tokens.push(id(if rev_v { "reversed_v" } else { "forward_v" }));
+        record
+            .tokens
+            .push(id(if rev_v { "reversed" } else { "forward" }));
         record.tokens.push(id("{"));
-        record.tokens.push(id("exact_spl_sur"));
-        record.tokens.push(id(if rational { "nurbs" } else { "nubs" }));
+        record.tokens.push(id("exactsur"));
+        record.tokens.push(SatToken::Enum("full".to_string()));
+        record
+            .tokens
+            .push(id(if rational { "nurbs" } else { "nubs" }));
         record.tokens.push(SatToken::Integer(deg_u as i64));
         record.tokens.push(SatToken::Integer(deg_v as i64));
-        record.tokens.push(id(if u_closed { "closed" } else { "open" }));
-        record.tokens.push(id(if v_closed { "closed" } else { "open" }));
-        record.tokens.push(id("none")); // u-singularity
-        record.tokens.push(id("none")); // v-singularity
+        if rational {
+            record.tokens.push(id("both"));
+        }
+        record.tokens.push(SatToken::Enum(
+            if u_closed { "closed" } else { "open" }.to_string(),
+        ));
+        record.tokens.push(SatToken::Enum(
+            if v_closed { "closed" } else { "open" }.to_string(),
+        ));
+        record.tokens.push(SatToken::Enum("none".to_string()));
+        record.tokens.push(SatToken::Enum("none".to_string()));
         record.tokens.push(SatToken::Integer(u_knots.len() as i64));
         record.tokens.push(SatToken::Integer(v_knots.len() as i64));
-        for &(knot, mult) in u_knots {
+        for (position, &(knot, mult)) in u_knots.iter().enumerate() {
             record.tokens.push(SatToken::Float(knot));
-            record.tokens.push(SatToken::Integer(mult as i64));
+            let implicit = i32::from(position == 0 || position + 1 == u_knots.len());
+            record
+                .tokens
+                .push(SatToken::Integer((mult - implicit) as i64));
         }
-        for &(knot, mult) in v_knots {
+        for (position, &(knot, mult)) in v_knots.iter().enumerate() {
             record.tokens.push(SatToken::Float(knot));
-            record.tokens.push(SatToken::Integer(mult as i64));
+            let implicit = i32::from(position == 0 || position + 1 == v_knots.len());
+            record
+                .tokens
+                .push(SatToken::Integer((mult - implicit) as i64));
         }
         for (i, p) in control.iter().enumerate() {
             record.tokens.push(SatToken::Float(p[0]));
@@ -599,6 +614,9 @@ impl SatDocument {
             }
         }
         record.tokens.push(SatToken::Float(fit_tol));
+        // Empty U/V discontinuity lists, then the exact surface's native bounds.
+        record.tokens.extend((0..6).map(|_| SatToken::Integer(0)));
+        record.tokens.extend((0..4).map(|_| id("I")));
         record.tokens.push(id("}"));
         record.tokens.push(id("I"));
         record.tokens.push(id("I"));
@@ -610,7 +628,9 @@ impl SatDocument {
         index
     }
 
-    /// Add an inline NURBS trimming curve in surface parameter space.
+    /// Add an ACIS 7 explicit pcurve on an existing spline-surface record.
+    /// Knot parameters must already match the owning edge. The final pair
+    /// are UV offsets, not an active parameter interval.
     #[allow(clippy::too_many_arguments)]
     pub fn add_pcurve(
         &mut self,
@@ -621,8 +641,28 @@ impl SatDocument {
         control: &[[f64; 2]],
         weights: Option<&[f64]>,
         fit_tol: f64,
-        parameter_range: (f64, f64),
+        support_surface: i32,
+        offsets: (f64, f64),
     ) -> i32 {
+        let support = self
+            .record(support_surface as usize)
+            .expect("pcurve support surface");
+        assert_eq!(support.entity_type, "spline-surface");
+        let support_sense = support.tokens[1].clone();
+        let subtype_index = self
+            .records
+            .iter()
+            .take(support_surface as usize)
+            .map(|record| {
+                record
+                    .tokens
+                    .windows(2)
+                    .filter(|pair| {
+                        pair[0].as_ident() == Some("{") && pair[1].as_ident() != Some("ref")
+                    })
+                    .count()
+            })
+            .sum::<usize>();
         let index = self.records.len() as i32;
         let mut record = SatRecord::new(index, "pcurve");
         record.attribute = SatPointer::NULL;
@@ -630,15 +670,23 @@ impl SatDocument {
 
         record.tokens.push(SatToken::Pointer(SatPointer::NULL));
         record.tokens.push(SatToken::Integer(0));
+        record.tokens.push(id("forward"));
         record.tokens.push(id("{"));
-        record.tokens.push(id("exp_par_cur"));
-        record.tokens.push(id(if rational { "nurbs" } else { "nubs" }));
+        record.tokens.push(id("exppc"));
+        record
+            .tokens
+            .push(id(if rational { "nurbs" } else { "nubs" }));
         record.tokens.push(SatToken::Integer(degree as i64));
-        record.tokens.push(id(if closed { "closed" } else { "open" }));
+        record.tokens.push(SatToken::Enum(
+            if closed { "closed" } else { "open" }.to_string(),
+        ));
         record.tokens.push(SatToken::Integer(knots.len() as i64));
-        for &(knot, multiplicity) in knots {
+        for (position, &(knot, multiplicity)) in knots.iter().enumerate() {
             record.tokens.push(SatToken::Float(knot));
-            record.tokens.push(SatToken::Integer(multiplicity as i64));
+            let implicit = i32::from(position == 0 || position + 1 == knots.len());
+            record
+                .tokens
+                .push(SatToken::Integer((multiplicity - implicit) as i64));
         }
         for (position, point) in control.iter().enumerate() {
             record.tokens.push(SatToken::Float(point[0]));
@@ -653,10 +701,18 @@ impl SatDocument {
             }
         }
         record.tokens.push(SatToken::Float(fit_tol));
-        record.tokens.push(id("}"));
+        record.tokens.extend([
+            id("spline"),
+            support_sense,
+            id("{"),
+            id("ref"),
+            SatToken::Integer(subtype_index as i64),
+            id("}"),
+        ]);
         record.tokens.extend((0..4).map(|_| id("I")));
-        record.tokens.push(SatToken::Float(parameter_range.0));
-        record.tokens.push(SatToken::Float(parameter_range.1));
+        record.tokens.push(id("}"));
+        record.tokens.push(SatToken::Float(offsets.0));
+        record.tokens.push(SatToken::Float(offsets.1));
 
         self.records.push(record);
         self.header.num_records = self.records.len();
@@ -700,7 +756,9 @@ impl SatDocument {
         record.tokens.push(SatToken::Float(end_param));
         record.tokens.push(SatToken::Pointer(coedge));
         record.tokens.push(SatToken::Pointer(curve));
-        record.tokens.push(SatToken::Enum(sense.as_str().to_string()));
+        record
+            .tokens
+            .push(SatToken::Enum(sense.as_str().to_string()));
         record.tokens.push(SatToken::String("unknown".to_string()));
         self.records.push(record);
         self.header.num_records = self.records.len();
@@ -725,7 +783,9 @@ impl SatDocument {
         record.tokens.push(SatToken::Pointer(prev));
         record.tokens.push(SatToken::Pointer(partner));
         record.tokens.push(SatToken::Pointer(edge));
-        record.tokens.push(SatToken::Enum(sense.as_str().to_string()));
+        record
+            .tokens
+            .push(SatToken::Enum(sense.as_str().to_string()));
         record.tokens.push(SatToken::Pointer(owner_loop));
         record.tokens.push(SatToken::Pointer(SatPointer::NULL)); // pcurve (always $-1)
         self.records.push(record);
@@ -771,25 +831,25 @@ impl SatDocument {
         record.tokens.push(SatToken::Pointer(shell));
         record.tokens.push(SatToken::Pointer(SatPointer::NULL)); // subshell
         record.tokens.push(SatToken::Pointer(surface));
-        record.tokens.push(SatToken::Enum(sense.as_str().to_string()));
-        record.tokens.push(SatToken::Enum(sidedness.as_str().to_string()));
+        record
+            .tokens
+            .push(SatToken::Enum(sense.as_str().to_string()));
+        record
+            .tokens
+            .push(SatToken::Enum(sidedness.as_str().to_string()));
         self.records.push(record);
         self.header.num_records = self.records.len();
         index
     }
 
     /// Add a shell record and return its index.
-    pub fn add_shell(
-        &mut self,
-        first_face: SatPointer,
-        lump: SatPointer,
-    ) -> i32 {
+    pub fn add_shell(&mut self, first_face: SatPointer, lump: SatPointer) -> i32 {
         let index = self.records.len() as i32;
         let mut record = SatRecord::new(index, "shell");
         record.attribute = SatPointer::NULL;
+        record.tokens.push(SatToken::Pointer(SatPointer::NULL)); // pattern
         record.tokens.push(SatToken::Pointer(SatPointer::NULL)); // next_shell
         record.tokens.push(SatToken::Pointer(SatPointer::NULL)); // subshell
-        record.tokens.push(SatToken::Pointer(SatPointer::NULL)); // unknown (always $-1)
         record.tokens.push(SatToken::Pointer(first_face));
         record.tokens.push(SatToken::Pointer(SatPointer::NULL)); // wire
         record.tokens.push(SatToken::Pointer(lump));
@@ -799,16 +859,12 @@ impl SatDocument {
     }
 
     /// Add a lump record and return its index.
-    pub fn add_lump(
-        &mut self,
-        shell: SatPointer,
-        body: SatPointer,
-    ) -> i32 {
+    pub fn add_lump(&mut self, shell: SatPointer, body: SatPointer) -> i32 {
         let index = self.records.len() as i32;
         let mut record = SatRecord::new(index, "lump");
         record.attribute = SatPointer::NULL;
+        record.tokens.push(SatToken::Pointer(SatPointer::NULL)); // pattern
         record.tokens.push(SatToken::Pointer(SatPointer::NULL)); // next_lump
-        record.tokens.push(SatToken::Pointer(SatPointer::NULL)); // unknown (always $-1)
         record.tokens.push(SatToken::Pointer(shell));
         record.tokens.push(SatToken::Pointer(body));
         self.records.push(record);
@@ -881,11 +937,7 @@ mod tests {
         let mut doc = SatDocument::new_body();
 
         // Add a plane surface
-        let plane_idx = doc.add_plane_surface(
-            [0.0, 0.0, 5.0],
-            [0.0, 0.0, 1.0],
-            [1.0, 0.0, 0.0],
-        );
+        let plane_idx = doc.add_plane_surface([0.0, 0.0, 5.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
 
         let output = doc.to_sat_string();
         assert!(output.contains("plane-surface"));
@@ -909,11 +961,7 @@ mod tests {
         // Build minimal topology
         let point_idx = doc.add_point(1.0, 2.0, 3.0);
         let vertex_idx = doc.add_vertex(SatPointer::NULL, SatPointer::new(point_idx));
-        let surface_idx = doc.add_plane_surface(
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            [1.0, 0.0, 0.0],
-        );
+        let surface_idx = doc.add_plane_surface([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
 
         let output = doc.to_sat_string();
         assert!(output.contains("point"));
@@ -937,12 +985,7 @@ mod tests {
     #[test]
     fn test_add_sphere_surface() {
         let mut doc = SatDocument::new_body();
-        let idx = doc.add_sphere_surface(
-            [0.0, 0.0, 0.0],
-            5.0,
-            [1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-        );
+        let idx = doc.add_sphere_surface([0.0, 0.0, 0.0], 5.0, [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
 
         let output = doc.to_sat_string();
         assert!(output.contains("sphere-surface"));
@@ -961,12 +1004,12 @@ mod tests {
     fn test_cone_surface_accessor_positions() {
         let mut doc = SatDocument::new_body();
         let _idx = doc.add_cone_surface(
-            [1.0, 2.0, 3.0],      // center
-            [0.0, 0.0, 1.0],      // axis
-            [5.0, 0.0, 0.0],      // major_axis (radius = 5)
-            1.0,                    // ratio
-            1.0,                    // cos_half_angle (cylinder)
-            0.0,                    // sin_half_angle (cylinder)
+            [1.0, 2.0, 3.0], // center
+            [0.0, 0.0, 1.0], // axis
+            [5.0, 0.0, 0.0], // major_axis (radius = 5)
+            1.0,             // ratio
+            1.0,             // cos_half_angle (cylinder)
+            0.0,             // sin_half_angle (cylinder)
         );
 
         // Roundtrip through SAT text
@@ -979,16 +1022,28 @@ mod tests {
         assert_eq!(cone.axis(), (0.0, 0.0, 1.0));
         assert_eq!(cone.major_axis(), (5.0, 0.0, 0.0));
         assert_eq!(cone.ratio(), 1.0);
-        assert!((cone.sin_half_angle() - 0.0).abs() < 1e-10, "sin should be 0.0 for cylinder, got {}", cone.sin_half_angle());
-        assert!((cone.cos_half_angle() - 1.0).abs() < 1e-10, "cos should be 1.0 for cylinder, got {}", cone.cos_half_angle());
-        assert!((cone.radius() - 5.0).abs() < 1e-10, "radius should be 5.0, got {}", cone.radius());
+        assert!(
+            (cone.sin_half_angle() - 0.0).abs() < 1e-10,
+            "sin should be 0.0 for cylinder, got {}",
+            cone.sin_half_angle()
+        );
+        assert!(
+            (cone.cos_half_angle() - 1.0).abs() < 1e-10,
+            "cos should be 1.0 for cylinder, got {}",
+            cone.cos_half_angle()
+        );
+        assert!(
+            (cone.radius() - 5.0).abs() < 1e-10,
+            "radius should be 5.0, got {}",
+            cone.radius()
+        );
     }
 
     #[test]
     fn test_cone_surface_accessor_with_cone_angles() {
         let mut doc = SatDocument::new_body();
-        let sin_val: f64 = 30.0_f64.to_radians().sin();  // ~0.5
-        let cos_val: f64 = 30.0_f64.to_radians().cos();  // ~0.866
+        let sin_val: f64 = 30.0_f64.to_radians().sin(); // ~0.5
+        let cos_val: f64 = 30.0_f64.to_radians().cos(); // ~0.866
         let _idx = doc.add_cone_surface(
             [0.0, 0.0, 0.0],
             [0.0, 0.0, 1.0],
@@ -1002,8 +1057,18 @@ mod tests {
         let doc2 = SatDocument::parse(&output).unwrap();
         let cones = doc2.records_of_type("cone-surface");
         let cone = SatConeSurface::from_record(cones[0]).unwrap();
-        assert!((cone.sin_half_angle() - sin_val).abs() < 1e-10, "sin mismatch: {} vs {}", cone.sin_half_angle(), sin_val);
-        assert!((cone.cos_half_angle() - cos_val).abs() < 1e-10, "cos mismatch: {} vs {}", cone.cos_half_angle(), cos_val);
+        assert!(
+            (cone.sin_half_angle() - sin_val).abs() < 1e-10,
+            "sin mismatch: {} vs {}",
+            cone.sin_half_angle(),
+            sin_val
+        );
+        assert!(
+            (cone.cos_half_angle() - cos_val).abs() < 1e-10,
+            "cos mismatch: {} vs {}",
+            cone.cos_half_angle(),
+            cos_val
+        );
     }
 
     #[test]
@@ -1033,8 +1098,8 @@ mod tests {
             .next()
             .expect("spline-surface present after re-parse");
         // deg_u, deg_v tokens.
-        assert!(matches!(sp.tokens.get(5), Some(SatToken::Integer(1))));
         assert!(matches!(sp.tokens.get(6), Some(SatToken::Integer(1))));
+        assert!(matches!(sp.tokens.get(7), Some(SatToken::Integer(1))));
         assert!(
             re.validate().is_empty(),
             "spline-surface failed validation: {:?}",
