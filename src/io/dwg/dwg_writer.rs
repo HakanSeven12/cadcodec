@@ -386,18 +386,39 @@ fn prepare_header(
                 }
             });
         if !mls_valid {
-            // Lowest handle wins: `objects` is a HashMap, and a first-match
-            // scan would pick a different "Standard" style on each call.
-            h.current_multiline_style_handle = document
+            let dictionary_standard = document
                 .objects
-                .values()
-                .filter_map(|obj| match obj {
-                    crate::objects::ObjectType::MLineStyle(mls) if mls.name == "Standard" => {
-                        Some(mls.handle)
+                .get(&h.acad_mlinestyle_dict_handle)
+                .and_then(|object| match object {
+                    crate::objects::ObjectType::Dictionary(dictionary) => {
+                        dictionary.get("Standard")
                     }
                     _ => None,
                 })
-                .min_by_key(|handle| handle.value())
+                .filter(|handle| {
+                    matches!(
+                        document.objects.get(handle),
+                        Some(crate::objects::ObjectType::MLineStyle(style))
+                            if style.handle == *handle
+                    )
+                });
+
+            h.current_multiline_style_handle = dictionary_standard
+                .or_else(|| {
+                    document
+                        .objects
+                        .values()
+                        .filter_map(|object| match object {
+                            crate::objects::ObjectType::MLineStyle(style)
+                                if style.name.eq_ignore_ascii_case("Standard")
+                                    && !style.handle.is_null() =>
+                            {
+                                Some(style.handle)
+                            }
+                            _ => None,
+                        })
+                        .min_by_key(|handle| handle.value())
+                })
                 .unwrap_or(Handle::NULL);
         }
     }
@@ -1850,6 +1871,59 @@ mod tests {
             !prepared.current_linetype_handle.is_null(),
             "current_linetype_handle must be resolved (default to ByLayer)"
         );
+    }
+
+    #[test]
+    fn test_prepare_header_prefers_dictionary_standard_mlinestyle() {
+        let mut doc = CadDocument::new();
+        let dictionary_standard = doc.header.current_multiline_style_handle;
+        let orphan_handle = (1..dictionary_standard.value())
+            .map(Handle::new)
+            .find(|handle| !doc.objects.contains_key(handle))
+            .expect("an unused lower handle");
+        let mut orphan = crate::objects::MLineStyle::standard();
+        orphan.handle = orphan_handle;
+        doc.objects.insert(
+            orphan_handle,
+            crate::objects::ObjectType::MLineStyle(orphan),
+        );
+        doc.header.current_multiline_style_handle = Handle::NULL;
+
+        let prepared = prepare_header(&doc, &[], &None);
+
+        assert_eq!(prepared.current_multiline_style_handle, dictionary_standard);
+    }
+
+    #[test]
+    fn test_prepare_header_mlinestyle_recovery_is_deterministic() {
+        let mut doc = CadDocument::new();
+        let dictionary_handle = doc.header.acad_mlinestyle_dict_handle;
+        let original_standard = doc.header.current_multiline_style_handle;
+        let recovery_handle = (1..original_standard.value())
+            .map(Handle::new)
+            .find(|handle| !doc.objects.contains_key(handle))
+            .expect("an unused lower handle");
+        let mut recovery = crate::objects::MLineStyle::standard();
+        recovery.handle = recovery_handle;
+        doc.objects.insert(
+            recovery_handle,
+            crate::objects::ObjectType::MLineStyle(recovery),
+        );
+        let crate::objects::ObjectType::Dictionary(dictionary) = doc
+            .objects
+            .get_mut(&dictionary_handle)
+            .expect("ACAD_MLINESTYLE dictionary")
+        else {
+            panic!("ACAD_MLINESTYLE handle should reference a dictionary");
+        };
+        dictionary
+            .entries
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("Standard"));
+        doc.header.current_multiline_style_handle = Handle::NULL;
+
+        let prepared = prepare_header(&doc, &[], &None);
+
+        assert_eq!(prepared.current_multiline_style_handle, recovery_handle);
     }
 
     #[test]

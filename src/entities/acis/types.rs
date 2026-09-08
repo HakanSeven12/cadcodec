@@ -222,7 +222,7 @@ impl fmt::Display for SatPointer {
 /// Tokens can be entity-type identifiers, pointers, numbers, strings,
 /// or enum values.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
 pub enum SatToken {
     /// An identifier/keyword (entity type, sense, etc.).
     Ident(String),
@@ -253,6 +253,53 @@ pub enum SatToken {
         /// Raw tag payload.
         data: Vec<u8>,
     },
+}
+
+/// Serde representation for [`SatToken`].
+///
+/// Coordinate SAB tags retain their raw bytes in memory so a SAB writer can
+/// reproduce them exactly. JSON consumers, however, have historically seen
+/// them as the semantic `Position` token shared with SAT input.
+#[cfg(feature = "serde")]
+#[derive(serde::Serialize)]
+enum SatTokenJson<'a> {
+    Ident(&'a str),
+    Pointer(SatPointer),
+    Integer(i64),
+    Float(f64),
+    String(&'a str),
+    Position(f64, f64, f64),
+    True,
+    False,
+    Terminator,
+    Enum(&'a str),
+    Sab { tag: u8, data: &'a [u8] },
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for SatToken {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let token = match self {
+            Self::Ident(value) => SatTokenJson::Ident(value),
+            Self::Pointer(value) => SatTokenJson::Pointer(*value),
+            Self::Integer(value) => SatTokenJson::Integer(*value),
+            Self::Float(value) => SatTokenJson::Float(*value),
+            Self::String(value) => SatTokenJson::String(value),
+            Self::Position(x, y, z) => SatTokenJson::Position(*x, *y, *z),
+            Self::True => SatTokenJson::True,
+            Self::False => SatTokenJson::False,
+            Self::Terminator => SatTokenJson::Terminator,
+            Self::Enum(value) => SatTokenJson::Enum(value),
+            Self::Sab { tag, data } => match self.coordinate_components() {
+                Some(([x, y, z], 3)) => SatTokenJson::Position(x, y, z),
+                _ => SatTokenJson::Sab { tag: *tag, data },
+            },
+        };
+        serde::Serialize::serialize(&token, serializer)
+    }
 }
 
 impl SatToken {
@@ -2893,4 +2940,28 @@ pub fn classify_entity_type(entity_type: &str) -> SatEntityCategory {
 /// For example, `tcoedge-coedge` derives from `coedge`.
 pub fn base_entity_type(entity_type: &str) -> &str {
     entity_type.rsplit('-').next().unwrap_or(entity_type)
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+
+    #[test]
+    fn sab_coordinate_tokens_use_the_legacy_position_json_shape() {
+        let values = [8.863414495014042e-14, -1.0, 0.0];
+        let data = values
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let token = SatToken::Sab { tag: 0x14, data };
+
+        assert_eq!(
+            serde_json::to_value(&token).unwrap(),
+            serde_json::json!({ "Position": values })
+        );
+        assert_eq!(
+            serde_json::from_value::<SatToken>(serde_json::json!({ "Position": values })).unwrap(),
+            SatToken::Position(values[0], values[1], values[2])
+        );
+    }
 }
