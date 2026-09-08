@@ -1371,4 +1371,28 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn sat_integer_spline_coordinates_survive_sab() {
+        let mut doc = SatDocument::new_body();
+        doc.add_spline_curve(
+            false,
+            2,
+            false,
+            &[(0.0, 3), (1.0, 3)],
+            &[[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]],
+            None,
+            0.0,
+        );
+
+        // The SAT parser represents exact integral coordinates as integer
+        // tokens; SAB retains their integer tags even though they remain valid
+        // numeric spline coordinates.
+        let parsed_text = SatDocument::parse(&doc.to_sat_string()).unwrap();
+        let roundtrip = SabReader::read(&SabWriter::write(&parsed_text)).unwrap();
+        let curve = SatIntCurve::from_record(roundtrip.records_of_type("intcurve-curve")[0])
+            .expect("NURBS curve record");
+        let (_, _, controls) = curve.bspline().expect("decoded NURBS curve");
+        assert_eq!(controls[1], [1.0, 1.0, 0.0, 1.0]);
+    }
 }
