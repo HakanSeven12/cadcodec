@@ -2484,6 +2484,59 @@ impl CadDocument {
         Some(std::mem::replace(current, operation))
     }
 
+    /// Replace one existing operation in the active history chain without
+    /// changing which node is active.
+    ///
+    /// The operation's evaluation node id identifies the node to replace. Its
+    /// step id is used for older histories that do not carry evaluation ids.
+    pub fn update_solid_history_step(
+        &mut self,
+        entity: Handle,
+        operation: SolidHistoryOperation,
+    ) -> Option<SolidHistoryOperation> {
+        let (dxf_name, cpp_class_name) = operation.class_names()?;
+        let graph = self.solid_history_graph(entity)?;
+        let replacement_base = operation.base()?;
+        let replacement_id = if replacement_base.eval.node_id > 0 {
+            replacement_base.eval.node_id
+        } else {
+            replacement_base.step_id
+        };
+        if replacement_id <= 0 {
+            return None;
+        }
+        let node = graph.nodes.iter().copied().find(|handle| {
+            let Some(ObjectType::DynamicBlock(value)) = self.objects.get(handle) else {
+                return false;
+            };
+            let DynamicBlockData::SolidHistoryNode(current) = &value.data else {
+                return false;
+            };
+            current.base().is_some_and(|base| {
+                let node_id = if base.eval.node_id > 0 {
+                    base.eval.node_id
+                } else {
+                    base.step_id
+                };
+                node_id == replacement_id
+            })
+        })?;
+
+        if !self.classes.contains(dxf_name) {
+            self.classes
+                .add_or_update(crate::classes::DxfClass::new(dxf_name, cpp_class_name));
+        }
+        let ObjectType::DynamicBlock(value) = self.objects.get_mut(&node)? else {
+            return None;
+        };
+        value.dxf_name = dxf_name.to_string();
+        value.cpp_class_name = cpp_class_name.to_string();
+        let DynamicBlockData::SolidHistoryNode(current) = &mut value.data else {
+            return None;
+        };
+        Some(std::mem::replace(current, operation))
+    }
+
     pub fn copy_solid_history(
         &mut self,
         source: Handle,
