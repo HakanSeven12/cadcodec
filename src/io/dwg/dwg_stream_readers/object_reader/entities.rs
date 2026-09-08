@@ -5077,8 +5077,19 @@ pub fn read_acis_entity(
     dxf_version: DxfVersion,
     has_ds_data: bool,
 ) -> AcisEntityData {
-    read_acis_entity_impl(reader, version, dxf_version, has_ds_data, false, None)
+    read_acis_entity_impl(reader, version, dxf_version, has_ds_data, false, false, None)
         .expect("database ACIS decoding retains unrecognized legacy payloads")
+}
+
+/// Solid-history B-rep objects keep their modeler body inline even in R2013+
+/// drawings, while their material references still use the object handle stream.
+pub(super) fn read_history_acis_entity(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+) -> AcisEntityData {
+    read_acis_entity_impl(reader, version, dxf_version, false, false, true, None)
+        .expect("history ACIS decoding retains unrecognized modeler payloads")
 }
 
 /// Embedded construction profiles have no database handle or AcDs entry.
@@ -5094,7 +5105,7 @@ pub(crate) fn read_inline_acis_entity(
     if end > reader.main_mut().data_len() as i64 * 8 {
         return None;
     }
-    let data = read_acis_entity_impl(reader, version, dxf_version, false, true, Some(end))?;
+    let data = read_acis_entity_impl(reader, version, dxf_version, false, true, true, Some(end))?;
     let remaining = end - reader.position_in_bits();
     // Byte-sized enclosing records may carry up to seven zero padding bits.
     // Never normalize an unrecognized modeler tail into a partial REGION.
@@ -5110,13 +5121,14 @@ fn read_acis_entity_impl(
     dxf_version: DxfVersion,
     has_ds_data: bool,
     allow_extra: bool,
+    inline_layout: bool,
     inline_end: Option<i64>,
 ) -> Option<AcisEntityData> {
     // R2013+ moved modeler data into AcDs and removed the leading
     // `acis_empty` bit from the entity record.  The first bit after common
     // entity data is `wireframe_data_present` in that layout.  Consuming the
     // legacy bit here shifts every wire/material/revision field by one.
-    let acis_empty = if version.r2013_plus(dxf_version) && inline_end.is_none() {
+    let acis_empty = if version.r2013_plus(dxf_version) && !inline_layout {
         !has_ds_data
     } else {
         reader.read_bit()
@@ -5475,7 +5487,15 @@ pub fn read_surface(
     has_ds_data: bool,
     kind: SurfaceKind,
 ) -> SurfaceEntityData {
-    let acis = read_acis_entity_impl(reader, version, dxf_version, has_ds_data, true, None)
+    let acis = read_acis_entity_impl(
+        reader,
+        version,
+        dxf_version,
+        has_ds_data,
+        true,
+        false,
+        None,
+    )
         .expect("database surface decoding retains unrecognized legacy payloads");
     // Surface records do not have the 3DSOLID history-id handle slot.
     let history_handle = 0;

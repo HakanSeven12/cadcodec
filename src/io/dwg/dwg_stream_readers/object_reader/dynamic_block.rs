@@ -448,7 +448,8 @@ pub fn read_solid_history_data(
         "ACSH_BREP_CLASS" => {
             let operation_major = reader.read_bit_long();
             let operation_minor = reader.read_bit_long();
-            let data = super::entities::read_acis_entity(reader, version, dxf_version, false);
+            let data =
+                super::entities::read_history_acis_entity(reader, version, dxf_version);
             let mut acis_data = crate::entities::AcisData::new();
             acis_data.sat_data = data.sat_data;
             acis_data.sab_data = data.sab_data;
