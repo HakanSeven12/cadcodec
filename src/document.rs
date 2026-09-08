@@ -2492,9 +2492,10 @@ impl CadDocument {
     pub fn update_solid_history_step(
         &mut self,
         entity: Handle,
-        operation: SolidHistoryOperation,
+        mut operation: SolidHistoryOperation,
     ) -> Option<SolidHistoryOperation> {
         let (dxf_name, cpp_class_name) = operation.class_names()?;
+        let chain = self.solid_history_operations(entity)?;
         let graph = self.solid_history_graph(entity)?;
         let replacement_base = operation.base()?;
         let replacement_id = if replacement_base.eval.node_id > 0 {
@@ -2505,7 +2506,21 @@ impl CadDocument {
         if replacement_id <= 0 {
             return None;
         }
-        let node = graph.nodes.iter().copied().find(|handle| {
+        let mut chain_matches = chain.iter().filter(|current| {
+            current.base().is_some_and(|base| {
+                let node_id = if base.eval.node_id > 0 {
+                    base.eval.node_id
+                } else {
+                    base.step_id
+                };
+                node_id == replacement_id
+            })
+        });
+        chain_matches.next()?;
+        if chain_matches.next().is_some() {
+            return None;
+        }
+        let mut node_matches = graph.nodes.iter().copied().filter(|handle| {
             let Some(ObjectType::DynamicBlock(value)) = self.objects.get(handle) else {
                 return false;
             };
@@ -2520,7 +2535,23 @@ impl CadDocument {
                 };
                 node_id == replacement_id
             })
-        })?;
+        });
+        let node = node_matches.next()?;
+        if node_matches.next().is_some() {
+            return None;
+        }
+
+        let current_base = match self.objects.get(&node)? {
+            ObjectType::DynamicBlock(value) => match &value.data {
+                DynamicBlockData::SolidHistoryNode(current) => current.base()?.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let replacement_base = operation.base_mut()?;
+        replacement_base.step_id = current_base.step_id;
+        replacement_base.eval.node_id = current_base.eval.node_id;
+        replacement_base.eval.parent_id = current_base.eval.parent_id;
 
         if !self.classes.contains(dxf_name) {
             self.classes
