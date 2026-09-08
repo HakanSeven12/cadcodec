@@ -197,6 +197,7 @@ impl SabWriter {
         let mut i = 0;
         let mut step_index = 0; // tracks position in layout.steps
         let mut subtype_depth = 0usize;
+        let mut active_steps = layout.steps;
 
         // Skip the first Pointer token (v700 unknown/$-1) to count geometry tokens
         let geom_start = tokens.iter().position(|t| Self::is_numeric(t));
@@ -207,6 +208,20 @@ impl SabWriter {
             if subtype_depth > 0 {
                 if let SatToken::Ident(name) = &tokens[i] {
                     if name != "{" && name != "}" && Self::string_to_boolean(name).is_none() {
+                        // Explicit UV curves and intersection curves embed
+                        // analytic surface geometry inside their subtype.
+                        // Its vectors need the same binary grouping as a
+                        // standalone surface, without grouping UV controls.
+                        let inline_layout = match name.as_str() {
+                            "plane" | "cone" => Some(CoordLayout::POS_DIR_DIR),
+                            "sphere" => Some(CoordLayout::POS_S_DIR_DIR),
+                            "torus" => Some(CoordLayout::POS_DIR_SS_DIR),
+                            _ => None,
+                        };
+                        if let Some(inline_layout) = inline_layout {
+                            active_steps = inline_layout.steps;
+                            step_index = 0;
+                        }
                         Self::write_entity_type(buf, name);
                         i += 1;
                         continue;
@@ -242,8 +257,8 @@ impl SabWriter {
             // Are we in the geometry section of the token stream?
             let in_geom = geom_start.map(|gs| i >= gs).unwrap_or(false);
 
-            if in_geom && step_index < layout.steps.len() {
-                match layout.steps[step_index] {
+            if in_geom && step_index < active_steps.len() {
+                match active_steps[step_index] {
                     Some(tag) => {
                         // This step expects a coordinate triplet (3 floats → Position/Direction)
                         if i + 2 < tokens.len()
