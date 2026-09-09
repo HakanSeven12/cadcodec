@@ -188,11 +188,10 @@ pub const OBJ_OBJECT_PTR: i16 = 0x8E; // 142
 pub fn is_entity_type(type_code: i16) -> bool {
     // Fixed entity types: 1–47, 74 (OLE2FRAME), 77 (LWPOLYLINE), 78 (HATCH)
     // EXCEPT: 42 (OBJ_DICTIONARY) is a non-graphical object, not an entity.
-    // Class-based entity sentinels: -14..-1 (underlays, surfaces, WIPEOUT,
-    // MULTILEADER, MESH, IMAGE).
+    // Class-based entity sentinels: -28..-1.
     // Class-based entity types (≥500) are NOT included here; the builder
     // checks the class's is_an_entity flag directly.
-    matches!(type_code, -17..=-1 | 1..=41 | 43..=47 | 74 | 77 | 78)
+    matches!(type_code, -28..=-1 | 1..=41 | 43..=47 | 74 | 77 | 78)
 }
 
 /// Returns true if the type code is a table control or entry.
