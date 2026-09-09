@@ -75,6 +75,33 @@ fn table_dwg_roundtrip_content_r2018() {
 }
 
 #[test]
+fn table_r2010_header_defaults_are_distinct_from_r2013() {
+    let r2010 = roundtrip(DxfVersion::AC1024);
+    assert_table(&r2010, "R2010");
+    assert_eq!(r2010.dwg_r2010_unknown_bit, Some(true));
+    let r2013 = roundtrip(DxfVersion::AC1027);
+    assert_table(&r2013, "R2013");
+    assert_eq!(r2013.dwg_unknown_long2, 0);
+    assert_eq!(r2013.dwg_r2010_unknown_bit, None);
+}
+
+#[test]
+fn table_r2010_explicit_header_bit_is_preserved() {
+    for bit in [false, true] {
+        let mut doc = CadDocument::with_version(DxfVersion::AC1024);
+        let mut table = sample_table();
+        table.dwg_r2010_unknown_bit = Some(bit);
+        let handle = doc.add_entity(EntityType::Table(table)).unwrap();
+        let bytes = DwgWriter::write_to_vec(&doc).unwrap();
+        let loaded = DwgReader::from_stream(Cursor::new(bytes)).read().unwrap();
+        let Some(EntityType::Table(table)) = loaded.get_entity(handle) else {
+            panic!()
+        };
+        assert_eq!(table.dwg_r2010_unknown_bit, Some(bit));
+    }
+}
+
+#[test]
 fn r2018_standard_table_style_has_valid_legacy_row_text_styles() {
     let mut doc = CadDocument::with_version(DxfVersion::AC1032);
     let standard_text_style = doc.text_styles.get("Standard").unwrap().handle;

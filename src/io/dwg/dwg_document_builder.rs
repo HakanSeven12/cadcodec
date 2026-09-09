@@ -3265,7 +3265,11 @@ impl DwgDocumentBuilder {
                     e.dwg_unknown_handle =
                         (data.unknown_handle != 0).then(|| Handle::from(data.unknown_handle));
                     e.dwg_unknown_long1 = data.unknown_long1;
-                    e.dwg_unknown_long2 = data.unknown_long2;
+                    if self.obj_reader.dxf_version() == crate::types::DxfVersion::AC1024 {
+                        e.dwg_r2010_unknown_bit = Some(data.unknown_long2 != 0);
+                    } else {
+                        e.dwg_unknown_long2 = data.unknown_long2;
+                    }
                     e.dwg_unknown_short = data.unknown_short;
                     e.override_flag = data.legacy_style_override.is_some();
                     e.override_border_color = data.legacy_border_colors.is_some();

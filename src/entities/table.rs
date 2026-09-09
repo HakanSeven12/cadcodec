@@ -1394,6 +1394,10 @@ pub struct Table {
     pub dwg_unknown_byte: u8,
     pub dwg_unknown_handle: Option<Handle>,
     pub dwg_unknown_long1: i32,
+    /// R2010-only header bit. New tables use the native default `true`.
+    /// Kept separate from the R2013+ long, whose native default is zero.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dwg_r2010_unknown_bit: Option<bool>,
     pub dwg_unknown_long2: i32,
     pub dwg_unknown_short: i16,
 }
@@ -1635,6 +1639,7 @@ impl Table {
             dwg_unknown_byte: 0,
             dwg_unknown_handle: None,
             dwg_unknown_long1: 0,
+            dwg_r2010_unknown_bit: None,
             dwg_unknown_long2: 0,
             dwg_unknown_short: 38,
         }

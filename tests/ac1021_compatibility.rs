@@ -141,6 +141,47 @@ fn autocad_opens_ac1021_without_recovery() {
             doc.version = DxfVersion::AC1032;
             doc
         }),
+        ("r2010_table", {
+            let mut doc = CadDocument::with_version(DxfVersion::AC1024);
+            let mut table = acadrust::entities::Table::new(Vector3::ZERO, 2, 2);
+            table.rows[0].cells[0] = acadrust::entities::TableCell::text("R2010");
+            table.rows[1].cells[1] = acadrust::entities::TableCell::text("Native table");
+            doc.add_entity(EntityType::Table(table)).unwrap();
+            doc
+        }),
+        ("r2013_multiple_solids", {
+            let mut doc = CadDocument::with_version(DxfVersion::AC1027);
+            for index in 0..7 {
+                let sat = acadrust::entities::acis::primitives::build_box(
+                    [index as f64 * 20., 0., 0.],
+                    5. + index as f64,
+                    6.,
+                    7.,
+                );
+                doc.add_entity(EntityType::Solid3D(
+                    acadrust::entities::Solid3D::from_sat(&sat.to_sat_string()),
+                ))
+                .unwrap();
+            }
+            doc
+        }),
+        ("r2018_multiple_surfaces", {
+            let source = DwgReader::from_stream(std::io::Cursor::new(include_bytes!(
+                "../examples/entity_atlas_assets/native_surfaces.dwg"
+            )))
+            .read()
+            .unwrap();
+            let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+            for entity in source.entities() {
+                if let EntityType::Surface(surface) = entity {
+                    let mut surface = surface.clone();
+                    surface.common = acadrust::entities::EntityCommon::default();
+                    surface.history_handle = None;
+                    doc.add_entity(EntityType::Surface(surface)).unwrap();
+                }
+            }
+            doc
+        }),
     ] {
         let path = directory.join(format!("{name}.dwg"));
         DwgWriter::write_to_file(&path, &document).unwrap();

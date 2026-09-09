@@ -3785,7 +3785,10 @@ impl<'a> DwgObjectWriter<'a> {
             if self.version.r2013_plus(self.dxf_version) {
                 self.writer.write_bit_long(e.dwg_unknown_long2);
             } else {
-                self.writer.write_bit(e.dwg_unknown_long2 != 0);
+                // ODA 20.4.96.2: the R2010 bit defaults to true, unlike
+                // the R2013+ long. False makes AutoCAD reject a new table.
+                self.writer
+                    .write_bit(e.dwg_r2010_unknown_bit.unwrap_or(true));
             }
             self.write_table_content(e);
             self.writer.write_bit_short(e.dwg_unknown_short);
@@ -5122,13 +5125,6 @@ impl<'a> DwgObjectWriter<'a> {
                 self.write_acis_revision(&e.acis_data.revision);
             }
         }
-        if matches!(
-            e.kind,
-            SurfaceKind::Lofted | SurfaceKind::Revolved | SurfaceKind::Swept
-        ) && self.version.r2007_plus()
-        {
-            self.writer.write_bit_short(e.modeler_format_version);
-        }
         self.writer.write_bit_short(e.u_isolines);
         self.writer.write_bit_short(e.v_isolines);
 
@@ -5180,72 +5176,38 @@ impl<'a> DwgObjectWriter<'a> {
                 solid,
                 ruled_surface,
                 virtual_guide,
-                cross_sections,
-                guide_curves,
-                path_curve,
+                ..
             } => {
                 self.write_surface_matrix(loft_transform);
-                if !self.version.r2007_plus() {
-                    self.writer
-                        .write_bit_short(cross_section_entities.len() as i16);
-                    self.writer.write_bit_short(guide_entities.len() as i16);
-                    self.writer.write_bit(path_entity.is_some());
-                    self.writer.write_bit_double(*start_draft_angle);
-                    self.writer.write_bit_double(*end_draft_angle);
-                    self.writer.write_bit_double(*start_draft_magnitude);
-                    self.writer.write_bit_double(*end_draft_magnitude);
-                    self.writer.write_bit(*arc_length_parameterization);
-                    self.writer.write_bit(*no_twist);
-                    self.writer.write_bit(*align_direction);
-                    self.writer.write_bit(*simple_surfaces);
-                    self.writer.write_bit(*closed_surfaces);
-                    self.writer.write_bit(*solid);
-                    self.writer.write_bit(*ruled_surface);
-                    self.writer.write_bit(*virtual_guide);
-                    self.writer.write_bit_long(*plane_normal_lofting_type);
-                    for entity in cross_section_entities {
-                        self.write_surface_embedded_entity(entity, true);
-                    }
-                    for entity in guide_entities {
-                        self.write_surface_embedded_entity(entity, true);
-                    }
-                    if let Some(entity) = path_entity {
-                        self.write_surface_embedded_entity(entity, true);
-                    }
-                } else {
-                    self.writer.write_bit_long(*plane_normal_lofting_type);
-                    self.writer.write_bit_double(*start_draft_angle);
-                    self.writer.write_bit_double(*end_draft_angle);
-                    self.writer.write_bit_double(*start_draft_magnitude);
-                    self.writer.write_bit_double(*end_draft_magnitude);
-                    self.writer.write_bit(*arc_length_parameterization);
-                    self.writer.write_bit(*no_twist);
-                    self.writer.write_bit(*align_direction);
-                    self.writer.write_bit(*simple_surfaces);
-                    self.writer.write_bit(*closed_surfaces);
-                    self.writer.write_bit(*solid);
-                    self.writer.write_bit(*ruled_surface);
-                    self.writer.write_bit(*virtual_guide);
-                    self.writer.write_bit_short(cross_sections.len() as i16);
-                    self.writer.write_bit_short(guide_curves.len() as i16);
-                    for handle in cross_sections {
-                        self.writer
-                            .write_handle(DwgReferenceType::HardPointer, handle.value());
-                    }
-                    for handle in guide_curves {
-                        self.writer
-                            .write_handle(DwgReferenceType::HardPointer, handle.value());
-                    }
-                    self.writer.write_handle(
-                        DwgReferenceType::HardPointer,
-                        path_curve.unwrap_or(Handle::NULL).value(),
-                    );
+                self.writer
+                    .write_bit_short(cross_section_entities.len() as i16);
+                self.writer.write_bit_short(guide_entities.len() as i16);
+                self.writer.write_bit(path_entity.is_some());
+                self.writer.write_bit_double(*start_draft_angle);
+                self.writer.write_bit_double(*end_draft_angle);
+                self.writer.write_bit_double(*start_draft_magnitude);
+                self.writer.write_bit_double(*end_draft_magnitude);
+                self.writer.write_bit(*arc_length_parameterization);
+                self.writer.write_bit(*no_twist);
+                self.writer.write_bit(*align_direction);
+                self.writer.write_bit(*simple_surfaces);
+                self.writer.write_bit(*closed_surfaces);
+                self.writer.write_bit(*solid);
+                self.writer.write_bit(*ruled_surface);
+                self.writer.write_bit(*virtual_guide);
+                self.writer.write_bit_long(*plane_normal_lofting_type);
+                for entity in cross_section_entities {
+                    self.write_surface_embedded_entity(entity, true);
+                }
+                for entity in guide_entities {
+                    self.write_surface_embedded_entity(entity, true);
+                }
+                if let Some(entity) = path_entity {
+                    self.write_surface_embedded_entity(entity, true);
                 }
             }
             SurfaceData::Revolved {
                 revolve_entity,
-                class_version,
-                entity_id,
                 axis_point,
                 axis_vector,
                 revolve_angle,
@@ -5257,31 +5219,20 @@ impl<'a> DwgObjectWriter<'a> {
                 twist_angle,
                 solid,
                 close_to_axis,
+                ..
             } => {
-                if self.version.r2007_plus() {
-                    self.writer.write_bit_long(*class_version);
-                    self.writer.write_bit_long(*entity_id);
-                } else {
-                    self.writer.write_bit_double(*draft_angle);
-                    self.writer.write_bit_double(*draft_start_distance);
-                    self.writer.write_bit_double(*draft_end_distance);
-                    self.writer.write_bit_double(*twist_angle);
-                    self.writer.write_bit(*solid);
-                    self.writer.write_bit(*close_to_axis);
-                }
+                self.writer.write_bit_double(*draft_angle);
+                self.writer.write_bit_double(*draft_start_distance);
+                self.writer.write_bit_double(*draft_end_distance);
+                self.writer.write_bit_double(*twist_angle);
+                self.writer.write_bit(*solid);
+                self.writer.write_bit(*close_to_axis);
                 self.writer.write_3bit_double(*axis_point);
                 self.writer.write_3bit_double(*axis_vector);
                 self.writer.write_bit_double(*revolve_angle);
                 self.writer.write_bit_double(*start_angle);
                 self.write_surface_matrix(entity_transform);
-                if self.version.r2007_plus() {
-                    self.writer.write_bit_double(*draft_angle);
-                    self.writer.write_bit_double(*draft_start_distance);
-                    self.writer.write_bit_double(*draft_end_distance);
-                    self.writer.write_bit_double(*twist_angle);
-                    self.writer.write_bit(*solid);
-                    self.writer.write_bit(*close_to_axis);
-                } else if let Some(entity) = revolve_entity {
+                if let Some(entity) = revolve_entity {
                     self.write_surface_embedded_entity(entity, true);
                 } else {
                     self.writer.write_bit_long(0);
@@ -5289,20 +5240,16 @@ impl<'a> DwgObjectWriter<'a> {
                 }
             }
             SurfaceData::Swept {
-                class_version,
                 sweep_entity,
                 path_entity,
                 sweep_transform,
                 path_transform,
                 options,
+                ..
             } => {
-                if self.version.r2007_plus() {
-                    self.writer.write_bit_long(*class_version);
-                } else {
-                    self.write_surface_sweep_options(options);
-                    self.write_surface_matrix(sweep_transform);
-                    self.write_surface_matrix(path_transform);
-                }
+                self.write_surface_sweep_options(options);
+                self.write_surface_matrix(sweep_transform);
+                self.write_surface_matrix(path_transform);
                 if let Some(entity) = sweep_entity {
                     let encoded = crate::io::dwg::embedded_entity::encode_embedded_entity(
                         entity,
@@ -5338,9 +5285,6 @@ impl<'a> DwgObjectWriter<'a> {
                 } else {
                     self.writer.write_bit_long(0);
                     self.writer.write_bit_long(0);
-                }
-                if self.version.r2007_plus() {
-                    self.write_surface_sweep_options(options);
                 }
             }
             SurfaceData::Nurb {

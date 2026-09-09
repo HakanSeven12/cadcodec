@@ -10624,6 +10624,22 @@ impl<'a> SectionReader<'a> {
                 common.linetype = pair.value_string.clone();
                 Ok(true)
             }
+            8 => {
+                common.layer = pair.value_string.clone();
+                Ok(true)
+            }
+            62 => {
+                if let Some(index) = pair.as_i16() {
+                    common.color = Color::from_index(index);
+                }
+                Ok(true)
+            }
+            370 => {
+                if let Some(weight) = pair.as_i16() {
+                    common.line_weight = LineWeight::from_value(weight);
+                }
+                Ok(true)
+            }
             48 => {
                 if let Some(scale) = pair.as_double() {
                     common.linetype_scale = scale;

@@ -644,3 +644,63 @@ fn class_mapped_entities_are_dispatched_as_entities() {
         );
     }
 }
+
+#[test]
+fn surface_and_light_dxf_common_properties_survive_all_encodings() {
+    use acadrust::types::{Color, LineWeight};
+
+    for version in [
+        DxfVersion::AC1021,
+        DxfVersion::AC1024,
+        DxfVersion::AC1027,
+        DxfVersion::AC1032,
+    ] {
+        let mut doc = CadDocument::with_version(version);
+        let mut entities: Vec<_> = [
+            SurfaceKind::Generic,
+            SurfaceKind::Plane,
+            SurfaceKind::Extruded,
+            SurfaceKind::Lofted,
+            SurfaceKind::Revolved,
+            SurfaceKind::Swept,
+            SurfaceKind::Nurb,
+        ]
+        .into_iter()
+        .map(|kind| EntityType::Surface(Surface::new(kind)))
+        .collect();
+        entities.push(EntityType::Light(Light::new()));
+        let mut handles = Vec::new();
+        for (index, mut entity) in entities.into_iter().enumerate() {
+            let layer_name = format!("COMMON_TEST_{index}");
+            let mut layer = acadrust::tables::Layer::new(&layer_name);
+            layer.handle = doc.allocate_handle();
+            doc.layers.add(layer).unwrap();
+            let common = entity.common_mut();
+            common.layer = layer_name;
+            common.color = Color::Index(3);
+            common.line_weight = LineWeight::from_value(50);
+            common.linetype_scale = 2.5;
+            handles.push(doc.add_entity(entity).unwrap());
+        }
+        for binary in [false, true] {
+            let mut writer = DxfWriter::new(&doc);
+            writer.binary = binary;
+            let loaded = DxfReader::from_reader(Cursor::new(writer.write_to_vec().unwrap()))
+                .unwrap()
+                .read()
+                .unwrap();
+            for handle in &handles {
+                let source = doc.get_entity(*handle).unwrap();
+                let result = loaded.get_entity(*handle).expect("entity retained");
+                assert_eq!(
+                    result.common().layer,
+                    source.common().layer,
+                    "{version:?}, binary={binary}"
+                );
+                assert_eq!(result.common().color, source.common().color);
+                assert_eq!(result.common().line_weight, source.common().line_weight);
+                assert_eq!(result.common().linetype_scale, 2.5);
+            }
+        }
+    }
+}

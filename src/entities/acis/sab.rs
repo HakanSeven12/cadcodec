@@ -129,7 +129,7 @@ impl SabWriter {
         buf.extend_from_slice(&(header.num_bodies as u32).to_le_bytes());
 
         // has_history (4 bytes LE)
-        let history: u32 = if header.has_history { 1 } else { 0 };
+        let history = header.history_flags();
         buf.extend_from_slice(&history.to_le_bytes());
 
         // Product info strings
@@ -416,6 +416,10 @@ impl SabWriter {
     }
 
     fn write_enum_token(buf: &mut Vec<u8>, name: &str) {
+        if let Some(value) = Self::string_to_boolean(name) {
+            buf.push(if value { tags::TRUE } else { tags::FALSE });
+            return;
+        }
         match name {
             "full" | "open" | "none" | "closed" | "periodic" => {
                 let value: i32 = match name {
@@ -426,8 +430,6 @@ impl SabWriter {
                 buf.push(tags::ENUM);
                 buf.extend_from_slice(&value.to_le_bytes());
             }
-            "forward" | "single" | "in" => buf.push(tags::TRUE),
-            "reversed" | "double" | "out" => buf.push(tags::FALSE),
             // "unknown" and other enum values → string
             _ => Self::write_string(buf, name),
         }
@@ -668,7 +670,8 @@ impl SabReader {
         let version_num = read_u32(data, &mut pos)?;
         let num_records = read_u32(data, &mut pos)? as usize;
         let num_bodies = read_u32(data, &mut pos)? as usize;
-        let has_history = read_u32(data, &mut pos)? != 0;
+        let history_flags = read_u32(data, &mut pos)?;
+        let has_history = history_flags != 0;
 
         let version = SatVersion::from_sat_number(version_num);
 
@@ -696,6 +699,7 @@ impl SabReader {
             num_records,
             num_bodies,
             has_history,
+            raw_history_flags: (history_flags > 1).then_some(history_flags),
             product_id,
             product_version,
             date,

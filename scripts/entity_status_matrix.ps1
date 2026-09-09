@@ -39,7 +39,7 @@ function Load-Result($Drawing, [string]$Engine, [string]$SourceRoot) {
     }
     $current = (Test-Path -LiteralPath $Drawing.file) -and $hash -and
         $hash -eq (Get-FileHash -LiteralPath $Drawing.file).Hash
-    $entry = [pscustomobject]@{result=$result; current=[bool]$current; path=$path; hash=$hash; drawing=$Drawing}
+    $entry = [pscustomobject]@{result=$result; current=[bool]$current; path=$path; hash=$hash; drawing=$Drawing; checked=(Get-Item -LiteralPath $path).LastWriteTimeUtc}
     $evidence.Add([pscustomobject]@{engine=$Engine; version=$Drawing.version; format=$Drawing.format;
         file=$Drawing.file; result=$path; sha256=$hash; current=[bool]$current; status=$result.status})
     return $entry
@@ -57,7 +57,13 @@ foreach ($isolatedRoot in $IsolatedRoots) {
         foreach ($engine in $Engines) {
             $entry = Load-Result $drawing $engine $path
             foreach ($case in $drawing.cases) {
-                $isolated["$engine|$($drawing.version)|$($drawing.format)|$($case.name)"] = $entry
+                $key = "$engine|$($drawing.version)|$($drawing.format)|$($case.name)"
+                $previous = $isolated[$key]
+                if ($entry -and (-not $previous -or
+                    ($entry.current -and -not $previous.current) -or
+                    ($entry.current -eq $previous.current -and $entry.checked -gt $previous.checked))) {
+                    $isolated[$key] = $entry
+                }
             }
         }
     }

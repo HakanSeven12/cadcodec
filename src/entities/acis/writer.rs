@@ -23,7 +23,7 @@ impl SatWriter {
             doc.header.version.sat_version_number(),
             num_records_out,
             doc.header.num_bodies,
-            if doc.header.has_history { 1 } else { 0 }
+            doc.header.history_flags()
         ));
 
         // Header line 2: product info

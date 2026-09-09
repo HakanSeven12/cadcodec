@@ -58,7 +58,14 @@ pub(crate) fn compose_acis_placement(acis: &mut AcisData, transform: &Transform)
         [lp[0][2], lp[1][2], lp[2][2]],
     ];
     doc.set_placement(m_out, tp, 1.0);
-    *acis = AcisData::from_sat(&doc.to_sat_string());
+    // Keep binary token types and modeler metadata when changing placement.
+    // A SAB -> SAT -> SAB conversion can lose typed native fields.
+    if acis.is_binary {
+        acis.sab_data = crate::entities::acis::SabWriter::write(&doc);
+        acis.sat_data.clear();
+    } else {
+        acis.sat_data = AcisData::strip_sat_terminator(&doc.to_sat_string());
+    }
 }
 
 /// True when `transform` reverses orientation (negative upper-3×3

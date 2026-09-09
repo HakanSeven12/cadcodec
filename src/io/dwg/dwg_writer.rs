@@ -1603,13 +1603,12 @@ fn build_acds_jard_header(segidx_offset: u32, file_size: u32) -> Vec<u8> {
 
 /// Build `_data_` segment id=2 containing one SAB record per ACIS entity.
 ///
-/// Each record is a 36-byte metadata block (record index, entity handle, blob
-/// size) followed by the raw SAB blob; records are concatenated in entity
-/// order and the whole segment is padded to a 16-byte boundary.
+/// A contiguous 20-byte record table precedes the length-prefixed SAB blobs.
+/// Offsets in the table are relative to the aligned blob area, not the segment.
 fn build_acds_data2_segment(entries: &[(Handle, Vec<u8>)]) -> Vec<u8> {
-    // Raw size = 48 (segment header) + Σ (36 metadata + blob) per record.
-    let records_size: usize = entries.iter().map(|(_, sab)| 36 + sab.len()).sum();
-    let raw_size = 48 + records_size;
+    let table_size = align16(entries.len() * 20);
+    let records_size: usize = entries.iter().map(|(_, sab)| 4 + sab.len()).sum();
+    let raw_size = 48 + table_size + records_size;
     let seg_size = align16(raw_size);
     let padding = seg_size - raw_size;
 
@@ -1623,19 +1622,21 @@ fn build_acds_data2_segment(entries: &[(Handle, Vec<u8>)]) -> Vec<u8> {
     seg.extend_from_slice(&1u32.to_le_bytes()); // ds_version (always 1, NOT the record count)
     seg.extend_from_slice(&0u32.to_le_bytes()); // unknown_3
     seg.extend_from_slice(&0u32.to_le_bytes()); // meta field1 = 0
-    seg.extend_from_slice(&5u32.to_le_bytes()); // meta field2 = 5 (num columns)
+    seg.extend_from_slice(&((48 + table_size) as u32 / 16).to_le_bytes()); // objdata_algn_offset
     seg.extend_from_slice(&[0x55; 8]); // fill "UUUUUUUU"
 
-    for (i, (handle, sab_data)) in entries.iter().enumerate() {
-        let handle_val = handle.value() as u32;
-        // Record metadata (36 bytes)
+    let mut blob_offset = 0u32;
+    for (handle, sab_data) in entries {
         seg.extend_from_slice(&0x14u32.to_le_bytes()); // col0 = 20
-        seg.extend_from_slice(&((i + 1) as u32).to_le_bytes()); // col1 = record index (1-based)
-        seg.extend_from_slice(&(handle_val as u64).to_le_bytes()); // col2 = entity handle
-        seg.extend_from_slice(&0u32.to_le_bytes()); // col3 = 0
-        seg.extend_from_slice(&[0x62; 12]); // col4 fill "bbbbbbbbbbbb"
+        seg.extend_from_slice(&1u32.to_le_bytes()); // schema revision, not record index
+        seg.extend_from_slice(&handle.value().to_le_bytes());
+        seg.extend_from_slice(&blob_offset.to_le_bytes());
+        blob_offset += 4 + sab_data.len() as u32;
+    }
+    seg.resize(48 + table_size, 0x62);
+    for (_, sab_data) in entries {
         seg.extend_from_slice(&(sab_data.len() as u32).to_le_bytes()); // SAB blob size
-        seg.extend_from_slice(sab_data); // SAB binary data
+        seg.extend_from_slice(sab_data);
     }
 
     // Padding with 0x70 to 16-byte alignment
@@ -1958,6 +1959,46 @@ mod tests {
     use super::*;
     use crate::document::CadDocument;
     use crate::types::{DxfVersion, Handle};
+
+    #[test]
+    fn acds_record_table_indexes_each_length_prefixed_blob() {
+        for count in [1, 2, 7, 8, 16] {
+            let entries: Vec<_> = (0..count)
+                .map(|index| {
+                    (
+                        Handle::new(0x100 + index as u64),
+                        vec![index as u8; 31 + index * 19],
+                    )
+                })
+                .collect();
+            let data = build_acds_data2_segment(&entries);
+            let index = build_acds_datidx(count);
+            let read_u32 = |bytes: &[u8], offset| {
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize
+            };
+            let blob_base = read_u32(&data, 36) * 16;
+            assert_eq!(blob_base, 48 + align16(count * 20));
+            let mut expected_offset = 0;
+            for (i, (handle, blob)) in entries.iter().enumerate() {
+                let record = 48 + read_u32(&index, 60 + i * 12);
+                assert_eq!(record, 48 + i * 20);
+                assert_eq!(read_u32(&data, record), 20);
+                assert_eq!(read_u32(&data, record + 4), 1);
+                assert_eq!(
+                    u64::from_le_bytes(data[record + 8..record + 16].try_into().unwrap()),
+                    handle.value()
+                );
+                let offset = read_u32(&data, record + 16);
+                assert_eq!(offset, expected_offset);
+                assert_eq!(read_u32(&data, blob_base + offset), blob.len());
+                assert_eq!(
+                    &data[blob_base + offset + 4..blob_base + offset + 4 + blob.len()],
+                    blob
+                );
+                expected_offset += 4 + blob.len();
+            }
+        }
+    }
 
     #[test]
     fn test_validate_version_r2007_ok() {

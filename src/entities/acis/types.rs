@@ -119,6 +119,9 @@ pub struct SatHeader {
     pub num_bodies: usize,
     /// Whether history data is present.
     pub has_history: bool,
+    /// Original header flags. Newer modelers use more than the history bit.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub raw_history_flags: Option<u32>,
     /// Product identifier string.
     pub product_id: String,
     /// Product version string.
@@ -134,6 +137,12 @@ pub struct SatHeader {
 }
 
 impl SatHeader {
+    pub(crate) fn history_flags(&self) -> u32 {
+        self.raw_history_flags
+            .filter(|flags| (*flags != 0) == self.has_history)
+            .unwrap_or(u32::from(self.has_history))
+    }
+
     /// Creates a default header for ACIS 7.0.
     pub fn new() -> Self {
         Self {
@@ -141,6 +150,7 @@ impl SatHeader {
             num_records: 0,
             num_bodies: 0,
             has_history: false,
+            raw_history_flags: None,
             product_id: "acadrust".to_string(),
             product_version: "ACIS 7.0".to_string(),
             date: "Thu Jan 01 00:00:00 2023".to_string(),
