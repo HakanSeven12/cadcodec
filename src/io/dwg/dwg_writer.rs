@@ -63,6 +63,7 @@ impl DwgWriter {
     pub fn write_to_writer<W: Write + Seek>(mut output: W, document: &CadDocument) -> Result<()> {
         let mut prepared = crate::io::loft_parameters::prepared(document);
         prepare_surface_classes(&mut prepared);
+        prepare_database_references(&mut prepared);
         let document = prepared.as_ref();
         let perf = std::env::var_os("PERF").is_some();
         let started = web_time::Instant::now();
@@ -130,6 +131,7 @@ impl DwgWriter {
         validate_version(document.version)?;
         let mut prepared = crate::io::loft_parameters::prepared(document);
         prepare_surface_classes(&mut prepared);
+        prepare_database_references(&mut prepared);
         write_ac21_impl(&mut output, prepared.as_ref(), document.version, true)
     }
 
@@ -138,6 +140,129 @@ impl DwgWriter {
         let mut buffer = Cursor::new(Vec::new());
         Self::write_to_writer(&mut buffer, document)?;
         Ok(buffer.into_inner())
+    }
+}
+
+/// Repair relationships that are stored in both directions in a DWG database.
+/// The caller's document stays unchanged; corrections exist only in the output
+/// copy.
+fn prepare_database_references(document: &mut std::borrow::Cow<'_, CadDocument>) {
+    use crate::entities::EntityType;
+    use crate::objects::ObjectType;
+    use std::collections::{HashMap, HashSet};
+
+    let mut missing_hatch_reactors = Vec::new();
+    let mut invalid_hatches = Vec::new();
+    for entity in document.entities() {
+        let EntityType::Hatch(hatch) = entity else {
+            continue;
+        };
+        if !hatch.is_associative {
+            continue;
+        }
+        let boundaries: Vec<Handle> = hatch
+            .paths
+            .iter()
+            .flat_map(|path| path.boundary_handles.iter().copied())
+            .collect();
+        if boundaries.is_empty()
+            || boundaries
+                .iter()
+                .any(|handle| document.get_entity(*handle).is_none())
+        {
+            invalid_hatches.push(hatch.common.handle);
+            continue;
+        }
+        for boundary_handle in boundaries {
+            if document
+                .get_entity(boundary_handle)
+                .is_some_and(|boundary| !boundary.common().reactors.contains(&hatch.common.handle))
+            {
+                missing_hatch_reactors.push((boundary_handle, hatch.common.handle));
+            }
+        }
+    }
+
+    let root_handle = document.header.named_objects_dict_handle;
+    let layout_dictionary = document
+        .objects
+        .get(&root_handle)
+        .and_then(|object| match object {
+            ObjectType::Dictionary(dictionary) => dictionary.get("ACAD_LAYOUT"),
+            _ => None,
+        })
+        .unwrap_or(document.header.acad_layout_dict_handle);
+    let layout_names: HashMap<Handle, String> = document
+        .objects
+        .iter()
+        .filter_map(|(handle, object)| match object {
+            ObjectType::Layout(layout) => Some((*handle, layout.name.clone())),
+            _ => None,
+        })
+        .collect();
+    let layout_dictionary_needs_repair = document
+        .objects
+        .get(&layout_dictionary)
+        .and_then(|object| match object {
+            ObjectType::Dictionary(dictionary) => Some(dictionary),
+            _ => None,
+        })
+        .is_some_and(|dictionary| {
+            let targets: HashSet<Handle> = dictionary
+                .entries
+                .iter()
+                .filter_map(|(key, handle)| {
+                    layout_names
+                        .get(handle)
+                        .filter(|name| *name == key)
+                        .map(|_| *handle)
+                })
+                .collect();
+            dictionary.entries.len() != targets.len() || targets.len() != layout_names.len()
+        });
+
+    if missing_hatch_reactors.is_empty()
+        && invalid_hatches.is_empty()
+        && !layout_dictionary_needs_repair
+    {
+        return;
+    }
+
+    let output = document.to_mut();
+    for (boundary_handle, hatch_handle) in missing_hatch_reactors {
+        if let Some(boundary) = output.get_entity_mut(boundary_handle) {
+            if !boundary.common().reactors.contains(&hatch_handle) {
+                boundary.common_mut().reactors.push(hatch_handle);
+            }
+        }
+    }
+    for hatch_handle in invalid_hatches {
+        if let Some(EntityType::Hatch(hatch)) = output.get_entity_mut(hatch_handle) {
+            hatch.is_associative = false;
+            for path in &mut hatch.paths {
+                path.boundary_handles.clear();
+            }
+        }
+    }
+
+    if layout_dictionary_needs_repair {
+        if let Some(ObjectType::Dictionary(dictionary)) = output.objects.get_mut(&layout_dictionary)
+        {
+            dictionary.entries.clear();
+            let mut layouts: Vec<_> = layout_names.into_iter().collect();
+            layouts.sort_by_key(|(handle, _)| handle.value());
+            let mut names = HashSet::new();
+            for (handle, name) in layouts {
+                if names.insert(name.clone()) {
+                    dictionary.entries.push((name, handle));
+                }
+            }
+        }
+        for object in output.objects.values_mut() {
+            if let ObjectType::Layout(layout) = object {
+                layout.owner = layout_dictionary;
+            }
+        }
     }
 }
 
@@ -230,7 +355,8 @@ fn acds_data<'a>(
             .iter()
             .map(|(handle, bytes)| (*handle, bytes.as_slice())),
     );
-    if document.dwg_source_version == Some(version) && fingerprint == document.raw_acds_fingerprint {
+    if document.dwg_source_version == Some(version) && fingerprint == document.raw_acds_fingerprint
+    {
         if let Some(raw) = document.raw_acds_data.as_deref() {
             return std::borrow::Cow::Borrowed(raw.as_slice());
         }
@@ -1623,6 +1749,64 @@ mod tests {
     #[test]
     fn test_validate_version_r2010_ok() {
         assert!(validate_version(DxfVersion::AC1024).is_ok());
+    }
+
+    #[test]
+    fn output_copy_repairs_associative_hatch_reactors() {
+        use crate::entities::{BoundaryPath, Circle, EntityType, Hatch};
+
+        let mut document = CadDocument::with_version(DxfVersion::AC1032);
+        let boundary = document
+            .add_entity(EntityType::Circle(Circle::new()))
+            .expect("boundary");
+        let mut hatch = Hatch::solid();
+        hatch.is_associative = true;
+        let mut path = BoundaryPath::new();
+        path.boundary_handles.push(boundary);
+        hatch.paths.push(path);
+        let hatch_handle = document
+            .add_entity(EntityType::Hatch(hatch))
+            .expect("hatch");
+
+        let mut prepared = std::borrow::Cow::Borrowed(&document);
+        prepare_database_references(&mut prepared);
+
+        assert!(document
+            .get_entity(boundary)
+            .unwrap()
+            .common()
+            .reactors
+            .is_empty());
+        assert!(prepared
+            .get_entity(boundary)
+            .unwrap()
+            .common()
+            .reactors
+            .contains(&hatch_handle));
+    }
+
+    #[test]
+    fn output_copy_synchronizes_layout_dictionary_names() {
+        use crate::objects::ObjectType;
+
+        let mut document = CadDocument::with_version(DxfVersion::AC1032);
+        let dictionary_handle = document.header.acad_layout_dict_handle;
+        let layout_handle = match document.objects.get(&dictionary_handle) {
+            Some(ObjectType::Dictionary(dictionary)) => dictionary.entries[0].1,
+            _ => panic!("layout dictionary"),
+        };
+        if let Some(ObjectType::Layout(layout)) = document.objects.get_mut(&layout_handle) {
+            layout.name = "Renamed".to_string();
+        }
+
+        let mut prepared = std::borrow::Cow::Borrowed(&document);
+        prepare_database_references(&mut prepared);
+
+        let dictionary = match prepared.objects.get(&dictionary_handle) {
+            Some(ObjectType::Dictionary(dictionary)) => dictionary,
+            _ => panic!("layout dictionary"),
+        };
+        assert_eq!(dictionary.get("Renamed"), Some(layout_handle));
     }
 
     #[test]

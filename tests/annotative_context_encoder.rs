@@ -170,6 +170,10 @@ fn synth_roundtrip_leaf(
         is_default: true,
         scale: scale_h,
         kind,
+        raw_dwg_data: None,
+        raw_dwg_handle_bits: 0,
+        raw_dwg_version: None,
+        raw_dwg_snapshot: None,
     };
     doc.objects
         .insert(leaf_h, ObjectType::ObjectContextData(ctx));

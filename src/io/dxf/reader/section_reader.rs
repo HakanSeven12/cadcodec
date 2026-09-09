@@ -4877,6 +4877,10 @@ impl<'a> SectionReader<'a> {
             is_default,
             scale,
             kind,
+            raw_dwg_data: None,
+            raw_dwg_handle_bits: 0,
+            raw_dwg_version: None,
+            raw_dwg_snapshot: None,
         })
     }
 

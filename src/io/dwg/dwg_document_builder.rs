@@ -6675,20 +6675,24 @@ impl DwgDocumentBuilder {
                             .collect();
                         let xdictionary_handle =
                             non_entity_data.xdictionary_handle.map(Handle::from);
+                        let mut object = crate::objects::ObjectContextData {
+                            handle: Handle::from(handle),
+                            owner_handle,
+                            reactors,
+                            xdictionary_handle,
+                            class_version,
+                            is_default,
+                            scale: Handle::from(scale),
+                            kind,
+                            raw_dwg_data: Some(raw_data),
+                            raw_dwg_handle_bits: raw_handle_bits,
+                            raw_dwg_version: Some(document.version),
+                            raw_dwg_snapshot: None,
+                        };
+                        object.raw_dwg_snapshot = Some(Box::new(object.snapshot()));
                         document.objects.insert(
                             Handle::from(handle),
-                            crate::objects::ObjectType::ObjectContextData(
-                                crate::objects::ObjectContextData {
-                                    handle: Handle::from(handle),
-                                    owner_handle,
-                                    reactors,
-                                    xdictionary_handle,
-                                    class_version,
-                                    is_default,
-                                    scale: Handle::from(scale),
-                                    kind,
-                                },
-                            ),
+                            crate::objects::ObjectType::ObjectContextData(object),
                         );
                     } else {
                         // Non-modeled context leaf: still capture its annotation
