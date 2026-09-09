@@ -1049,7 +1049,7 @@ impl<'a> DwgObjectWriter<'a> {
                 value.modern_cell_style_handle.value(),
             );
             if let Some(style) = &value.modern_style {
-                self.write_named_table_cell_style(style);
+                self.write_table_style_named_cell_style(style);
             } else {
                 self.write_default_modern_table_cell_style(value);
             }
@@ -1060,7 +1060,7 @@ impl<'a> DwgObjectWriter<'a> {
                     .write_bit_long(value.modern_overrides.len().min(i32::MAX as usize) as i32);
                 for (key, style) in value.modern_overrides.iter().take(i32::MAX as usize) {
                     self.writer.write_bit_long(*key);
-                    self.write_named_table_cell_style(style);
+                    self.write_table_style_named_cell_style(style);
                 }
             }
         }
@@ -1110,10 +1110,8 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_double(value.block_scale);
         self.writer.write_bit_long(value.cell_alignment);
         self.writer.write_cm_true_color(&value.content_color);
-        self.writer.write_handle(
-            DwgReferenceType::HardPointer,
-            self.resolve_table_text_style(value.text_style).value(),
-        );
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, value.text_style.value());
         self.writer.write_bit_double(value.text_height);
     }
 
@@ -1164,6 +1162,18 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_long(value.id);
         self.writer.write_bit_long(value.style_type);
         self.writer.write_variable_text(&value.name);
+    }
+
+    fn write_table_style_named_cell_style(&mut self, value: &NamedTableCellStyle) {
+        let resolved = self.resolve_table_text_style(value.cell_style.content_format.text_style);
+        if resolved == value.cell_style.content_format.text_style {
+            self.write_named_table_cell_style(value);
+            return;
+        }
+
+        let mut value = value.clone();
+        value.cell_style.content_format.text_style = resolved;
+        self.write_named_table_cell_style(&value);
     }
 
     fn write_default_modern_table_cell_style(&mut self, value: &TableStyle) {

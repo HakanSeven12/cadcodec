@@ -8,8 +8,10 @@
 use std::io::Cursor;
 
 use acadrust::entities::{EntityType, Table, TableCell};
-use acadrust::objects::ObjectType;
-use acadrust::types::{DxfVersion, Vector3};
+use acadrust::objects::{
+    CellStyleMap, DataObject, DataObjectData, NamedTableCellStyle, ObjectType, TableCellStyleData,
+};
+use acadrust::types::{DxfVersion, Handle, Vector3};
 use acadrust::{CadDocument, DwgReader, DwgWriter};
 
 fn sample_table() -> Table {
@@ -118,4 +120,42 @@ fn r2018_standard_table_style_has_valid_legacy_row_text_styles() {
             standard_text_style
         );
     }
+}
+
+#[test]
+fn r2018_cell_style_map_preserves_inherited_text_style() {
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    let mut object = DataObject::new(DataObjectData::CellStyleMap(CellStyleMap {
+        cells: vec![NamedTableCellStyle {
+            cell_style: TableCellStyleData {
+                style_type: 5,
+                data_flags: 1,
+                ..TableCellStyleData::default()
+            },
+            id: 1,
+            style_type: 1,
+            name: "Inherited".to_string(),
+        }],
+    }));
+    object.handle = doc.allocate_handle();
+    doc.objects
+        .insert(object.handle, ObjectType::DataObject(object));
+
+    let bytes = DwgWriter::write_to_vec(&doc).expect("DWG write");
+    let rt = DwgReader::from_stream(Cursor::new(bytes))
+        .read()
+        .expect("DWG read");
+    let cell = rt
+        .objects
+        .values()
+        .find_map(|object| match object {
+            ObjectType::DataObject(DataObject {
+                data: DataObjectData::CellStyleMap(style_map),
+                ..
+            }) => style_map.cells.first(),
+            _ => None,
+        })
+        .expect("round-tripped cell style map");
+
+    assert_eq!(cell.cell_style.content_format.text_style, Handle::NULL);
 }
