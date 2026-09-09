@@ -1,5 +1,7 @@
 # Entity Audit Repairs, 2026-09-09
 
+This is the first repair-batch snapshot. See [continuation findings](entity_audit_continuation.md) and the [current per-entity matrix](entity_status_matrix.md) for subsequent fixes and stricter native-type validation.
+
 ## Status
 
 Console-only validation, using AutoCAD 2027.1 Core Console and BricsCAD V20.1 COM automation. IntelliCAD was not used.

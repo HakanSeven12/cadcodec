@@ -850,6 +850,7 @@ fn counts(doc: &CadDocument) -> BTreeMap<String, Vec<String>> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let minimal = std::env::args().any(|arg| arg == "--minimal");
+    let exact_case = std::env::args().any(|arg| arg == "--exact-case");
     let case = std::env::args().find_map(|arg| arg.strip_prefix("--case=").map(str::to_owned));
     let only_version =
         std::env::args().find_map(|arg| arg.strip_prefix("--version=").map(str::to_owned));
@@ -899,9 +900,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .cases
                 .iter()
                 .filter(|item| {
-                    item["name"]
-                        .as_str()
-                        .is_some_and(|name| name.starts_with(case))
+                    item["name"].as_str().is_some_and(|name| {
+                        if exact_case {
+                            name == case
+                        } else {
+                            name.starts_with(case)
+                        }
+                    })
                 })
                 .filter_map(|item| item["layer"].as_str().map(str::to_owned))
                 .collect();
@@ -911,7 +916,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let removed: Vec<Handle> = s
                 .doc
                 .entities()
-                .filter(|entity| !selected.contains(&entity.common().layer))
+                .filter(|entity| {
+                    !selected.contains(&entity.common().layer)
+                        && !(case == "VIEWPORT"
+                            && matches!(entity, EntityType::Viewport(viewport) if viewport.id == 1))
+                })
                 .map(|entity| entity.common().handle)
                 .collect();
             for handle in removed {

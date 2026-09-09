@@ -153,7 +153,19 @@ pub(crate) fn decode_embedded_entity(
             entity.end = data.end;
             entity.thickness = data.thickness;
             entity.normal = data.normal;
-            Some(EmbeddedEntity::Line(entity))
+            let entity = EmbeddedEntity::Line(entity);
+            let encoded = encode_embedded_entity(&entity, version, dxf_version);
+            if preserves_embedded_body(&encoded, type_code, bit_length, &preserved_bytes) {
+                Some(entity)
+            } else {
+                // Producer-specific profile bodies may have extra fields.
+                // Preserve them instead of silently changing their geometry.
+                Some(EmbeddedEntity::Unknown {
+                    type_code,
+                    bit_count: bit_length,
+                    bytes: preserved_bytes,
+                })
+            }
         }
         common::OBJ_ARC => {
             let data = entities::read_arc(&mut reader);
@@ -515,5 +527,25 @@ fn write_spline(
         for point in &entity.fit_points {
             writer.write_3bit_double(*point);
         }
+    }
+}
+
+#[cfg(test)]
+mod native_profile_tests {
+    use super::*;
+
+    #[test]
+    fn autocad_extruded_line_profile_preserves_bits() {
+        let bytes = vec![0xA8, 0, 0, 0, 0, 0, 0, 0x24, 0x40, 0xAA, 0x4C];
+        let entity =
+            decode_embedded_entity(19, 88, bytes.clone(), DwgVersion::AC21, DxfVersion::AC1021)
+                .unwrap();
+        let output = encode_embedded_entity(&entity, DwgVersion::AC21, DxfVersion::AC1021);
+        assert!(
+            preserves_embedded_body(&output, 19, 88, &bytes),
+            "{:02X?} {}",
+            output.bytes,
+            output.bit_length
+        );
     }
 }

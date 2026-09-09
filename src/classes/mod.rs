@@ -490,10 +490,11 @@ fn default_classes() -> Vec<DxfClass> {
         ("ACDBASSOC2DCONSTRAINTGROUP", "AcDbAssoc2dConstraintGroup", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCVARIABLE", "AcDbAssocVariable", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCPERSSUBENTMANAGER", "AcDbAssocPersSubentManager", 0, "ObjectDBX Classes", false),
-        ("ACDBASSOCACTIONPARAM", "AcDbAssocActionParam", 0, "ObjectDBX Classes", false),
+        // Abstract action-parameter bases have no persistent instances.
+        // Registering them in a fresh file makes AutoCAD reject the entire
+        // database, even at zero instances. Imported tables are preserved.
         ("ACDBASSOCCOMPOUNDACTIONPARAM", "AcDbAssocCompoundActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCOSNAPPOINTREFACTIONPARAM", "AcDbAssocOsnapPointRefActionParam", 0, "ObjectDBX Classes", false),
-        ("ACDBASSOCPOINTREFACTIONPARAM", "AcDbAssocPointRefActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCOBJECTACTIONPARAM", "AcDbAssocObjectActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCPATHACTIONPARAM", "AcDbAssocPathActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCEDGEACTIONPARAM", "AcDbAssocEdgeActionParam", 0, "ObjectDBX Classes", false),
@@ -776,6 +777,18 @@ mod tests {
         assert!(coll.contains("MESH"));
         assert!(coll.contains("LAYOUT"));
         assert!(coll.contains("MLEADERSTYLE"));
+        assert!(!coll.contains("ACDBASSOCACTIONPARAM"));
+        assert!(!coll.contains("ACDBASSOCPOINTREFACTIONPARAM"));
+        assert!(coll.contains("ACDBASSOCCOMPOUNDACTIONPARAM"));
+        assert!(coll.contains("ACDBASSOCOSNAPPOINTREFACTIONPARAM"));
+    }
+
+    #[test]
+    fn imported_abstract_class_declarations_are_not_discarded() {
+        let mut coll = DxfClassCollection::new();
+        coll.push_preserving(DxfClass::new("ACDBASSOCACTIONPARAM", "AcDbAssocActionParam"));
+        coll.update_defaults();
+        assert!(coll.contains("ACDBASSOCACTIONPARAM"));
     }
 
     #[test]

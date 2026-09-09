@@ -1956,11 +1956,11 @@ mod tests {
         let document = CadDocument::with_version(DxfVersion::AC1032);
         let action_param = document
             .classes
-            .get_by_name("ACDBASSOCACTIONPARAM")
+            .get_by_name("ACDBASSOCCOMPOUNDACTIONPARAM")
             .expect("action parameter class");
         let point_ref = document
             .classes
-            .get_by_name("ACDBASSOCPOINTREFACTIONPARAM")
+            .get_by_name("ACDBASSOCOSNAPPOINTREFACTIONPARAM")
             .expect("point reference class");
         assert!(!action_param.was_zombie);
         assert!(!point_ref.was_zombie);
@@ -1976,8 +1976,8 @@ mod tests {
                 .expect("class entry")
         };
 
-        assert!(by_name("ACDBASSOCACTIONPARAM").was_zombie);
-        assert!(by_name("ACDBASSOCPOINTREFACTIONPARAM").was_zombie);
+        assert!(by_name("ACDBASSOCCOMPOUNDACTIONPARAM").was_zombie);
+        assert!(by_name("ACDBASSOCOSNAPPOINTREFACTIONPARAM").was_zombie);
         assert!(by_name("ACDBDICTIONARYWDFLT").instance_count > 0);
     }
 

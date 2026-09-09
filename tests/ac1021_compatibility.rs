@@ -131,6 +131,16 @@ fn autocad_opens_ac1021_without_recovery() {
         ("mixed", mixed),
         ("preview", with_preview),
         ("multi_page", drawing(5000)),
+        ("r2013_line", {
+            let mut doc = drawing(1);
+            doc.version = DxfVersion::AC1027;
+            doc
+        }),
+        ("r2018_line", {
+            let mut doc = drawing(1);
+            doc.version = DxfVersion::AC1032;
+            doc
+        }),
     ] {
         let path = directory.join(format!("{name}.dwg"));
         DwgWriter::write_to_file(&path, &document).unwrap();
