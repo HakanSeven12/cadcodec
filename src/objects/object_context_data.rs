@@ -41,35 +41,6 @@ pub struct ObjectContextData {
 
     /// Type-specific placement payload.
     pub kind: ObjectContextKind,
-
-    /// Original merged DWG record used when none of the decoded fields changed.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    #[doc(hidden)]
-    pub raw_dwg_data: Option<Vec<u8>>,
-    /// Original handle-stream size for [`raw_dwg_data`](Self::raw_dwg_data).
-    #[doc(hidden)]
-    pub raw_dwg_handle_bits: i64,
-    /// Source version for the raw record.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    #[doc(hidden)]
-    pub raw_dwg_version: Option<crate::types::DxfVersion>,
-    /// Decoded state represented by the raw record.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    #[doc(hidden)]
-    pub raw_dwg_snapshot: Option<Box<ObjectContextSnapshot>>,
-}
-
-/// Decoded fields represented by an object's retained DWG record.
-#[derive(Debug, Clone, PartialEq)]
-#[doc(hidden)]
-pub struct ObjectContextSnapshot {
-    pub owner_handle: Handle,
-    pub reactors: Vec<Handle>,
-    pub xdictionary_handle: Option<Handle>,
-    pub class_version: i16,
-    pub is_default: bool,
-    pub scale: Handle,
-    pub kind: ObjectContextKind,
 }
 
 /// The type-specific placement payload of an annotative context leaf. Field
@@ -165,8 +136,16 @@ pub struct HatchScaleContext {
     pub pattern_lines: Vec<crate::entities::HatchPatternLine>,
     pub pattern_scale: f64,
     pub pattern_base: Vector3,
-    pub loop_types: Vec<i32>,
+    pub loops: Vec<HatchLoopContext>,
+}
+
+/// Per-boundary-loop data in an annotative hatch context.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct HatchLoopContext {
+    pub loop_type: i32,
     pub supports_context: bool,
+    pub boundary: Option<crate::entities::BoundaryPath>,
 }
 
 /// `AcDbHatchViewContextData` payload.
@@ -360,24 +339,6 @@ pub struct MTextColumns {
 }
 
 impl ObjectContextData {
-    pub(crate) fn snapshot(&self) -> ObjectContextSnapshot {
-        ObjectContextSnapshot {
-            owner_handle: self.owner_handle,
-            reactors: self.reactors.clone(),
-            xdictionary_handle: self.xdictionary_handle,
-            class_version: self.class_version,
-            is_default: self.is_default,
-            scale: self.scale,
-            kind: self.kind.clone(),
-        }
-    }
-
-    pub(crate) fn raw_record_is_current(&self) -> bool {
-        self.raw_dwg_snapshot
-            .as_deref()
-            .is_some_and(|snapshot| *snapshot == self.snapshot())
-    }
-
     /// The DXF class / record name for this leaf's kind.
     pub fn class_name(&self) -> &'static str {
         match &self.kind {
@@ -394,33 +355,5 @@ impl ObjectContextData {
             ObjectContextKind::HatchView(_) => "ACDB_HATCHVIEWCONTEXTDATA_CLASS",
             ObjectContextKind::Opaque => "ACDB_OBJECTCONTEXTDATA_CLASS",
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn semantic_edit_invalidates_retained_record() {
-        let mut object = ObjectContextData {
-            handle: Handle::new(1),
-            owner_handle: Handle::new(2),
-            reactors: vec![Handle::new(2)],
-            xdictionary_handle: None,
-            class_version: 4,
-            is_default: false,
-            scale: Handle::new(3),
-            kind: ObjectContextKind::AnnotScale,
-            raw_dwg_data: Some(vec![1, 2, 3]),
-            raw_dwg_handle_bits: 8,
-            raw_dwg_version: Some(crate::types::DxfVersion::AC1032),
-            raw_dwg_snapshot: None,
-        };
-        object.raw_dwg_snapshot = Some(Box::new(object.snapshot()));
-        assert!(object.raw_record_is_current());
-
-        object.scale = Handle::new(4);
-        assert!(!object.raw_record_is_current());
     }
 }

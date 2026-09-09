@@ -746,17 +746,118 @@ fn class_dxf_hatch_scale_context(fields: &mut ClassDxfFields) -> crate::objects:
     }
     let pattern_scale = fields.f64(section, 40);
     let pattern_base = fields.point3(section, 10);
-    let mut loop_types = Vec::new();
+    let mut loops = Vec::new();
     for _ in 0..fields.i32(section, 90).max(0).min(100_000) {
-        loop_types.push(fields.i32(section, 90));
+        let loop_type = fields.i32(section, 90);
+        let supports_context = fields.bool(section, 290);
+        loops.push(crate::objects::HatchLoopContext {
+            loop_type,
+            supports_context,
+            boundary: (!supports_context)
+                .then(|| class_dxf_hatch_context_boundary(fields, loop_type)),
+        });
     }
     crate::objects::HatchScaleContext {
         pattern_lines,
         pattern_scale,
         pattern_base,
-        loop_types,
-        supports_context: fields.bool(section, 290),
+        loops,
     }
+}
+
+fn class_dxf_hatch_context_boundary(
+    fields: &mut ClassDxfFields,
+    loop_type: i32,
+) -> crate::entities::BoundaryPath {
+    use crate::entities::hatch::*;
+
+    let section = "AcDbHatchObjectContextData";
+    let mut path = BoundaryPath::with_flags(BoundaryPathFlags::from_bits(loop_type as u32));
+    if loop_type & BoundaryPathFlags::POLYLINE.bits() as i32 != 0 {
+        let has_bulge = fields.bool(section, 72);
+        let is_closed = fields.bool(section, 73);
+        let mut vertices = Vec::new();
+        for _ in 0..fields.i32(section, 93).max(0).min(100_000) {
+            let point = fields.point2(section, 10);
+            let bulge = if has_bulge {
+                fields.f64(section, 42)
+            } else {
+                0.0
+            };
+            vertices.push(crate::types::Vector3::new(point.x, point.y, bulge));
+        }
+        path.add_edge(BoundaryEdge::Polyline(PolylineEdge {
+            vertices,
+            is_closed,
+        }));
+        return path;
+    }
+
+    for _ in 0..fields.i32(section, 93).max(0).min(100_000) {
+        match fields.i16(section, 72) {
+            1 => path.add_edge(BoundaryEdge::Line(LineEdge {
+                start: fields.point2(section, 10),
+                end: fields.point2(section, 11),
+            })),
+            2 => path.add_edge(BoundaryEdge::CircularArc(CircularArcEdge {
+                center: fields.point2(section, 10),
+                radius: fields.f64(section, 40),
+                start_angle: fields.f64(section, 50).to_radians(),
+                end_angle: fields.f64(section, 51).to_radians(),
+                counter_clockwise: fields.bool(section, 73),
+            })),
+            3 => path.add_edge(BoundaryEdge::EllipticArc(EllipticArcEdge {
+                center: fields.point2(section, 10),
+                major_axis_endpoint: fields.point2(section, 11),
+                minor_axis_ratio: fields.f64(section, 40),
+                start_angle: fields.f64(section, 50),
+                end_angle: fields.f64(section, 51),
+                counter_clockwise: fields.bool(section, 73),
+            })),
+            4 => {
+                let degree = fields.i32(section, 94);
+                let rational = fields.bool(section, 73);
+                let periodic = fields.bool(section, 74);
+                let knot_count = fields.i32(section, 95).max(0).min(100_000);
+                let control_count = fields.i32(section, 96).max(0).min(100_000);
+                let knots = (0..knot_count).map(|_| fields.f64(section, 40)).collect();
+                let control_points = (0..control_count)
+                    .map(|_| {
+                        let point = fields.point2(section, 10);
+                        crate::types::Vector3::new(
+                            point.x,
+                            point.y,
+                            if rational {
+                                fields.f64(section, 42)
+                            } else {
+                                1.0
+                            },
+                        )
+                    })
+                    .collect();
+                let fit_count = fields.i32(section, 97).max(0).min(100_000);
+                let fit_points: Vec<_> =
+                    (0..fit_count).map(|_| fields.point2(section, 11)).collect();
+                let (start_tangent, end_tangent) = if fit_points.is_empty() {
+                    (Vector2::ZERO, Vector2::ZERO)
+                } else {
+                    (fields.point2(section, 12), fields.point2(section, 13))
+                };
+                path.add_edge(BoundaryEdge::Spline(SplineEdge {
+                    degree,
+                    rational,
+                    periodic,
+                    knots,
+                    control_points,
+                    fit_points,
+                    start_tangent,
+                    end_tangent,
+                }));
+            }
+            _ => {}
+        }
+    }
+    path
 }
 
 fn dynamic_block_cpp_name(name: &str) -> &'static str {
@@ -4877,10 +4978,6 @@ impl<'a> SectionReader<'a> {
             is_default,
             scale,
             kind,
-            raw_dwg_data: None,
-            raw_dwg_handle_bits: 0,
-            raw_dwg_version: None,
-            raw_dwg_snapshot: None,
         })
     }
 

@@ -2467,6 +2467,16 @@ pub fn read_hatch_boundary_path(
     version: DwgVersion,
 ) -> HatchBoundaryPath {
     let flags = reader.read_bit_long();
+    read_hatch_boundary_path_contents(reader, version, flags, true)
+}
+
+/// Read the geometry following an already-decoded hatch path flag value.
+pub fn read_hatch_boundary_path_contents(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    flags: i32,
+    has_boundary_handles: bool,
+) -> HatchBoundaryPath {
     let is_polyline = (flags & 2) != 0;
 
     let mut edges = Vec::new();
@@ -2580,7 +2590,11 @@ pub fn read_hatch_boundary_path(
     // which spins read_handle() for tens of seconds per record. AutoCAD
     // hatches realistically carry well under MAX_ARRAY_COUNT (100k)
     // associative boundary references.
-    let boundary_handle_count = safe_count(reader.read_bit_long());
+    let boundary_handle_count = if has_boundary_handles {
+        safe_count(reader.read_bit_long())
+    } else {
+        0
+    };
 
     HatchBoundaryPath {
         flags,

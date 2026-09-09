@@ -89,9 +89,9 @@ pub use multileader_style::{
     TextAttachmentDirectionType, TextAttachmentType,
 };
 pub use object_context_data::{
-    DimContext, DimSubtype, EmbeddedMTextContext, HatchScaleContext, HatchViewContext,
-    LeaderContext, MTextAttributeContext, MTextColumns, MTextContext, ObjectContextData,
-    ObjectContextKind,
+    DimContext, DimSubtype, EmbeddedMTextContext, HatchLoopContext, HatchScaleContext,
+    HatchViewContext, LeaderContext, MTextAttributeContext, MTextColumns, MTextContext,
+    ObjectContextData, ObjectContextKind,
 };
 pub use plot_settings::{
     PaperMargin, PlotFlags, PlotPaperUnits, PlotRotation, PlotSettings, PlotType, PlotWindow,
@@ -509,12 +509,6 @@ impl ObjectType {
             (Self::XRecord(value), Self::XRecord(source)) => {
                 value.raw_dwg_data = source.raw_dwg_data.clone();
                 value.raw_dwg_version = source.raw_dwg_version;
-            }
-            (Self::ObjectContextData(value), Self::ObjectContextData(source)) => {
-                value.raw_dwg_data = source.raw_dwg_data.clone();
-                value.raw_dwg_handle_bits = source.raw_dwg_handle_bits;
-                value.raw_dwg_version = source.raw_dwg_version;
-                value.raw_dwg_snapshot = source.raw_dwg_snapshot.clone();
             }
             (Self::TableStyle(value), Self::TableStyle(source)) => {
                 value.raw_dxf_codes = source.raw_dxf_codes.clone();

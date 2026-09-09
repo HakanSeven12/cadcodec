@@ -1945,8 +1945,16 @@ impl<'a> DwgObjectWriter<'a> {
 
     fn write_hatch_boundary_path(&mut self, path: &BoundaryPath) {
         self.writer.write_bit_long(path.flags.bits() as i32);
+        self.write_hatch_boundary_path_contents(path, path.flags.bits() as i32, true);
+    }
 
-        let is_polyline = (path.flags.bits() & 2) != 0;
+    pub(super) fn write_hatch_boundary_path_contents(
+        &mut self,
+        path: &BoundaryPath,
+        flags: i32,
+        has_boundary_handles: bool,
+    ) {
+        let is_polyline = (flags & 2) != 0;
 
         if !is_polyline {
             // Edges
@@ -2037,12 +2045,18 @@ impl<'a> DwgObjectWriter<'a> {
                         self.writer.write_bit_double(v.z); // bulge
                     }
                 }
+            } else {
+                self.writer.write_bit(false);
+                self.writer.write_bit(false);
+                self.writer.write_bit_long(0);
             }
         }
 
         // Boundary object count
-        self.writer
-            .write_bit_long(path.boundary_handles.len() as i32);
+        if has_boundary_handles {
+            self.writer
+                .write_bit_long(path.boundary_handles.len() as i32);
+        }
     }
 
     // â”€â”€ Viewport entity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

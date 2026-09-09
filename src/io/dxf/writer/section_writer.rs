@@ -7479,11 +7479,34 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
         self.writer.write_double(40, value.pattern_scale)?;
         self.writer.write_point3d(10, value.pattern_base)?;
-        self.writer.write_i32(90, value.loop_types.len() as i32)?;
-        for loop_type in &value.loop_types {
-            self.writer.write_i32(90, *loop_type)?;
+        self.writer.write_i32(90, value.loops.len() as i32)?;
+        for loop_data in &value.loops {
+            self.writer.write_i32(90, loop_data.loop_type)?;
+            self.writer.write_bool(290, loop_data.supports_context)?;
+            if !loop_data.supports_context {
+                let edges = loop_data
+                    .boundary
+                    .as_ref()
+                    .map(|boundary| boundary.edges.as_slice())
+                    .unwrap_or_default();
+                if loop_data.loop_type & 2 == 0 {
+                    self.writer.write_i32(93, edges.len() as i32)?;
+                }
+                if let Some(edge @ BoundaryEdge::Polyline(_)) =
+                    edges.first().filter(|_| loop_data.loop_type & 2 != 0)
+                {
+                    self.write_hatch_edge(edge)?;
+                } else if loop_data.loop_type & 2 == 0 {
+                    for edge in edges {
+                        self.write_hatch_edge(edge)?;
+                    }
+                } else {
+                    self.writer.write_i16(72, 0)?;
+                    self.writer.write_i16(73, 0)?;
+                    self.writer.write_i32(93, 0)?;
+                }
+            }
         }
-        self.writer.write_bool(290, value.supports_context)?;
         Ok(())
     }
 

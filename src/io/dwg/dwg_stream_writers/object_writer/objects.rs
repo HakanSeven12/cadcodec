@@ -318,17 +318,7 @@ impl<'a> DwgObjectWriter<'a> {
             ObjectType::ImageDefinitionReactor(r) => self.write_image_definition_reactor(r),
             ObjectType::PlotSettings(p) => self.write_plot_settings_obj(p),
             ObjectType::Scale(s) => self.write_scale(s),
-            ObjectType::ObjectContextData(c) => {
-                if c.raw_record_is_current() {
-                    if let Some(raw) = &c.raw_dwg_data {
-                        if self.raw_passthrough_compatible(c.raw_dwg_version) {
-                            self.register_raw_object(c.handle, raw, c.raw_dwg_handle_bits);
-                            return;
-                        }
-                    }
-                }
-                self.write_object_context_data(c)
-            }
+            ObjectType::ObjectContextData(c) => self.write_object_context_data(c),
             ObjectType::SortEntitiesTable(s) => self.write_sort_entities_table(s),
             ObjectType::DictionaryVariable(d) => self.write_dictionary_variable(d),
             ObjectType::RasterVariables(r) => self.write_raster_variables(r),
@@ -2302,11 +2292,22 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_double(value.pattern_base.x);
         self.writer.write_bit_double(value.pattern_base.y);
         self.writer.write_bit_double(value.pattern_base.z);
-        self.writer.write_bit_long(value.loop_types.len() as i32);
-        for loop_type in &value.loop_types {
-            self.writer.write_bit_long(*loop_type);
+        self.writer.write_bit_long(value.loops.len() as i32);
+        for loop_data in &value.loops {
+            self.writer.write_bit_long(loop_data.loop_type);
+            self.writer.write_bit(loop_data.supports_context);
+            if !loop_data.supports_context {
+                if let Some(boundary) = &loop_data.boundary {
+                    self.write_hatch_boundary_path_contents(boundary, loop_data.loop_type, false);
+                } else if loop_data.loop_type & 2 != 0 {
+                    self.writer.write_bit(false);
+                    self.writer.write_bit(false);
+                    self.writer.write_bit_long(0);
+                } else {
+                    self.writer.write_bit_long(0);
+                }
+            }
         }
-        self.writer.write_bit(value.supports_context);
     }
 
     // ── Sort Entities Table ─────────────────────────────────────────
