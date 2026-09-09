@@ -363,3 +363,284 @@ fn pyramid_planes_contain_apex_and_coedges_have_reciprocal_partners() {
         }
     }
 }
+
+#[test]
+fn legacy_mtext_omits_post_r14_spacing_fields() {
+    for version in [DxfVersion::AC1012, DxfVersion::AC1014, DxfVersion::AC1015] {
+        let mut doc = CadDocument::with_version(version);
+        let mut text = MText::new();
+        text.value = "Legacy paragraphs\\PSecond line".into();
+        text.line_spacing_factor = 1.5;
+        let handle = doc.add_entity(EntityType::MText(text)).unwrap();
+        let loaded = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&doc).unwrap()))
+            .read()
+            .unwrap();
+        let EntityType::MText(text) = loaded.get_entity(handle).unwrap() else {
+            panic!()
+        };
+        assert!(text.value.contains("Second line"));
+        assert_eq!(
+            text.line_spacing_factor,
+            if version <= DxfVersion::AC1014 {
+                1.0
+            } else {
+                1.5
+            }
+        );
+    }
+}
+
+#[test]
+fn old_dwg_modelers_select_compatible_sat_or_sab() {
+    for version in [
+        DxfVersion::AC1012,
+        DxfVersion::AC1014,
+        DxfVersion::AC1015,
+        DxfVersion::AC1018,
+    ] {
+        let mut doc = CadDocument::with_version(version);
+        let sat = primitives::build_box([0., 0., 0.], 10., 20., 30.);
+        let handle = doc
+            .add_entity(EntityType::Solid3D(Solid3D::from_sat(&sat.to_sat_string())))
+            .unwrap();
+        let loaded = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&doc).unwrap()))
+            .read()
+            .unwrap();
+        let EntityType::Solid3D(solid) = loaded.get_entity(handle).unwrap() else {
+            panic!()
+        };
+        assert_eq!(solid.acis_data.is_binary, version >= DxfVersion::AC1018);
+        let parsed = solid.acis_data.parse().unwrap();
+        assert_eq!(parsed.faces().len(), 6);
+        assert_eq!(parsed.vertices().len(), 8);
+        if version < DxfVersion::AC1018 {
+            assert_eq!(parsed.header.version.major, 4);
+            for record in parsed
+                .records
+                .iter()
+                .filter(|record| record.entity_type == "edge")
+            {
+                assert_eq!(record.tokens.len(), 8);
+                assert!(matches!(
+                    record.tokens[1],
+                    acadrust::entities::acis::SatToken::Pointer(_)
+                ));
+                assert!(matches!(
+                    record.tokens[3],
+                    acadrust::entities::acis::SatToken::Pointer(_)
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn legacy_viewport_eed_and_header_ids_roundtrip_without_mutating_source() {
+    for version in [DxfVersion::AC1012, DxfVersion::AC1014] {
+        let mut doc = CadDocument::with_version(version);
+        let mut overview = Viewport::new();
+        overview.id = 1;
+        doc.add_paper_space_entity(EntityType::Viewport(overview))
+            .unwrap();
+        let mut layer = acadrust::tables::Layer::new("FROZEN_TEST");
+        layer.handle = doc.allocate_handle();
+        let layer_handle = layer.handle;
+        doc.layers.add(layer).unwrap();
+        let mut viewport = Viewport::new();
+        viewport.id = 2;
+        viewport.view_target = Vector3::new(4., 5., 6.);
+        viewport.view_height = 55.;
+        viewport.twist_angle = 0.7;
+        viewport.status.grid_on = true;
+        viewport.frozen_layers.push(layer_handle);
+        let handle = doc
+            .add_paper_space_entity(EntityType::Viewport(viewport))
+            .unwrap();
+        let loaded = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&doc).unwrap()))
+            .read()
+            .unwrap();
+        let EntityType::Viewport(viewport) = loaded.get_entity(handle).unwrap() else {
+            panic!()
+        };
+        assert_eq!(viewport.id, 2);
+        assert_eq!(viewport.view_target, Vector3::new(4., 5., 6.));
+        assert_eq!(viewport.view_height, 55.);
+        assert!((viewport.twist_angle - 0.7).abs() < 1e-12);
+        assert!(viewport.status.grid_on);
+        assert_eq!(viewport.frozen_layers, vec![layer_handle]);
+        assert_eq!(loaded.vx_table.len(), 3);
+        assert!(!loaded.header.current_vx_handle.is_null());
+        assert!(doc.vx_table.is_empty());
+    }
+}
+
+fn arc_text_fixture() -> ArcAlignedTextData {
+    ArcAlignedTextData {
+        text: "Arc text".into(),
+        font_name: "txt.shx".into(),
+        big_font_name: String::new(),
+        style_name: "Standard".into(),
+        center: Vector3::new(55., 30., 0.),
+        radius: 25.,
+        x_scale: 1.25,
+        text_size: 4.5,
+        character_spacing: 0.125,
+        offset_from_arc: -2.5,
+        right_offset: 0.75,
+        left_offset: 1.125,
+        start_angle: 30_f64.to_radians(),
+        end_angle: 210_f64.to_radians(),
+        reverse: true,
+        text_direction: 1,
+        alignment: 2,
+        text_position: 1,
+        bold: false,
+        italic: false,
+        underlined: false,
+        character_set: 0,
+        pitch_and_family: 0,
+        is_shx: true,
+        text_color: 7,
+        normal: Vector3::UNIT_Z,
+        wizard_flag: false,
+        arc_handle: Handle::NULL,
+    }
+}
+
+#[test]
+fn arc_text_numeric_strings_roundtrip_in_every_dwg_version() {
+    use acadrust::io::dwg::dwg_stream_readers::{
+        handle_reader::read_handles, object_reader::DwgObjectReader,
+    };
+
+    for version in [
+        DxfVersion::AC1012,
+        DxfVersion::AC1014,
+        DxfVersion::AC1015,
+        DxfVersion::AC1018,
+        DxfVersion::AC1021,
+        DxfVersion::AC1024,
+        DxfVersion::AC1027,
+        DxfVersion::AC1032,
+    ] {
+        let mut doc = CadDocument::with_version(version);
+        let data = ExtendedEntityData::ArcAlignedText(arc_text_fixture());
+        let handle = doc
+            .add_entity(EntityType::Extended(ExtendedEntity {
+                common: EntityCommon::default(),
+                data: data.clone(),
+            }))
+            .unwrap();
+        let bytes = DwgWriter::write_to_vec(&doc).unwrap();
+        let mut input = DwgReader::from_stream(Cursor::new(bytes));
+        let info = input.read_file_header().unwrap();
+        let mut handles =
+            read_handles(&input.get_section_buffer("AcDb:Handles", &info).unwrap()).unwrap();
+        for offset in handles.values_mut() {
+            *offset -= info.objects_base_offset;
+        }
+        let offset = handles[&handle.value()];
+        let objects = DwgObjectReader::new(
+            input.get_section_buffer("AcDb:AcDbObjects", &info).unwrap(),
+            version,
+            handles,
+        )
+        .unwrap();
+        let (code, mut record) = objects.read_record_at(offset as usize).unwrap();
+        objects.read_common_entity_data(&mut record, code);
+        // Check the native wire schema independently of our arc-text reader.
+        for expected in [
+            "4.5", "1.25", "0.125", "Standard", "txt.shx", "", "Arc text", "-2.5", "0.75", "1.125",
+        ] {
+            assert_eq!(record.read_variable_text(), expected, "{version:?}");
+        }
+        let loaded = input.read().unwrap();
+        let Some(EntityType::Extended(entity)) = loaded.get_entity(handle) else {
+            panic!("Arc text was not retained in {version:?}");
+        };
+        assert_eq!(entity.data, data, "{version:?}");
+    }
+}
+
+#[test]
+fn arc_text_dxf_angles_use_degrees_and_api_uses_radians() {
+    let mut doc = CadDocument::new();
+    let data = arc_text_fixture();
+    let handle = doc
+        .add_entity(EntityType::Extended(ExtendedEntity {
+            common: EntityCommon::default(),
+            data: ExtendedEntityData::ArcAlignedText(data.clone()),
+        }))
+        .unwrap();
+    let pairs = pairs(&doc);
+    let start = pairs
+        .iter()
+        .position(|pair| pair.0 == 100 && pair.1 == "AcDbArcAlignedText")
+        .unwrap();
+    let entity_pairs: Vec<_> = pairs[start..]
+        .iter()
+        .take_while(|pair| pair.0 != 0)
+        .collect();
+    for (code, expected) in [(50, 30.), (51, 210.)] {
+        let value: f64 = entity_pairs
+            .iter()
+            .find(|pair| pair.0 == code)
+            .unwrap()
+            .1
+            .parse()
+            .unwrap();
+        assert!((value - expected).abs() < 1e-12);
+    }
+    for binary in [false, true] {
+        let mut writer = DxfWriter::new(&doc);
+        writer.binary = binary;
+        let loaded = DxfReader::from_reader(Cursor::new(writer.write_to_vec().unwrap()))
+            .unwrap()
+            .read()
+            .unwrap();
+        let Some(EntityType::Extended(entity)) = loaded.get_entity(handle) else {
+            panic!()
+        };
+        let ExtendedEntityData::ArcAlignedText(arc) = &entity.data else {
+            panic!()
+        };
+        assert!((arc.start_angle - data.start_angle).abs() < 1e-12);
+        assert!((arc.end_angle - data.end_angle).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn class_mapped_entities_are_dispatched_as_entities() {
+    use acadrust::io::dwg::dwg_stream_readers::object_reader::common::*;
+    for name in [
+        "ARC_DIMENSION",
+        "LARGE_RADIAL_DIMENSION",
+        "CAMERA",
+        "SECTIONOBJECT",
+        "ARCALIGNEDTEXT",
+        "RTEXT",
+        "POSITIONMARKER",
+        "COORDINATION_MODEL",
+        "ACDBPOINTCLOUD",
+        "ACDBPOINTCLOUDEX",
+        "MPOLYGON",
+        "ACAD_PROXY_ENTITY",
+    ] {
+        assert!(
+            is_entity_type(dxf_name_to_type_code(name).unwrap()),
+            "{name}"
+        );
+    }
+    for name in [
+        "ACAD_PROXY_OBJECT",
+        "LAYOUT",
+        "TABLESTYLE",
+        "MATERIAL",
+        "FIELD",
+    ] {
+        assert!(
+            !is_entity_type(dxf_name_to_type_code(name).unwrap()),
+            "{name}"
+        );
+    }
+}

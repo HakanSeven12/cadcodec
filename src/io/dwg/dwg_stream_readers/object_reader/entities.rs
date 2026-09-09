@@ -464,16 +464,17 @@ pub fn read_section_object(reader: &mut DwgMergedReader) -> ExtendedEntityData {
 }
 
 pub fn read_arc_aligned_text(reader: &mut DwgMergedReader) -> ExtendedEntityData {
-    let text_size = reader.read_bit_double();
-    let x_scale = reader.read_bit_double();
-    let character_spacing = reader.read_bit_double();
+    // D2T fields are decimal strings, not bit doubles.
+    let text_size = reader.read_variable_text().parse().unwrap_or_default();
+    let x_scale = reader.read_variable_text().parse().unwrap_or_default();
+    let character_spacing = reader.read_variable_text().parse().unwrap_or_default();
     let style_name = reader.read_variable_text();
     let font_name = reader.read_variable_text();
     let big_font_name = reader.read_variable_text();
     let text = reader.read_variable_text();
-    let offset_from_arc = reader.read_bit_double();
-    let right_offset = reader.read_bit_double();
-    let left_offset = reader.read_bit_double();
+    let offset_from_arc = reader.read_variable_text().parse().unwrap_or_default();
+    let right_offset = reader.read_variable_text().parse().unwrap_or_default();
+    let left_offset = reader.read_variable_text().parse().unwrap_or_default();
     let center = reader.read_3bit_double();
     let radius = reader.read_bit_double();
     let start_angle = reader.read_bit_double();
@@ -1544,9 +1545,15 @@ pub fn read_mtext(
 
     let style_handle = reader.read_handle();
 
-    let linespacing_style = reader.read_bit_short();
-    let linespacing_factor = reader.read_bit_double();
-    let unknown_bit = reader.read_bit();
+    let (linespacing_style, linespacing_factor, unknown_bit) = if version.r2000_plus() {
+        (
+            reader.read_bit_short(),
+            reader.read_bit_double(),
+            reader.read_bit(),
+        )
+    } else {
+        (1, 1.0, false)
+    };
 
     let mut background_flags = 0i32;
     let mut background_scale = 1.5;
@@ -2039,7 +2046,7 @@ pub struct HatchData {
     pub mpolygon_boundary_handle_count: i32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ViewportData {
     pub center: Vector3,
@@ -2770,6 +2777,14 @@ pub fn read_viewport(
     let center = reader.read_3bit_double();
     let width = reader.read_bit_double();
     let height = reader.read_bit_double();
+    if version.r13_14_only() {
+        return ViewportData {
+            center,
+            width,
+            height,
+            ..Default::default()
+        };
+    }
 
     // View data (read for all versions)
     let view_target = reader.read_3bit_double();

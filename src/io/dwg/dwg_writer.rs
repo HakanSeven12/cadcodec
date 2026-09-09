@@ -447,6 +447,40 @@ fn prepare_surface_classes(document: &mut std::borrow::Cow<'_, CadDocument>) {
 /// objects: TABLESTYLE in R2004 and MLEADERSTYLE in R2007.
 fn prepare_legacy_document(document: &mut CadDocument) {
     use crate::objects::ObjectType;
+    if document.version <= DxfVersion::AC1014 {
+        let missing: Vec<_> = document
+            .entities()
+            .filter_map(|entity| match entity {
+                crate::entities::EntityType::Viewport(viewport)
+                    if !document
+                        .vx_table
+                        .iter()
+                        .any(|record| record.viewport == viewport.common.handle) =>
+                {
+                    Some((viewport.common.handle, viewport.status.is_on))
+                }
+                _ => None,
+            })
+            .collect();
+        if !missing.is_empty() && document.vx_table.is_empty() {
+            let mut reserved = crate::tables::VxTableRecord::new("");
+            reserved.handle = document.allocate_handle();
+            reserved.is_xref_reference = true;
+            document.vx_table.add_allow_duplicate(reserved);
+        }
+        for (viewport, is_on) in missing {
+            let first = document.header.current_vx_handle.is_null();
+            let mut record = crate::tables::VxTableRecord::new(if first { "1" } else { "" });
+            record.handle = document.allocate_handle();
+            record.viewport = viewport;
+            record.is_on = is_on;
+            record.is_xref_reference = true;
+            if first {
+                document.header.current_vx_handle = record.handle;
+            }
+            document.vx_table.add_allow_duplicate(record);
+        }
+    }
 
     let root_handle = document.header.named_objects_dict_handle;
     let mut obsolete = Vec::new();
@@ -2522,8 +2556,8 @@ mod tests {
             })
             .collect();
         assert_eq!(solids.len(), 1, "should have exactly one Solid3D");
-        assert!(!solids[0].acis_data.is_binary, "R2004 should use SAT text");
-        assert!(solids[0].acis_data.sat_data.contains("body"));
+        assert!(solids[0].acis_data.is_binary, "R2004 stores version-2 SAB");
+        assert_eq!(solids[0].acis_data.parse().unwrap().bodies().len(), 1);
     }
 
     /// Write a Solid3D with SAT data to DWG R2007 (SAB binary format), read back.
@@ -2619,7 +2653,7 @@ mod tests {
             })
             .collect();
         assert_eq!(bodies.len(), 1, "should have exactly one Body");
-        assert!(bodies[0].acis_data.sat_data.contains("body"));
+        assert_eq!(bodies[0].acis_data.parse().unwrap().bodies().len(), 1);
     }
 
     /// Write multiple ACIS entities to a single DWG at R2010, read back all three.

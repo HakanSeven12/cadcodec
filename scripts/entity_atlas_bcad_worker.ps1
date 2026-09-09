@@ -4,6 +4,7 @@ $before=@(Get-Process bricscad -ErrorAction SilentlyContinue | ForEach-Object Id
 $application=$null
 $document=$null
 try {
+    [IO.File]::WriteAllText((Join-Path $Directory 'stage.txt'),'STARTUP',[Text.Encoding]::ASCII)
     $application=New-Object -ComObject 'BricscadApp.AcadApplication.20.0'
     $owned=@(Get-Process bricscad | Where-Object { $_.Id -notin $before } | ForEach-Object Id)
     $owned | ConvertTo-Json | Set-Content (Join-Path $Directory 'engine-pids.json')

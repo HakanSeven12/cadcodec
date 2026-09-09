@@ -45,8 +45,12 @@ foreach ($drawing in $manifest) {
         if(-not $oldResult.loaded -or $oldResult.completed){$results.Add($oldResult);continue}
     }
     if ($Resume -and (Test-Path -LiteralPath $previous)) {
-        $results.Add((Get-Content -LiteralPath $previous -Raw | ConvertFrom-Json))
-        continue
+        $oldResult = Get-Content -LiteralPath $previous -Raw | ConvertFrom-Json
+        if ($oldResult.source_sha256 -eq (Get-FileHash -LiteralPath $drawing.file).Hash -and
+            $oldResult.status -ne 'ENGINE_STARTUP_FAILED' -and -not $oldResult.timed_out) {
+            $results.Add($oldResult)
+            continue
+        }
     }
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
     $copy = Join-Path $directory ([IO.Path]::GetFileName($drawing.file))
@@ -65,7 +69,7 @@ foreach ($drawing in $manifest) {
     $complete = Join-Path $directory 'complete.txt'
     $stdout = Join-Path $directory 'stdout.log'
     $stderr = Join-Path $directory 'stderr.log'
-    foreach ($old in @($entities,$loaded,$complete)) { if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old } }
+    foreach ($old in @($entities,$loaded,$complete,(Join-Path $directory 'engine-pids.json'),(Join-Path $directory 'stage.txt'))) { if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old } }
     $lines = @(
         '(setq atlasOldLogPath (getvar "LOGFILEPATH") atlasOldLogMode (getvar "LOGFILEMODE"))',
         ('(setvar "LOGFILEPATH" "{0}")' -f (LispPath ($directory + '/'))),
@@ -115,12 +119,22 @@ foreach ($drawing in $manifest) {
         $process.WaitForExit()
     }
     if($Engine -eq 'BCAD'){
+        # COM can start its server before returning an application reference.
+        # A startup timeout therefore may precede the worker's PID file.
+        $startupServers=@(Get-CimInstance Win32_Process -Filter "name='bricscad.exe'" | Where-Object {
+            $_.CreationDate -ge $runStarted -and $_.ExecutablePath -eq $executable -and
+            $_.CommandLine -match '/Automation.*-Embedding'
+        } | ForEach-Object ProcessId)
         $pidFile=Join-Path $directory 'engine-pids.json'
         if(Test-Path -LiteralPath $pidFile){
             foreach($enginePid in @(Get-Content $pidFile -Raw | ConvertFrom-Json)){
                 $owned=Get-Process -Id $enginePid -ErrorAction SilentlyContinue
                 if($owned -and $owned.ProcessName -eq 'bricscad'){Stop-Process -Id $enginePid -Force; $owned.WaitForExit()}
             }
+        }
+        foreach($enginePid in $startupServers){
+            $owned=Get-Process -Id $enginePid -ErrorAction SilentlyContinue
+            if($owned -and $owned.StartTime -ge $runStarted){Stop-Process -Id $enginePid -Force; $owned.WaitForExit()}
         }
     }
     $completed = Test-Path -LiteralPath $complete
@@ -156,6 +170,7 @@ foreach ($drawing in $manifest) {
     $status = if(-not $wasLoaded){'OPEN_FAILED_OR_BLOCKED'}elseif(-not $completed){'AUDIT_OR_SCRIPT_FAILED'}elseif($null -eq $auditErrors){'AUDIT_SUMMARY_UNAVAILABLE'}elseif($auditErrors -gt 0){'AUDIT_ERRORS'}elseif($unreadable -gt 0){'UNREADABLE_ENTITIES'}elseif($proxyRecords -gt 0){'PROXY_ENTITIES'}elseif($missing.Count -gt 0){'ENTITY_LOSS'}else{'PASS'}
     $diagnostics = @($logText -split "`r?`n" | Where-Object { $_ -match 'ErrorStatus|improperly|corrupt|recover|Invalid|invalid|modeling failure|Modeling operation error|64 bit long|not found|unable|Unable|Error [0-9]|discarded|unknown command' } | Select-Object -Unique)
     $stage=if(Test-Path (Join-Path $directory 'stage.txt')){Get-Content (Join-Path $directory 'stage.txt') -Raw}else{''}
+    if($Engine -eq 'BCAD' -and $stage -eq 'STARTUP' -and -not $wasLoaded){$status='ENGINE_STARTUP_FAILED'}
     $row=[pscustomobject]@{engine=$Engine;version=$drawing.version;format=$drawing.format;file=$drawing.file;status=$status;loaded=$wasLoaded;completed=$completed;unreadable_records=$unreadable;timed_out=$timedOut;stage=$stage;audit_errors=$auditErrors;expected_cases=$included.Count;present_cases=($included.Count-$missing.Count);missing=$missing;records=$records;cases=$caseResults;diagnostics=$diagnostics;seconds=[Math]::Round($timer.Elapsed.TotalSeconds,2);source_unchanged=((Get-FileHash -LiteralPath $drawing.file -Algorithm SHA256).Hash -eq $sourceHash);log_directory=$directory}
     $row | Add-Member -NotePropertyName source_sha256 -NotePropertyValue $sourceHash
     $row | Add-Member -NotePropertyName proxy_records -NotePropertyValue $proxyRecords

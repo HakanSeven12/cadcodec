@@ -2048,8 +2048,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_double(44, data.offset_from_arc)?;
                 self.writer.write_double(45, data.right_offset)?;
                 self.writer.write_double(46, data.left_offset)?;
-                self.writer.write_double(50, data.start_angle)?;
-                self.writer.write_double(51, data.end_angle)?;
+                self.writer.write_double(50, data.start_angle.to_degrees())?;
+                self.writer.write_double(51, data.end_angle.to_degrees())?;
                 self.writer.write_i16(70, data.reverse as i16)?;
                 self.writer.write_i16(71, data.text_direction)?;
                 self.writer.write_i16(72, data.alignment)?;

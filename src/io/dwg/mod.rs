@@ -52,6 +52,7 @@ pub mod eed_codec;
 pub(crate) mod embedded_entity;
 pub mod file_headers;
 mod parallel;
+mod legacy_viewport;
 pub mod preview;
 pub mod reed_solomon;
 

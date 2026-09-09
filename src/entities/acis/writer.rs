@@ -118,6 +118,14 @@ impl SatWriter {
             if Some(i) == skip_index {
                 continue; // skip the synthetic sentinel
             }
+            // SAT 4.0 edges have no parameter pair or trailing tolerance
+            // descriptor: $start $end $coedge $curve sense.
+            if version.major < 7
+                && base_entity_type(&record.entity_type) == "edge"
+                && (i == 2 || i == 4 || i >= 8)
+            {
+                continue;
+            }
             output.push(' ');
             Self::write_token(output, token, version);
         }

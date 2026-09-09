@@ -233,16 +233,22 @@ impl<'a> DwgObjectWriter<'a> {
                     .write_handle(DwgReferenceType::HardPointer, data.settings_handle.value());
             }
             ExtendedEntityData::ArcAlignedText(data) => {
-                self.writer.write_bit_double(data.text_size);
-                self.writer.write_bit_double(data.x_scale);
-                self.writer.write_bit_double(data.character_spacing);
+                // AcDbArcAlignedText stores these numbers as text (D2T),
+                // including in DWG. The other geometric fields remain BD.
+                self.writer.write_variable_text(&data.text_size.to_string());
+                self.writer.write_variable_text(&data.x_scale.to_string());
+                self.writer
+                    .write_variable_text(&data.character_spacing.to_string());
                 self.writer.write_variable_text(&data.style_name);
                 self.writer.write_variable_text(&data.font_name);
                 self.writer.write_variable_text(&data.big_font_name);
                 self.writer.write_variable_text(&data.text);
-                self.writer.write_bit_double(data.offset_from_arc);
-                self.writer.write_bit_double(data.right_offset);
-                self.writer.write_bit_double(data.left_offset);
+                self.writer
+                    .write_variable_text(&data.offset_from_arc.to_string());
+                self.writer
+                    .write_variable_text(&data.right_offset.to_string());
+                self.writer
+                    .write_variable_text(&data.left_offset.to_string());
                 self.writer.write_3bit_double(data.center);
                 self.writer.write_bit_double(data.radius);
                 self.writer.write_bit_double(data.start_angle);
@@ -842,12 +848,12 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer
             .write_handle(DwgReferenceType::HardPointer, style_handle.value());
 
-        // Linespacing Style BS 73 (1=At Least, 2=Exact)
-        self.writer.write_bit_short(e.line_spacing_style as i16);
-        // Linespacing Factor BD 44
-        self.writer.write_bit_double(e.line_spacing_factor);
-        // Unknown bit B
-        self.writer.write_bit(false);
+        // ODA 20.4.46: these fields were introduced in R2000.
+        if self.version.r2000_plus() {
+            self.writer.write_bit_short(e.line_spacing_style as i16);
+            self.writer.write_bit_double(e.line_spacing_factor);
+            self.writer.write_bit(false);
+        }
 
         // R2004+:
         if self.version.r2004_plus() {
@@ -2062,6 +2068,33 @@ impl<'a> DwgObjectWriter<'a> {
     // â”€â”€ Viewport entity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn write_viewport_entity(&mut self, e: &Viewport) {
+        if self.version.r13_14_only() {
+            let mut common = e.common.clone();
+            common
+                .extended_data
+                .upsert_record(crate::io::dwg::legacy_viewport::record(e, self.document));
+            if let Some(app) = self.document.app_ids.get("ACAD") {
+                common
+                    .extended_data
+                    .raw_dwg_eed
+                    .retain(|(handle, _)| *handle != app.handle.value());
+            }
+            self.entity_preamble(common::OBJ_VIEWPORT, &common);
+            self.writer.write_3bit_double(e.center);
+            self.writer.write_bit_double(e.width);
+            self.writer.write_bit_double(e.height);
+            let header = self
+                .document
+                .vx_table
+                .iter()
+                .find(|record| record.viewport == e.common.handle)
+                .map(|record| record.handle)
+                .unwrap_or(Handle::NULL);
+            self.writer
+                .write_handle(DwgReferenceType::HardPointer, header.value());
+            self.register_object(e.common.handle);
+            return;
+        }
         self.entity_preamble(common::OBJ_VIEWPORT, &e.common);
 
         // Center 3BD 10
@@ -5451,7 +5484,7 @@ impl<'a> DwgObjectWriter<'a> {
         silhouettes: &[Silhouette],
         inline: bool,
     ) -> bool {
-        if self.version.r2007_plus() && !acis.is_binary && !acis.sat_data.is_empty() {
+        if self.version.r2004_plus() && !acis.is_binary && !acis.sat_data.is_empty() {
             if let Ok(sat) = crate::entities::acis::SatDocument::parse(&acis.sat_data) {
                 let mut binary = acis.clone();
                 binary.is_binary = true;
@@ -5465,7 +5498,7 @@ impl<'a> DwgObjectWriter<'a> {
         if has_data {
             // Unknown bit — per ODA spec / LibreDWG this B
             // is always present between acis_empty and the version BS.
-            self.writer.write_bit(false);
+            self.writer.write_bit(!acis.is_binary);
 
             if acis.is_binary && !acis.sab_data.is_empty() {
                 // SAB binary (version 2) — write raw bytes directly.
@@ -5507,20 +5540,32 @@ impl<'a> DwgObjectWriter<'a> {
                 // SAT text — all DWG versions use the same encoding:
                 // BL-sized blocks of encrypted bytes (cipher: 159 - byte)
                 // terminated by BL(0).  Per LibreDWG dwg.spec.
-                let stripped = AcisData::strip_sat_terminator(&sat_text);
-                // R13-R2010 inline modeler streams need both the SAT end
-                // marker and the following empty DWG block. BricsCAD rejects
-                // the otherwise well-formed object when the SAT marker is
-                // absent. R2013+ geometry uses the separate AcDs/SAB path.
-                let mut full = stripped;
-                full.push_str("End-of-ACIS-data\n");
+                let legacy_sat;
+                let sat_text = if self.version.r13_15_only() {
+                    legacy_sat = crate::entities::acis::SatDocument::parse(&sat_text)
+                        .ok()
+                        // Only the classic SAT 700 schema is normalized here.
+                        // Newer ASM schemas require a modeler-level conversion.
+                        .filter(|doc| doc.header.version == crate::entities::acis::SatVersion::V7_0)
+                        .map(|mut doc| {
+                            doc.header.version = crate::entities::acis::SatVersion::V4_0;
+                            doc.to_sat_string()
+                        });
+                    legacy_sat.as_deref().unwrap_or(&sat_text)
+                } else {
+                    &sat_text
+                };
+                let stripped = AcisData::strip_sat_terminator(sat_text);
+                // DWG's length-delimited SAT blocks omit the standalone-file
+                // terminator and use CRLF between records (native AutoCAD).
+                let full = stripped.replace('\n', "\r\n");
                 let plain = full.as_bytes();
 
-                // ODA 20.4.41: DWG substitutes printable ASCII, including
-                // spaces. This differs from the DXF SAT cipher.
+                // Spaces/control bytes pass through. DWG uses substitution,
+                // unlike the DXF SAT cipher's XOR mapping.
                 let mut encrypted = Vec::with_capacity(plain.len());
                 for &b in plain.iter() {
-                    if (32..=126).contains(&b) {
+                    if (33..=126).contains(&b) {
                         encrypted.push(159u8.wrapping_sub(b));
                     } else {
                         encrypted.push(b);

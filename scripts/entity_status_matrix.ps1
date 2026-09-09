@@ -86,6 +86,7 @@ function Status($Case, $Drawing, $Entry) {
     if ($null -eq $Entry) { return 'UT' }
     if (-not $Entry.current) { return 'STALE' }
     $r = $Entry.result
+    if ($r.status -eq 'ENGINE_STARTUP_FAILED') { return 'ENGINE' }
     if (-not $r.loaded) { return 'BLOCKED' }
     $records = @($r.records | Where-Object layer -EQ $caseInDrawing.layer)
     if ($records.type -match 'PROXY') { return 'PROXY' }
@@ -101,7 +102,7 @@ $lines.Add('# Entity Status By DWG/DXF Version')
 $lines.Add('')
 $lines.Add('Generated from console validation results. AutoCAD 2027 and BricsCAD V20.1; IntelliCAD excluded. A cell describes the tested fixture, not every possible configuration of that entity.')
 $lines.Add('')
-$lines.Add('`OK`: native type present, completed audit, zero errors. `PROXY`: retained only as a proxy. `TYPE`: unexpected native type. `MISSING`: case absent. `UNREAD`: absent with unreadable records. `AUDIT`: type present but drawing has audit errors, not necessarily attributable to this entity. `BLOCKED`: the entire drawing did not open, so this entity is untested in that drawing. `INCOMPLETE`: no completed audit. `UT`: not tested. `STALE`: source changed after validation. `NA`: excluded by the atlas version gate, not a claim about all possible down-conversions.')
+$lines.Add('`OK`: native type present, completed audit, zero errors. `PROXY`: retained only as a proxy. `TYPE`: unexpected native type. `MISSING`: case absent. `UNREAD`: absent with unreadable records. `AUDIT`: type present but drawing has audit errors, not necessarily attributable to this entity. `BLOCKED`: the entire drawing did not open, so this entity is untested in that drawing. `ENGINE`: engine startup failed before opening the drawing. `INCOMPLETE`: no completed audit. `UT`: not tested. `STALE`: source changed after validation. `NA`: excluded by the atlas version gate, not a claim about all possible down-conversions.')
 $lines.Add('')
 $lines.Add('`i:` prefixes an isolated-drawing result used when the combined drawing cannot establish the status. BricsCAD native underlay names PDFREFERENCE/DWFREFERENCE/DGNREFERENCE are accepted aliases. Native identity and audit do not verify appearance, exact topology or external assets. Structural records are covered indirectly through their parent entities; exclusions are listed below rather than silently treated as passing.')
 $lines.Add('')
@@ -127,7 +128,7 @@ foreach ($engine in $Engines) {
                 $entry = $results["$engine|$version|$format"]
                 $status = Status $case $drawing $entry
                 $scope = 'combined'
-                if ($status -in @('BLOCKED','UT','STALE','INCOMPLETE')) {
+                if ($status -in @('BLOCKED','UT','STALE','INCOMPLETE','ENGINE')) {
                     $single = $isolated["$engine|$version|$format|$($case.name)"]
                     if ($single -and $single.current) {
                         $entry = $single
@@ -143,6 +144,26 @@ foreach ($engine in $Engines) {
         }
     }
 }
+$summary = [Collections.Generic.List[string]]::new()
+$summary.Add('## DWG Progress')
+$summary.Add('')
+$summary.Add('Counts include isolated results where the combined atlas cannot open. Not verified includes blocked opens, stale evidence, engine failures and untested cases. Issue cells include proxies and non-native or incomplete results; they are not passes.')
+$summary.Add('')
+$summary.Add('| Engine | Version | Native, Audit-Clean | Proxy | Other Issues | Not Verified | Excluded |')
+$summary.Add('|---|---|---:|---:|---:|---:|---:|')
+foreach ($engine in $Engines) {
+    foreach ($version in $versions) {
+        $states = @($cells | Where-Object { $_.engine -eq $engine -and $_.format -eq 'dwg' -and $_.version -eq $version } | ForEach-Object { $_.status -replace '^i:', '' })
+        $ok = @($states | Where-Object { $_ -eq 'OK' }).Count
+        $proxy = @($states | Where-Object { $_ -eq 'PROXY' }).Count
+        $excluded = @($states | Where-Object { $_ -eq 'NA' }).Count
+        $unverified = @($states | Where-Object { $_ -in @('BLOCKED','STALE','UT','ENGINE') }).Count
+        $issues = $states.Count - $ok - $proxy - $excluded - $unverified
+        $summary.Add("| $engine | $version | $ok | $proxy | $issues | $unverified | $excluded |")
+    }
+}
+$summary.Add('')
+$lines.InsertRange($lines.IndexOf('## Version Availability'), $summary)
 $lines.Add(''); $lines.Add('## Structural And Unsynthesized Entities'); $lines.Add('')
 $lines.Add('| Entity/API Family | '+($versions -join ' | ')+' | Coverage/Requirement |')
 $lines.Add('|---|'+((@('---') * 9) -join '|')+'|')
