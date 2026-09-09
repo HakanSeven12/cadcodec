@@ -1072,21 +1072,20 @@ impl<R: Read + Seek> DwgReader<R> {
                     attach_acds_sab_blobs(&mut document, blobs)
                 }
             };
+            let fingerprint = super::sab_fingerprint(document.entities().filter_map(|entity| {
+                let acis = match entity {
+                    crate::entities::EntityType::Solid3D(entity) => &entity.acis_data,
+                    crate::entities::EntityType::Region(entity) => &entity.acis_data,
+                    crate::entities::EntityType::Body(entity) => &entity.acis_data,
+                    crate::entities::EntityType::Surface(entity) => &entity.acis_data,
+                    _ => return None,
+                };
+                (!acis.sab_data.is_empty())
+                    .then_some((entity.common().handle, acis.sab_data.as_slice()))
+            }));
+            document.raw_acds_data = Some(std::sync::Arc::new(acds_buf));
+            document.raw_acds_fingerprint = fingerprint;
             if attached > 0 {
-                let fingerprint =
-                    super::sab_fingerprint(document.entities().filter_map(|entity| {
-                        let acis = match entity {
-                            crate::entities::EntityType::Solid3D(entity) => &entity.acis_data,
-                            crate::entities::EntityType::Region(entity) => &entity.acis_data,
-                            crate::entities::EntityType::Body(entity) => &entity.acis_data,
-                            crate::entities::EntityType::Surface(entity) => &entity.acis_data,
-                            _ => return None,
-                        };
-                        (!acis.sab_data.is_empty())
-                            .then_some((entity.common().handle, acis.sab_data.as_slice()))
-                    }));
-                document.raw_acds_data = Some(std::sync::Arc::new(acds_buf));
-                document.raw_acds_fingerprint = fingerprint;
                 self.notifications.notify(
                     NotificationType::Warning,
                     format!(

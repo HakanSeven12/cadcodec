@@ -293,6 +293,9 @@ impl DwgMergedReader {
     pub fn read_2raw_double(&mut self) -> Vector2 {
         self.main.read_2raw_double()
     }
+    pub fn read_3raw_double(&mut self) -> Vector3 {
+        self.main.read_3raw_double()
+    }
     pub fn read_bit_extrusion(&mut self) -> Vector3 {
         self.main.read_bit_extrusion()
     }

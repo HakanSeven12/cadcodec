@@ -361,12 +361,27 @@ impl SatToken {
         match self {
             SatToken::Float(v) => Some(*v),
             SatToken::Integer(v) => Some(*v as f64),
+            SatToken::Sab { tag: 0x02, data } if data.len() == 1 => {
+                Some(i8::from_le_bytes([data[0]]) as f64)
+            }
+            SatToken::Sab { tag: 0x03, data } if data.len() == 2 => {
+                Some(i16::from_le_bytes([data[0], data[1]]) as f64)
+            }
+            SatToken::Sab {
+                tag: 0x04 | 0x15,
+                data,
+            } if data.len() == 4 => {
+                Some(i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
+            }
             SatToken::Sab { tag: 0x05, data } if data.len() == 4 => {
                 Some(f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
             }
             SatToken::Sab { tag: 0x06, data } if data.len() == 8 => Some(f64::from_le_bytes([
                 data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
             ])),
+            SatToken::Sab { tag: 0x17, data } if data.len() == 8 => Some(i64::from_le_bytes([
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+            ]) as f64),
             _ => None,
         }
     }
@@ -2635,12 +2650,8 @@ impl SatDocument {
         errors
     }
 
-    /// Populate optional topological back-links required by persisted ACIS B-Reps.
-    ///
-    /// ACIS modelers can infer a representative coedge for an edge and an
-    /// incident edge for a vertex while constructing an object in memory, but
-    /// BricsCAD rejects a serialized `3DSOLID` when both links are null.
-    /// Existing non-null links are preserved; only missing links are filled.
+    /// Fill missing vertex-edge and edge-coedge links for ACIS serialization.
+    /// Preserve existing non-null links.
     pub fn complete_brep_links(&mut self) {
         use std::collections::HashMap;
 

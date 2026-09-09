@@ -136,8 +136,16 @@ pub struct HatchScaleContext {
     pub pattern_lines: Vec<crate::entities::HatchPatternLine>,
     pub pattern_scale: f64,
     pub pattern_base: Vector3,
-    pub loop_types: Vec<i32>,
+    pub loops: Vec<HatchLoopContext>,
+}
+
+/// Per-boundary-loop data in an annotative hatch context.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct HatchLoopContext {
+    pub loop_type: i32,
     pub supports_context: bool,
+    pub boundary: Option<crate::entities::BoundaryPath>,
 }
 
 /// `AcDbHatchViewContextData` payload.

@@ -254,6 +254,10 @@ impl DwgMergedWriter {
         self.main.write_2raw_double(value);
     }
 
+    pub fn write_3raw_double(&mut self, value: Vector3) {
+        self.main.write_3raw_double(value);
+    }
+
     pub fn write_2bit_double_with_default(&mut self, def: Vector2, value: Vector2) {
         self.main.write_2bit_double_with_default(def, value);
     }

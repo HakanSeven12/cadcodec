@@ -22,6 +22,10 @@ Thumbs.db
 *.dxf
 *.dxb
 *.dwg
+*.dwl
+*.dwl2
+*.dmp
+/crash_report.txt
 
 
 # Documentation

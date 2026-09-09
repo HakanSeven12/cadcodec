@@ -336,7 +336,6 @@ fn objects_maps_are_content_comparable() {
 }
 
 #[test]
-#[test]
 fn remaps_dictionary_with_default_handle() {
     // Issue #51 comment (Apicqq): resolve_references() remapped objects and
     // dictionary entries, but left DictionaryWithDefault's default (code

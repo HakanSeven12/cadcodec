@@ -10,7 +10,10 @@
 
 pub mod dwg;
 pub mod dxf;
+mod loft_parameters;
+mod loft_surface_curves;
 pub mod read;
+mod surface_history;
 
 #[cfg(feature = "import")]
 pub mod import;

@@ -2467,6 +2467,16 @@ pub fn read_hatch_boundary_path(
     version: DwgVersion,
 ) -> HatchBoundaryPath {
     let flags = reader.read_bit_long();
+    read_hatch_boundary_path_contents(reader, version, flags, true)
+}
+
+/// Read the geometry following an already-decoded hatch path flag value.
+pub fn read_hatch_boundary_path_contents(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    flags: i32,
+    has_boundary_handles: bool,
+) -> HatchBoundaryPath {
     let is_polyline = (flags & 2) != 0;
 
     let mut edges = Vec::new();
@@ -2580,7 +2590,11 @@ pub fn read_hatch_boundary_path(
     // which spins read_handle() for tens of seconds per record. AutoCAD
     // hatches realistically carry well under MAX_ARRAY_COUNT (100k)
     // associative boundary references.
-    let boundary_handle_count = safe_count(reader.read_bit_long());
+    let boundary_handle_count = if has_boundary_handles {
+        safe_count(reader.read_bit_long())
+    } else {
+        0
+    };
 
     HatchBoundaryPath {
         flags,
@@ -5003,6 +5017,7 @@ pub struct SurfaceEntityData {
 /// The caller must still read the 3DSOLID-specific history_id handle.
 fn read_extra_acis_data(
     reader: &mut DwgMergedReader,
+    inline_end: Option<i64>,
 ) -> Option<crate::entities::solid3d::AcisData> {
     let prefix_start = reader.position_in_bits();
     let _unknown = reader.read_bit();
@@ -5010,9 +5025,12 @@ fn read_extra_acis_data(
 
     if extra_version == 2 {
         let data_start = reader.position_in_bits();
-        let remaining_bits = (reader.handle_start() - data_start).max(0) as usize;
+        let remaining_bits =
+            (inline_end.unwrap_or_else(|| reader.handle_start()) - data_start).max(0) as usize;
         let probe = reader.read_bytes(remaining_bits / 8);
-        if !probe.starts_with(b"ACIS BinaryFile") {
+        if !probe.starts_with(b"ACIS BinaryFile")
+            && !(inline_end.is_some() && probe.starts_with(b"ASM BinaryFile"))
+        {
             reader.set_position_in_bits(prefix_start);
             return None;
         }
@@ -5035,7 +5053,11 @@ fn read_extra_acis_data(
             if block_size == 0 {
                 break;
             }
-            if block_size < 0 || block_size as usize > reader.remaining_bytes() {
+            let available = inline_end.map_or_else(
+                || reader.remaining_bytes(),
+                |end| (end - reader.position_in_bits()).max(0) as usize / 8,
+            );
+            if block_size < 0 || block_size as usize > available {
                 reader.set_position_in_bits(prefix_start);
                 return None;
             }
@@ -5069,7 +5091,50 @@ pub fn read_acis_entity(
     dxf_version: DxfVersion,
     has_ds_data: bool,
 ) -> AcisEntityData {
-    read_acis_entity_impl(reader, version, dxf_version, has_ds_data, false)
+    read_acis_entity_impl(
+        reader,
+        version,
+        dxf_version,
+        has_ds_data,
+        false,
+        false,
+        None,
+    )
+    .expect("database ACIS decoding retains unrecognized legacy payloads")
+}
+
+/// Solid-history B-rep objects keep their modeler body inline even in R2013+
+/// drawings, while their material references still use the object handle stream.
+pub(super) fn read_history_acis_entity(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+) -> AcisEntityData {
+    read_acis_entity_impl(reader, version, dxf_version, false, false, true, None)
+        .expect("history ACIS decoding retains unrecognized modeler payloads")
+}
+
+/// Embedded construction profiles have no database handle or AcDs entry.
+/// Their modeler body remains inline even in newer drawing versions.
+pub(crate) fn read_inline_acis_entity(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+    bit_length: usize,
+) -> Option<AcisEntityData> {
+    let start = reader.position_in_bits();
+    let end = start.checked_add(i64::try_from(bit_length).ok()?)?;
+    if end > reader.main_mut().data_len() as i64 * 8 {
+        return None;
+    }
+    let data = read_acis_entity_impl(reader, version, dxf_version, false, true, true, Some(end))?;
+    let remaining = end - reader.position_in_bits();
+    // Byte-sized enclosing records may carry up to seven zero padding bits.
+    // Never normalize an unrecognized modeler tail into a partial REGION.
+    if !(0..=7).contains(&remaining) || (0..remaining).any(|_| reader.read_bit()) {
+        return None;
+    }
+    Some(data)
 }
 
 fn read_acis_entity_impl(
@@ -5078,12 +5143,14 @@ fn read_acis_entity_impl(
     dxf_version: DxfVersion,
     has_ds_data: bool,
     allow_extra: bool,
-) -> AcisEntityData {
+    inline_layout: bool,
+    inline_end: Option<i64>,
+) -> Option<AcisEntityData> {
     // R2013+ moved modeler data into AcDs and removed the leading
     // `acis_empty` bit from the entity record.  The first bit after common
     // entity data is `wireframe_data_present` in that layout.  Consuming the
     // legacy bit here shifts every wire/material/revision field by one.
-    let acis_empty = if version.r2013_plus(dxf_version) {
+    let acis_empty = if version.r2013_plus(dxf_version) && !inline_layout {
         !has_ds_data
     } else {
         reader.read_bit()
@@ -5108,6 +5175,9 @@ fn read_acis_entity_impl(
         let _unknown = reader.read_bit();
 
         acis_version = reader.read_bit_short();
+        if inline_end.is_some() && !matches!(acis_version, 1 | 2) {
+            return None;
+        }
 
         if acis_version == 1 {
             // SAT text — all DWG versions use the same encoding:
@@ -5117,7 +5187,16 @@ fn read_acis_entity_impl(
 
             let mut all_bytes = Vec::new();
             loop {
-                let block_size = reader.read_bit_long().max(0) as usize;
+                let raw_block_size = reader.read_bit_long();
+                if let Some(end) = inline_end {
+                    if raw_block_size < 0
+                        || reader.position_in_bits() > end
+                        || raw_block_size as i64 > (end - reader.position_in_bits()) / 8
+                    {
+                        return None;
+                    }
+                }
+                let block_size = raw_block_size.max(0) as usize;
                 if block_size == 0 || block_size > 50_000_000 {
                     break;
                 }
@@ -5137,6 +5216,20 @@ fn read_acis_entity_impl(
             }
             sat_data = String::from_utf8_lossy(&decoded).to_string();
             sat_data = crate::entities::solid3d::AcisData::strip_sat_terminator(&sat_data);
+        } else if let Some(end) = inline_end {
+            // Embedded bodies have no handle/text streams. Bound the SAB
+            // probe by the enclosing entity's meaningful bit count instead
+            // of the absent database handle-stream offset.
+            is_binary = true;
+            let start = reader.position_in_bits();
+            let available = usize::try_from(end.checked_sub(start)?).ok()? / 8;
+            let probe = reader.read_bytes(available);
+            let (_, used) = crate::entities::acis::SabReader::read_with_consumed(&probe).ok()?;
+            if used == 0 || used > probe.len() {
+                return None;
+            }
+            sab_data = probe[..used].to_vec();
+            reader.set_position_in_bits(start + used as i64 * 8);
         } else if !version.r2007_plus() {
             // SAB binary, R2004–R2006: the bytes flow with NO length prefix
             // ("ACIS BinaryFile…" starts right after the version BS —
@@ -5171,7 +5264,7 @@ fn read_acis_entity_impl(
                 .main_mut()
                 .set_position_in_bits(start + used as i64 * 8);
             if used == probe.len() {
-                return AcisEntityData {
+                return Some(AcisEntityData {
                     acis_empty,
                     sat_data,
                     sab_data,
@@ -5189,7 +5282,7 @@ fn read_acis_entity_impl(
                     silhouettes: Vec::new(),
                     revision: AcisRevision::default(),
                     materials: Vec::new(),
-                };
+                });
             }
         }
     }
@@ -5263,11 +5356,11 @@ fn read_acis_entity_impl(
 
     // The legacy inline layout always carries this bit. AcDs-backed R2013+
     // records carry it only inside a present wireframe cache.
-    if wireframe_present || !version.r2013_plus(dxf_version) {
+    if inline_end.is_some() || wireframe_present || !version.r2013_plus(dxf_version) {
         acis_empty_bit = reader.read_bit();
     }
     let extra_acis_data = if allow_extra && !acis_empty_bit {
-        read_extra_acis_data(reader)
+        read_extra_acis_data(reader, inline_end)
     } else {
         None
     };
@@ -5280,7 +5373,11 @@ fn read_acis_entity_impl(
             for _ in 0..count {
                 let array_index = reader.read_bit_long();
                 let absolute_reference = reader.read_bit_long();
-                let material_handle = reader.read_handle();
+                let material_handle = if inline_end.is_some() {
+                    reader.read_main_handle()
+                } else {
+                    reader.read_handle()
+                };
                 materials.push(AcisMaterial {
                     array_index,
                     absolute_reference,
@@ -5318,7 +5415,10 @@ fn read_acis_entity_impl(
         AcisRevision::default()
     };
 
-    AcisEntityData {
+    if inline_end.is_some_and(|end| reader.position_in_bits() > end) {
+        return None;
+    }
+    Some(AcisEntityData {
         acis_empty,
         sat_data,
         sab_data,
@@ -5336,7 +5436,7 @@ fn read_acis_entity_impl(
         silhouettes,
         revision,
         materials,
-    }
+    })
 }
 
 fn read_surface_matrix(reader: &mut DwgMergedReader) -> [f64; 16] {
@@ -5409,7 +5509,8 @@ pub fn read_surface(
     has_ds_data: bool,
     kind: SurfaceKind,
 ) -> SurfaceEntityData {
-    let acis = read_acis_entity_impl(reader, version, dxf_version, has_ds_data, true);
+    let acis = read_acis_entity_impl(reader, version, dxf_version, has_ds_data, true, false, None)
+        .expect("database surface decoding retains unrecognized legacy payloads");
     // Surface records do not have the 3DSOLID history-id handle slot.
     let history_handle = 0;
     let mut modeler_format_version = 1;

@@ -500,6 +500,13 @@ impl DwgBitWriter {
         self.write_raw_double(value.y);
     }
 
+    /// Write three raw doubles (3RD type).
+    pub fn write_3raw_double(&mut self, value: Vector3) {
+        self.write_raw_double(value.x);
+        self.write_raw_double(value.y);
+        self.write_raw_double(value.z);
+    }
+
     /// Write two bit-doubles with defaults (2DD type).
     pub fn write_2bit_double_with_default(&mut self, def: Vector2, value: Vector2) {
         self.write_bit_double_with_default(def.x, value.x);

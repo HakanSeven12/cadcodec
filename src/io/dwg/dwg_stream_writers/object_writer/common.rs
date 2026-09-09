@@ -169,6 +169,7 @@ impl<'a> DwgObjectWriter<'a> {
         // hard integrity error AutoCAD's audit rejects.
         if !handle.is_null() && !self.registered_handles.insert(handle.value()) {
             self.writer.reset();
+            self.pending_type_code = None;
             return;
         }
 
@@ -234,6 +235,10 @@ impl<'a> DwgObjectWriter<'a> {
             self.handle_map.push((handle.value(), pos));
         }
 
+        if let Some(type_code) = self.pending_type_code.take().filter(|code| *code >= 500) {
+            *self.class_instance_counts.entry(type_code).or_default() += 1;
+        }
+
         // 6. Reset per-object writer for the next object
         self.writer.reset();
     }
@@ -245,6 +250,7 @@ impl<'a> DwgObjectWriter<'a> {
     /// that was between `[ModularShort(size)]` and `[CRC16]` in the
     /// original file.  We re-frame it with a fresh MS prefix and CRC.
     pub fn register_raw_object(&mut self, handle: Handle, raw_data: &[u8], handle_bits: i64) {
+        self.class_counts_complete = false;
         // Duplicate-handle guard (see register_object).
         if !handle.is_null() && !self.registered_handles.insert(handle.value()) {
             return;
@@ -283,6 +289,7 @@ impl<'a> DwgObjectWriter<'a> {
         handle: Handle,
         xdata: &crate::xdata::ExtendedData,
     ) {
+        self.pending_type_code = Some(type_code);
         // Object type (BS or MC depending on version)
         self.writer.write_object_type(type_code);
 
@@ -410,22 +417,9 @@ impl<'a> DwgObjectWriter<'a> {
             }
         }
 
-        // R2013+: `has_ds_data` flag (MAIN) — true only for a modeler entity
-        // whose geometry is emitted as a SAB blob into the AcDs section, so a
-        // reader knows to pull its geometry from there. Set by the modeler
-        // writer just before this call; consumed and cleared here so every
-        // other entity writes false.
-        //
-        // Mirror the reader (see read_common_entity_data): write it for R2013+
-        // as the spec — and LibreDWG — do, except for MULTILEADER,
-        // which the reader skips because some writers omit it there. It was once
-        // skipped for every preview-bearing entity instead; that mis-modelled
-        // the format and desynced IMAGE / WIPEOUT (evidence in the reader).
-        //
-        // MULTILEADER is class-based, so its type code is per-file: resolve it
-        // rather than comparing against the OBJ_MULTILEADER placeholder.
-        let is_multileader = type_code == self.class_type_code("MULTILEADER", OBJ_MULTILEADER);
-        if self.version.r2013_plus(self.dxf_version) && !is_multileader {
+        // R2013+: the data-store flag is present in every entity header. The
+        // modeler writer sets it immediately before this call.
+        if self.version.r2013_plus(self.dxf_version) {
             let has_ds = self.pending_has_ds_data;
             self.writer.write_bit(has_ds);
         }
@@ -710,6 +704,7 @@ impl<'a> DwgObjectWriter<'a> {
     ) {
         // ── writeCommonData portion ──
 
+        self.pending_type_code = Some(type_code);
         // Object type
         self.writer.write_object_type(type_code);
 
@@ -817,9 +812,11 @@ impl<'a> DwgObjectWriter<'a> {
             }
         }
 
-        // R2013+: binary-data flag
+        // R2013+: retain data-store links while reusing the source section.
         if self.version.r2013_plus(self.dxf_version) {
-            self.writer.write_bit(false);
+            let has_ds_data = self.document.dwg_source_version == Some(self.dxf_version)
+                && self.document.dwg_data_store_handles.contains(&handle);
+            self.writer.write_bit(has_ds_data);
         }
     }
 

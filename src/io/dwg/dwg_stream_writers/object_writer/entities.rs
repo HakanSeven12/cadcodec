@@ -17,6 +17,28 @@ use super::common;
 use super::DwgObjectWriter;
 
 impl<'a> DwgObjectWriter<'a> {
+    /// Encode only a REGION body for a construction-history profile. Common
+    /// entity data, database handles and external AcDs records do not belong
+    /// to an embedded entity, so use the shared inline modeler writer.
+    pub(crate) fn embedded_region_body(
+        document: &'a crate::document::CadDocument,
+        entity: &Region,
+    ) -> (usize, Vec<u8>) {
+        let mut writer = Self::new(document)
+            .expect("embedded entity version was validated by its enclosing writer");
+        writer.write_acis_data_impl(
+            entity.point_of_reference,
+            &entity.acis_data,
+            &entity.wires,
+            &entity.silhouettes,
+            true,
+        );
+        (
+            writer.writer.main().position_in_bits() as usize,
+            writer.writer.main().to_bytes_snapshot(),
+        )
+    }
+
     // â”€â”€ Entity dispatch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Write a single entity record.
@@ -1923,8 +1945,16 @@ impl<'a> DwgObjectWriter<'a> {
 
     fn write_hatch_boundary_path(&mut self, path: &BoundaryPath) {
         self.writer.write_bit_long(path.flags.bits() as i32);
+        self.write_hatch_boundary_path_contents(path, path.flags.bits() as i32, true);
+    }
 
-        let is_polyline = (path.flags.bits() & 2) != 0;
+    pub(super) fn write_hatch_boundary_path_contents(
+        &mut self,
+        path: &BoundaryPath,
+        flags: i32,
+        has_boundary_handles: bool,
+    ) {
+        let is_polyline = (flags & 2) != 0;
 
         if !is_polyline {
             // Edges
@@ -2015,12 +2045,18 @@ impl<'a> DwgObjectWriter<'a> {
                         self.writer.write_bit_double(v.z); // bulge
                     }
                 }
+            } else {
+                self.writer.write_bit(false);
+                self.writer.write_bit(false);
+                self.writer.write_bit_long(0);
             }
         }
 
         // Boundary object count
-        self.writer
-            .write_bit_long(path.boundary_handles.len() as i32);
+        if has_boundary_handles {
+            self.writer
+                .write_bit_long(path.boundary_handles.len() as i32);
+        }
     }
 
     // â”€â”€ Viewport entity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -5326,15 +5362,19 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_long(rev.end_marker as i32);
     }
 
-    fn write_acis_materials(&mut self, acis: &AcisData) {
+    fn write_acis_materials(&mut self, acis: &AcisData, inline: bool) {
         self.writer.write_bit_long(acis.materials.len() as i32);
         for material in &acis.materials {
             self.writer.write_bit_long(material.array_index);
             self.writer.write_bit_long(material.absolute_reference);
-            self.writer.write_handle(
-                DwgReferenceType::HardPointer,
-                material.material_handle.unwrap_or(Handle::NULL).value(),
-            );
+            let handle = material.material_handle.unwrap_or(Handle::NULL).value();
+            if inline {
+                self.writer
+                    .write_main_handle(DwgReferenceType::HardPointer, handle);
+            } else {
+                self.writer
+                    .write_handle(DwgReferenceType::HardPointer, handle);
+            }
         }
     }
 
@@ -5396,6 +5436,17 @@ impl<'a> DwgObjectWriter<'a> {
         wires: &[Wire],
         silhouettes: &[Silhouette],
     ) -> bool {
+        self.write_acis_data_impl(point, acis, wires, silhouettes, false)
+    }
+
+    fn write_acis_data_impl(
+        &mut self,
+        point: Vector3,
+        acis: &AcisData,
+        wires: &[Wire],
+        silhouettes: &[Silhouette],
+        inline: bool,
+    ) -> bool {
         let has_data = acis.has_data();
         self.writer.write_bit(!has_data); // acis_empty (inverted: true = empty)
 
@@ -5411,7 +5462,7 @@ impl<'a> DwgObjectWriter<'a> {
                 if self.version.r2007_plus() {
                     let wireframe_present =
                         self.write_acis_wireframe(point, acis, wires, silhouettes);
-                    if wireframe_present || !self.version.r2013_plus(self.dxf_version) {
+                    if inline || wireframe_present || !self.version.r2013_plus(self.dxf_version) {
                         self.writer.write_bit(
                             acis.extra_acis_data
                                 .as_ref()
@@ -5420,7 +5471,7 @@ impl<'a> DwgObjectWriter<'a> {
                         );
                         self.write_extra_acis_data(acis);
                     }
-                    self.write_acis_materials(acis);
+                    self.write_acis_materials(acis, inline);
                     if self.version.r2013_plus(self.dxf_version) {
                         self.write_acis_revision(&acis.revision);
                     }
@@ -5477,7 +5528,7 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         let wireframe_present = self.write_acis_wireframe(point, acis, wires, silhouettes);
-        if wireframe_present || !self.version.r2013_plus(self.dxf_version) {
+        if inline || wireframe_present || !self.version.r2013_plus(self.dxf_version) {
             self.writer.write_bit(
                 acis.extra_acis_data
                     .as_ref()

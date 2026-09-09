@@ -53,6 +53,41 @@ fn append_hex_bytes(target: &mut Vec<u8>, value: &str) {
     }
 }
 
+fn loft_reference_xdata(data: &ExtendedData) -> Option<(Vec<Handle>, Vec<Handle>, Option<Handle>)> {
+    let record = data.get_record("CADCODEC_LOFT_REFERENCES")?;
+    let mut values = record.values.iter();
+    if values.next() != Some(&XDataValue::Integer16(1)) {
+        return None;
+    }
+    let mut counts = [0usize; 3];
+    for count in &mut counts {
+        let XDataValue::Integer32(value) = values.next()? else {
+            return None;
+        };
+        *count = usize::try_from(*value).ok()?;
+    }
+    if counts[2] > 1
+        || counts
+            .iter()
+            .try_fold(0usize, |sum, count| sum.checked_add(*count))?
+            != values.len()
+    {
+        return None;
+    }
+    let handles: Vec<Handle> = values
+        .map(|value| match value {
+            XDataValue::Handle(handle) => Some(*handle),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let guide_end = counts[0] + counts[1];
+    Some((
+        handles[..counts[0]].to_vec(),
+        handles[counts[0]..guide_end].to_vec(),
+        handles.get(guide_end).copied(),
+    ))
+}
+
 fn semantic_property_from_pair(
     subclass: &str,
     pair: &super::stream_reader::DxfCodePair,
@@ -711,17 +746,118 @@ fn class_dxf_hatch_scale_context(fields: &mut ClassDxfFields) -> crate::objects:
     }
     let pattern_scale = fields.f64(section, 40);
     let pattern_base = fields.point3(section, 10);
-    let mut loop_types = Vec::new();
+    let mut loops = Vec::new();
     for _ in 0..fields.i32(section, 90).max(0).min(100_000) {
-        loop_types.push(fields.i32(section, 90));
+        let loop_type = fields.i32(section, 90);
+        let supports_context = fields.bool(section, 290);
+        loops.push(crate::objects::HatchLoopContext {
+            loop_type,
+            supports_context,
+            boundary: (!supports_context)
+                .then(|| class_dxf_hatch_context_boundary(fields, loop_type)),
+        });
     }
     crate::objects::HatchScaleContext {
         pattern_lines,
         pattern_scale,
         pattern_base,
-        loop_types,
-        supports_context: fields.bool(section, 290),
+        loops,
     }
+}
+
+fn class_dxf_hatch_context_boundary(
+    fields: &mut ClassDxfFields,
+    loop_type: i32,
+) -> crate::entities::BoundaryPath {
+    use crate::entities::hatch::*;
+
+    let section = "AcDbHatchObjectContextData";
+    let mut path = BoundaryPath::with_flags(BoundaryPathFlags::from_bits(loop_type as u32));
+    if loop_type & BoundaryPathFlags::POLYLINE.bits() as i32 != 0 {
+        let has_bulge = fields.bool(section, 72);
+        let is_closed = fields.bool(section, 73);
+        let mut vertices = Vec::new();
+        for _ in 0..fields.i32(section, 93).max(0).min(100_000) {
+            let point = fields.point2(section, 10);
+            let bulge = if has_bulge {
+                fields.f64(section, 42)
+            } else {
+                0.0
+            };
+            vertices.push(crate::types::Vector3::new(point.x, point.y, bulge));
+        }
+        path.add_edge(BoundaryEdge::Polyline(PolylineEdge {
+            vertices,
+            is_closed,
+        }));
+        return path;
+    }
+
+    for _ in 0..fields.i32(section, 93).max(0).min(100_000) {
+        match fields.i16(section, 72) {
+            1 => path.add_edge(BoundaryEdge::Line(LineEdge {
+                start: fields.point2(section, 10),
+                end: fields.point2(section, 11),
+            })),
+            2 => path.add_edge(BoundaryEdge::CircularArc(CircularArcEdge {
+                center: fields.point2(section, 10),
+                radius: fields.f64(section, 40),
+                start_angle: fields.f64(section, 50).to_radians(),
+                end_angle: fields.f64(section, 51).to_radians(),
+                counter_clockwise: fields.bool(section, 73),
+            })),
+            3 => path.add_edge(BoundaryEdge::EllipticArc(EllipticArcEdge {
+                center: fields.point2(section, 10),
+                major_axis_endpoint: fields.point2(section, 11),
+                minor_axis_ratio: fields.f64(section, 40),
+                start_angle: fields.f64(section, 50),
+                end_angle: fields.f64(section, 51),
+                counter_clockwise: fields.bool(section, 73),
+            })),
+            4 => {
+                let degree = fields.i32(section, 94);
+                let rational = fields.bool(section, 73);
+                let periodic = fields.bool(section, 74);
+                let knot_count = fields.i32(section, 95).max(0).min(100_000);
+                let control_count = fields.i32(section, 96).max(0).min(100_000);
+                let knots = (0..knot_count).map(|_| fields.f64(section, 40)).collect();
+                let control_points = (0..control_count)
+                    .map(|_| {
+                        let point = fields.point2(section, 10);
+                        crate::types::Vector3::new(
+                            point.x,
+                            point.y,
+                            if rational {
+                                fields.f64(section, 42)
+                            } else {
+                                1.0
+                            },
+                        )
+                    })
+                    .collect();
+                let fit_count = fields.i32(section, 97).max(0).min(100_000);
+                let fit_points: Vec<_> =
+                    (0..fit_count).map(|_| fields.point2(section, 11)).collect();
+                let (start_tangent, end_tangent) = if fit_points.is_empty() {
+                    (Vector2::ZERO, Vector2::ZERO)
+                } else {
+                    (fields.point2(section, 12), fields.point2(section, 13))
+                };
+                path.add_edge(BoundaryEdge::Spline(SplineEdge {
+                    degree,
+                    rational,
+                    periodic,
+                    knots,
+                    control_points,
+                    fit_points,
+                    start_tangent,
+                    end_tangent,
+                }));
+            }
+            _ => {}
+        }
+    }
+    path
 }
 
 fn dynamic_block_cpp_name(name: &str) -> &'static str {
@@ -893,7 +1029,7 @@ fn dynamic_dxf_eval(fields: &DynamicDxfFields) -> BlockEvalExpression {
         node_id: fields
             .values(section, 90)
             .first()
-            .and_then(|value| value.parse().ok())
+            .and_then(|value| value.trim().parse().ok())
             .unwrap_or(0),
     }
 }
@@ -1086,7 +1222,7 @@ fn dynamic_dxf_history_base(fields: &DynamicDxfFields) -> SolidHistoryNodeBase {
     let section = "AcDbShHistoryNode";
     let mut transform = [0.0; 16];
     for (target, source) in transform.iter_mut().zip(fields.values(section, 40)) {
-        *target = source.parse().unwrap_or(0.0);
+        *target = source.trim().parse().unwrap_or(0.0);
     }
     let color = if fields.values(section, 420).is_empty() {
         Color::from_index(fields.i16(section, 62))
@@ -1115,51 +1251,62 @@ fn dynamic_dxf_history_sweep(
         .iter_mut()
         .zip(fields.values(section, 46))
     {
-        *target = source.parse().unwrap_or(0.0);
+        *target = source.trim().parse().unwrap_or(0.0);
     }
     for (target, source) in path_entity_transform
         .iter_mut()
         .zip(fields.values(section, 47))
     {
-        *target = source.parse().unwrap_or(0.0);
+        *target = source.trim().parse().unwrap_or(0.0);
     }
-    let mut binary = Vec::new();
-    for value in fields.values(section, 310) {
-        append_hex_bytes(&mut binary, value);
+    // Group 90 is reused for the operation version and both embedded body
+    // sizes. Keep the profile/path boundaries explicit, including absent
+    // entities, and accept the padded integer text emitted by DXF writers.
+    let mut bodies = [(0, 0usize, Vec::new()), (0, 0usize, Vec::new())];
+    let mut current_body = None;
+    let mut operation_major = 0;
+    for (code, value) in fields.sections.get(section).into_iter().flatten() {
+        match *code {
+            92 | 93 => {
+                let index = usize::from(*code == 93);
+                bodies[index].0 = value.trim().parse().unwrap_or(0);
+                current_body = Some(index);
+            }
+            90 => {
+                if let Some(index) = current_body {
+                    bodies[index].1 = value.trim().parse().unwrap_or(0);
+                } else {
+                    operation_major = value.trim().parse().unwrap_or(0);
+                }
+            }
+            310 => {
+                if let Some(index) = current_body {
+                    append_hex_bytes(&mut bodies[index].2, value);
+                }
+            }
+            _ => {}
+        }
     }
-    let first_bits = fields
-        .values(section, 90)
-        .get(1)
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let second_bits = fields
-        .values(section, 90)
-        .get(2)
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let split = first_bits.div_ceil(8).min(binary.len());
-    let second_end = split
-        .saturating_add(second_bits.div_ceil(8))
-        .min(binary.len());
+    let [(profile_type, profile_bits, profile_bytes), (path_type, path_bits, path_bytes)] = bodies;
     let dwg_version = crate::io::dwg::DwgVersion::from_dxf_version(dxf_version)
         .unwrap_or(crate::io::dwg::DwgVersion::AC24);
     let sweep_entity = crate::io::dwg::embedded_entity::decode_embedded_entity(
-        fields.i32(section, 92),
-        first_bits,
-        binary[..split].to_vec(),
+        profile_type,
+        profile_bits,
+        profile_bytes,
         dwg_version,
         dxf_version,
     );
     let path_entity = crate::io::dwg::embedded_entity::decode_embedded_entity(
-        fields.i32(section, 93),
-        second_bits,
-        binary[split..second_end].to_vec(),
+        path_type,
+        path_bits,
+        path_bytes,
         dwg_version,
         dxf_version,
     );
     SolidHistorySweep {
         base: dynamic_dxf_history_base(fields),
-        operation_major: fields.i32(section, 90),
+        operation_major,
         operation_minor: fields.i32(section, 91),
         direction: fields.point(section, 10),
         sweep_entity,
@@ -3829,10 +3976,10 @@ impl<'a> SectionReader<'a> {
                 let cross_sizes = fields.values(section, 94);
                 let mut cross_sections = Vec::with_capacity(cross_types.len());
                 for (index, type_value) in cross_types.iter().enumerate() {
-                    let entity_type = type_value.parse().unwrap_or(0);
+                    let entity_type = type_value.trim().parse().unwrap_or(0);
                     let bit_length = cross_sizes
                         .get(index)
-                        .and_then(|value| value.parse().ok())
+                        .and_then(|value| value.trim().parse().ok())
                         .unwrap_or(0);
                     if let Some(entity) = decode_list(entity_type, bit_length) {
                         cross_sections.push(entity);
@@ -3842,10 +3989,10 @@ impl<'a> SectionReader<'a> {
                 let guide_sizes = fields.values(section, 97);
                 let mut guides = Vec::with_capacity(guide_types.len());
                 for (index, type_value) in guide_types.iter().enumerate() {
-                    let entity_type = type_value.parse().unwrap_or(0);
+                    let entity_type = type_value.trim().parse().unwrap_or(0);
                     let bit_length = guide_sizes
                         .get(index)
-                        .and_then(|value| value.parse().ok())
+                        .and_then(|value| value.trim().parse().ok())
                         .unwrap_or(0);
                     if let Some(entity) = decode_list(entity_type, bit_length) {
                         guides.push(entity);
@@ -3857,6 +4004,7 @@ impl<'a> SectionReader<'a> {
                     operation_minor: fields.i32(section, 91),
                     cross_sections,
                     guides,
+                    ..Default::default()
                 }))
             }
             "ACSH_REVOLVE_CLASS" => {
@@ -3889,7 +4037,7 @@ impl<'a> SectionReader<'a> {
                         operation_major: fields.i32(section, 90),
                         operation_minor: fields.i32(section, 91),
                         axis_point: fields.point(section, 10),
-                        direction: Vector2::new(fields.f64(section, 11), fields.f64(section, 21)),
+                        direction: fields.point(section, 11),
                         revolve_angle: fields.f64(section, 40),
                         start_angle: fields.f64(section, 41),
                         draft_angle: fields.f64(section, 43),
@@ -15815,7 +15963,7 @@ impl<'a> SectionReader<'a> {
                 // Database handle
                 1005 => {
                     if let Some(ref mut record) = current_record {
-                        if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
+                        if let Ok(h) = u64::from_str_radix(pair.value_string.trim(), 16) {
                             record.add_value(XDataValue::Handle(Handle::new(h)));
                         }
                     }
@@ -17740,10 +17888,11 @@ impl<'a> SectionReader<'a> {
     }
 
     /// Read modeler geometry (ACIS) data — shared between 3DSOLID, REGION, BODY
-    fn read_modeler_geometry(&mut self) -> Result<(EntityCommon, String, String)> {
+    fn read_modeler_geometry(&mut self) -> Result<(EntityCommon, String, String, Option<Handle>)> {
         let mut common = EntityCommon::new();
         let mut acis_data = String::new();
         let mut uid = String::new();
+        let mut history_handle = None;
         let mut acis_version: u8 = 1; // default to Version 1 (encoded)
 
         while let Some(pair) = self.reader.read_pair()? {
@@ -17768,6 +17917,10 @@ impl<'a> SectionReader<'a> {
                     acis_data.push('\n');
                 }
                 2 => uid = pair.value_string.clone(),
+                350 => {
+                    let handle = parse_dxf_handle(&pair.value_string);
+                    history_handle = (!handle.is_null()).then_some(handle);
+                }
                 70 => {
                     if let Some(v) = pair.as_i16() {
                         acis_version = v as u8;
@@ -17787,34 +17940,37 @@ impl<'a> SectionReader<'a> {
         // Normalise: strip "End-of-ACIS-data" / "End-of-ASM-data" terminator.
         acis_data = crate::entities::solid3d::AcisData::strip_sat_terminator(&acis_data);
 
-        Ok((common, uid, acis_data))
+        Ok((common, uid, acis_data, history_handle))
     }
 
     /// Read a 3DSOLID entity
     fn read_solid3d(&mut self) -> Result<Option<Solid3D>> {
-        let (common, uid, acis_data) = self.read_modeler_geometry()?;
+        let (common, uid, acis_data, history_handle) = self.read_modeler_geometry()?;
         let mut solid = Solid3D::new();
         solid.common = common;
         solid.uid = uid;
         solid.acis_data.sat_data = acis_data;
+        solid.history_handle = history_handle;
         Ok(Some(solid))
     }
 
     /// Read a REGION entity
     fn read_region(&mut self) -> Result<Option<Region>> {
-        let (common, _uid, acis_data) = self.read_modeler_geometry()?;
+        let (common, _uid, acis_data, history_handle) = self.read_modeler_geometry()?;
         let mut region = Region::new();
         region.common = common;
         region.acis_data.sat_data = acis_data;
+        region.history_handle = history_handle;
         Ok(Some(region))
     }
 
     /// Read a BODY entity
     fn read_body(&mut self) -> Result<Option<Body>> {
-        let (common, _uid, acis_data) = self.read_modeler_geometry()?;
+        let (common, _uid, acis_data, history_handle) = self.read_modeler_geometry()?;
         let mut body = Body::new();
         body.common = common;
         body.acis_data.sat_data = acis_data;
+        body.history_handle = history_handle;
         Ok(Some(body))
     }
 
@@ -17979,6 +18135,11 @@ impl<'a> SectionReader<'a> {
         let mut sweep_entity_bits = 0usize;
         let mut path_entity_type = 0i32;
         let mut path_entity_bits = 0usize;
+        // Native loft input records use 90/91/92 for section/guide/path
+        // entity types, then 90 for bit length and 310 for body chunks.
+        let mut loft_entities: Vec<(i32, i32, usize, Vec<u8>)> = Vec::new();
+        let mut loft_expecting_length = false;
+        let mut loft_options_seen = false;
         let mut proxy_graphics_size = 0usize;
         let mut proxy_graphics = Vec::new();
         let swept_has_class_version = crate::io::dwg::DwgVersion::from_dxf_version(dxf_version)
@@ -18072,16 +18233,16 @@ impl<'a> SectionReader<'a> {
                     49 => options.align_angle = pair.as_double().unwrap_or(0.0),
                     46 => option_sweep_matrix.push(pair.as_double().unwrap_or(0.0)),
                     47 => option_path_matrix.push(pair.as_double().unwrap_or(0.0)),
-                    290 => options.is_solid = pair.as_i16().unwrap_or(0) != 0,
+                    290 => options.is_solid = pair.as_bool().unwrap_or(false),
                     70 => options.sweep_alignment_flags = pair.as_i16().unwrap_or(0),
                     71 => options.path_flags = pair.as_i16().unwrap_or(0),
-                    292 => options.align_start = pair.as_i16().unwrap_or(0) != 0,
-                    293 => options.bank = pair.as_i16().unwrap_or(0) != 0,
-                    294 => options.base_point_set = pair.as_i16().unwrap_or(0) != 0,
+                    292 => options.align_start = pair.as_bool().unwrap_or(false),
+                    293 => options.bank = pair.as_bool().unwrap_or(false),
+                    294 => options.base_point_set = pair.as_bool().unwrap_or(false),
                     295 => {
-                        options.sweep_entity_transform_computed = pair.as_i16().unwrap_or(0) != 0
+                        options.sweep_entity_transform_computed = pair.as_bool().unwrap_or(false)
                     }
-                    296 => options.path_entity_transform_computed = pair.as_i16().unwrap_or(0) != 0,
+                    296 => options.path_entity_transform_computed = pair.as_bool().unwrap_or(false),
                     _ => {
                         self.try_read_common_entity_code(&pair, &mut surface.common)?;
                     }
@@ -18106,7 +18267,25 @@ impl<'a> SectionReader<'a> {
                     ..
                 } => match pair.code {
                     40 => matrix.push(pair.as_double().unwrap_or(0.0)),
-                    70 => *plane_normal_lofting_type = pair.as_i32().unwrap_or(0),
+                    90 if loft_expecting_length => {
+                        if let Some((_, _, bits, _)) = loft_entities.last_mut() {
+                            *bits = pair.as_i32().unwrap_or(0).max(0) as usize;
+                        }
+                        loft_expecting_length = false;
+                    }
+                    90..=92 if !loft_options_seen => {
+                        loft_entities.push((pair.code, pair.as_i32().unwrap_or(0), 0, Vec::new()));
+                        loft_expecting_length = true;
+                    }
+                    310 if !loft_options_seen => {
+                        if let Some((_, _, _, bytes)) = loft_entities.last_mut() {
+                            append_hex_bytes(bytes, &pair.value_string);
+                        }
+                    }
+                    70 => {
+                        loft_options_seen = true;
+                        *plane_normal_lofting_type = pair.as_i32().unwrap_or(0)
+                    }
                     41 => *start_draft_angle = pair.as_double().unwrap_or(0.0),
                     42 => *end_draft_angle = pair.as_double().unwrap_or(0.0),
                     43 => *start_draft_magnitude = pair.as_double().unwrap_or(0.0),
@@ -18120,6 +18299,9 @@ impl<'a> SectionReader<'a> {
                     296 => *ruled_surface = pair.as_i16().unwrap_or(0) != 0,
                     297 => *virtual_guide = pair.as_i16().unwrap_or(0) != 0,
                     310 => {
+                        // Older codec output put ungrouped handles after the
+                        // options. Preserve them, but never interpret native
+                        // embedded-entity chunks as database references.
                         let handle = parse_dxf_handle(&pair.value_string);
                         if path_curve.is_none() {
                             cross_sections.push(handle);
@@ -18225,16 +18407,16 @@ impl<'a> SectionReader<'a> {
                     49 => options.align_angle = pair.as_double().unwrap_or(0.0),
                     46 => option_sweep_matrix.push(pair.as_double().unwrap_or(0.0)),
                     47 => option_path_matrix.push(pair.as_double().unwrap_or(0.0)),
-                    290 => options.is_solid = pair.as_i16().unwrap_or(0) != 0,
+                    290 => options.is_solid = pair.as_bool().unwrap_or(false),
                     70 => options.sweep_alignment_flags = pair.as_i16().unwrap_or(0),
                     71 => options.path_flags = pair.as_i16().unwrap_or(0),
-                    292 => options.align_start = pair.as_i16().unwrap_or(0) != 0,
-                    293 => options.bank = pair.as_i16().unwrap_or(0) != 0,
-                    294 => options.base_point_set = pair.as_i16().unwrap_or(0) != 0,
+                    292 => options.align_start = pair.as_bool().unwrap_or(false),
+                    293 => options.bank = pair.as_bool().unwrap_or(false),
+                    294 => options.base_point_set = pair.as_bool().unwrap_or(false),
                     295 => {
-                        options.sweep_entity_transform_computed = pair.as_i16().unwrap_or(0) != 0
+                        options.sweep_entity_transform_computed = pair.as_bool().unwrap_or(false)
                     }
-                    296 => options.path_entity_transform_computed = pair.as_i16().unwrap_or(0) != 0,
+                    296 => options.path_entity_transform_computed = pair.as_bool().unwrap_or(false),
                     _ => {
                         self.try_read_common_entity_code(&pair, &mut surface.common)?;
                     }
@@ -18302,8 +18484,45 @@ impl<'a> SectionReader<'a> {
                 fill_matrix(&mut options.sweep_entity_transform, &option_sweep_matrix);
                 fill_matrix(&mut options.path_entity_transform, &option_path_matrix);
             }
-            SurfaceData::Lofted { loft_transform, .. } => {
+            SurfaceData::Lofted {
+                loft_transform,
+                cross_section_entities,
+                guide_entities,
+                path_entity,
+                cross_sections,
+                guide_curves,
+                path_curve,
+                ..
+            } => {
                 fill_matrix(loft_transform, &matrix);
+                let dwg_version = crate::io::dwg::DwgVersion::from_dxf_version(dxf_version)
+                    .unwrap_or(crate::io::dwg::DwgVersion::AC24);
+                for (group, entity_type, bit_length, bytes) in loft_entities {
+                    if bytes.len() < bit_length.div_ceil(8) {
+                        continue;
+                    }
+                    if let Some(entity) = crate::io::dwg::embedded_entity::decode_embedded_entity(
+                        entity_type,
+                        bit_length,
+                        bytes,
+                        dwg_version,
+                        dxf_version,
+                    ) {
+                        match group {
+                            90 => cross_section_entities.push(entity),
+                            91 => guide_entities.push(entity),
+                            92 => *path_entity = Some(entity),
+                            _ => {}
+                        }
+                    }
+                }
+                if let Some((sections, guides, path)) =
+                    loft_reference_xdata(&surface.common.extended_data)
+                {
+                    *cross_sections = sections;
+                    *guide_curves = guides;
+                    *path_curve = path;
+                }
             }
             SurfaceData::Revolved {
                 revolve_entity,

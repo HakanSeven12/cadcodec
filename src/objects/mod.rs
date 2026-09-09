@@ -70,9 +70,9 @@ pub use dynamic_block::{
     BlockStretchCode, BlockStretchHandle, BlockTwoPointParameter, BlockUserParameter,
     BlockXYParameter, DynamicBlockData, DynamicBlockObject, SolidHistory, SolidHistoryBoolean,
     SolidHistoryBox, SolidHistoryBrep, SolidHistoryChamfer, SolidHistoryCone, SolidHistoryCylinder,
-    SolidHistoryFillet, SolidHistoryLoft, SolidHistoryNodeBase, SolidHistoryOperation,
-    SolidHistoryPyramid, SolidHistoryRevolve, SolidHistorySphere, SolidHistorySweep,
-    SolidHistoryTorus,
+    SolidHistoryFillet, SolidHistoryLoft, SolidHistoryLoftParameters, SolidHistoryNodeBase,
+    SolidHistoryOperation, SolidHistoryPyramid, SolidHistoryRevolve, SolidHistorySphere,
+    SolidHistorySweep, SolidHistoryTorus,
 };
 pub use field::{Field, FieldChildValue, FieldList};
 pub use group::Group;
@@ -89,9 +89,9 @@ pub use multileader_style::{
     TextAttachmentDirectionType, TextAttachmentType,
 };
 pub use object_context_data::{
-    DimContext, DimSubtype, EmbeddedMTextContext, HatchScaleContext, HatchViewContext,
-    LeaderContext, MTextAttributeContext, MTextColumns, MTextContext, ObjectContextData,
-    ObjectContextKind,
+    DimContext, DimSubtype, EmbeddedMTextContext, HatchLoopContext, HatchScaleContext,
+    HatchViewContext, LeaderContext, MTextAttributeContext, MTextColumns, MTextContext,
+    ObjectContextData, ObjectContextKind,
 };
 pub use plot_settings::{
     PaperMargin, PlotFlags, PlotPaperUnits, PlotRotation, PlotSettings, PlotType, PlotWindow,
@@ -498,6 +498,64 @@ pub enum ObjectType {
 }
 
 impl ObjectType {
+    /// Restore storage-only data omitted from serde after editing an object's
+    /// public representation. The source and destination must have the same
+    /// variant and identity; callers remain responsible for that check.
+    pub fn preserve_storage_data_from(&mut self, source: &Self) {
+        match (self, source) {
+            (Self::Layout(value), Self::Layout(source)) => {
+                value.raw_plot_settings_codes = source.raw_plot_settings_codes.clone();
+            }
+            (Self::XRecord(value), Self::XRecord(source)) => {
+                value.raw_dwg_data = source.raw_dwg_data.clone();
+                value.raw_dwg_version = source.raw_dwg_version;
+            }
+            (Self::TableStyle(value), Self::TableStyle(source)) => {
+                value.raw_dxf_codes = source.raw_dxf_codes.clone();
+            }
+            (Self::SortEntitiesTable(value), Self::SortEntitiesTable(source)) => {
+                value.raw_dxf_codes = source.raw_dxf_codes.clone();
+                value.raw_dxf_version = source.raw_dxf_version;
+            }
+            (Self::Associative(value), Self::Associative(source)) => {
+                value.source_version = source.source_version;
+            }
+            (Self::ClassObject(value), Self::ClassObject(source)) => {
+                if let (
+                    ClassObjectData::CsacDocumentOptions(value),
+                    ClassObjectData::CsacDocumentOptions(source),
+                ) = (&mut value.data, &source.data)
+                {
+                    value.raw_dwg_data = source.raw_dwg_data.clone();
+                    value.raw_dwg_version = source.raw_dwg_version;
+                }
+            }
+            (Self::RegisteredClass(value), Self::RegisteredClass(source)) => {
+                value.raw_dwg_data = source.raw_dwg_data.clone();
+                value.raw_dwg_version = source.raw_dwg_version;
+            }
+            (
+                Self::Unknown {
+                    raw_dxf_codes,
+                    raw_dwg_data,
+                    raw_dwg_version,
+                    ..
+                },
+                Self::Unknown {
+                    raw_dxf_codes: source_dxf,
+                    raw_dwg_data: source_dwg,
+                    raw_dwg_version: source_version,
+                    ..
+                },
+            ) => {
+                *raw_dxf_codes = source_dxf.clone();
+                *raw_dwg_data = source_dwg.clone();
+                *raw_dwg_version = *source_version;
+            }
+            _ => {}
+        }
+    }
+
     /// Update the object's intrinsic handle when the document resolves a
     /// collision.  Keeping this exhaustive prevents newly-supported object
     /// classes from being written under a map key that disagrees with the
@@ -609,5 +667,44 @@ mod tests {
         let layout = Layout::new("Layout1");
         assert_eq!(layout.name, "Layout1");
         assert_eq!(layout.tab_order, 0);
+    }
+
+    #[test]
+    fn public_record_edit_can_preserve_opaque_object_data() {
+        let source = ObjectType::Unknown {
+            type_name: "CUSTOM_OBJECT".into(),
+            handle: Handle::new(0x42),
+            owner: Handle::NULL,
+            raw_dxf_codes: Some(vec![(1, "source".into())]),
+            raw_dwg_data: Some(vec![1, 2, 3]),
+            raw_dwg_handle_bits: 7,
+            raw_dwg_version: Some(crate::types::DxfVersion::AC1032),
+        };
+        let mut edited = ObjectType::Unknown {
+            type_name: "EDITED_OBJECT".into(),
+            handle: Handle::new(0x42),
+            owner: Handle::NULL,
+            raw_dxf_codes: None,
+            raw_dwg_data: None,
+            raw_dwg_handle_bits: 7,
+            raw_dwg_version: None,
+        };
+
+        edited.preserve_storage_data_from(&source);
+
+        let ObjectType::Unknown {
+            type_name,
+            raw_dxf_codes,
+            raw_dwg_data,
+            raw_dwg_version,
+            ..
+        } = edited
+        else {
+            unreachable!()
+        };
+        assert_eq!(type_name, "EDITED_OBJECT");
+        assert_eq!(raw_dxf_codes, Some(vec![(1, "source".into())]));
+        assert_eq!(raw_dwg_data, Some(vec![1, 2, 3]));
+        assert_eq!(raw_dwg_version, Some(crate::types::DxfVersion::AC1032));
     }
 }

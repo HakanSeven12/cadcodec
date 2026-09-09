@@ -570,7 +570,7 @@ pub struct PlotSettingsData {
 pub struct LayoutData {
     pub plot_settings: PlotSettingsData,
     pub name: String,
-    pub tab_order: i32,
+    pub tab_order: i16,
     pub flags: i16,
     pub ucs_origin: Vector3,
     pub min_limits: (f64, f64),
@@ -1060,16 +1060,17 @@ pub fn read_layout(reader: &mut DwgMergedReader, version: DwgVersion) -> LayoutD
     let plot_settings = read_plot_settings_data(reader, version);
 
     let name = reader.read_variable_text();
-    let tab_order = reader.read_bit_long();
+    let tab_order = reader.read_bit_short();
     let flags = reader.read_bit_short();
-    let ucs_origin = reader.read_3bit_double();
+
+    let insertion_base = reader.read_3bit_double();
 
     let min_lim_x = reader.read_raw_double();
     let min_lim_y = reader.read_raw_double();
     let max_lim_x = reader.read_raw_double();
     let max_lim_y = reader.read_raw_double();
 
-    let insertion_base = reader.read_3bit_double();
+    let ucs_origin = reader.read_3bit_double();
     let x_axis = reader.read_3bit_double();
     let y_axis = reader.read_3bit_double();
     let elevation = reader.read_bit_double();

@@ -696,12 +696,11 @@ impl MTextParser {
                 }
                 "" => {}
                 other => {
-                    let (flag, value) = other.split_at(1);
-                    let parsed = match flag {
-                        "c" => value.trim().parse::<u16>().ok().map(|v| {
+                    let parsed = match (other.strip_prefix('c'), other.strip_prefix('p')) {
+                        (Some(value), _) => value.trim().parse::<u16>().ok().map(|v| {
                             charset = Some(v);
                         }),
-                        "p" => value.trim().parse::<u8>().ok().map(|v| {
+                        (_, Some(value)) => value.trim().parse::<u8>().ok().map(|v| {
                             pitch = Some(v);
                         }),
                         _ => None,
@@ -1252,16 +1251,20 @@ mod tests {
     fn test_parse_font_pipe_flags_preserved() {
         // Charset (c), pitch (p) and unknown flags survive round-trips
         // verbatim; explicit italic-off is preserved too.
-        let doc = parse_mtext(r"{\fArial|b0|i0|c238|p2|e1;Text}", false);
+        let doc = parse_mtext(r"{\fArial|b0|i0|c238|p2|e1|ş|字体|🙂|c悪|p悪;Text}", false);
         let font = doc.paragraphs[0].spans[0].properties.font.as_ref().unwrap();
         assert!(!font.bold && font.bold_explicit);
         assert!(!font.italic && font.italic_explicit);
         assert_eq!(font.charset, Some(238));
         assert_eq!(font.pitch, Some(2));
-        assert_eq!(font.extra, vec!["e1"]);
+        assert_eq!(font.extra, vec!["e1", "ş", "字体", "🙂", "c悪", "p悪"]);
 
         let out = doc.to_mtext_string();
-        assert!(out.contains("Arial|b0|i0|c238|p2|e1"), "flags lost: {out}");
+        assert!(
+            out.contains("Arial|b0|i0|c238|p2|e1|ş|字体|🙂|c悪|p悪"),
+            "flags lost: {out}"
+        );
+        assert_eq!(parse_mtext(&out, false).to_mtext_string(), out);
     }
 
     #[test]

@@ -27,7 +27,7 @@ use crate::tables::*;
 use crate::types::{Color, DxfVersion, Handle, Vector2, Vector3};
 use crate::xdata::XDataValue;
 use crate::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "serde")]
@@ -1199,6 +1199,11 @@ pub struct CadDocument {
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) raw_acds_fingerprint: Vec<(u64, usize, u64)>,
 
+    /// Non-entity objects whose source record points into the AcDs data store.
+    /// Retained for same-version saves together with the original section.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) dwg_data_store_handles: HashSet<Handle>,
+
     /// Section-view style (`AcDbSectionViewStyle`) display fields, decoded from
     /// the DWG for rendering section marks (arrow size, label height, …). A file
     /// normally has one; the first decoded is kept. `None` for new/DXF documents
@@ -1371,6 +1376,7 @@ impl CadDocument {
             acis_sab_handles: Vec::new(),
             raw_acds_data: None,
             raw_acds_fingerprint: Vec::new(),
+            dwg_data_store_handles: HashSet::new(),
             section_view_style: None,
             view_rep_refs: std::collections::HashMap::new(),
             section_view_reps: Vec::new(),
@@ -2162,9 +2168,13 @@ impl CadDocument {
                 _ => None,
             })
             .find(|operation| {
-                operation
-                    .base()
-                    .is_some_and(|base| base.step_id == history_node_id)
+                operation.base().is_some_and(|base| {
+                    if base.eval.node_id > 0 {
+                        base.eval.node_id == history_node_id
+                    } else {
+                        base.step_id == history_node_id
+                    }
+                })
             })
             .or_else(|| {
                 graph
@@ -2178,6 +2188,81 @@ impl CadDocument {
                         _ => None,
                     })
             })
+    }
+
+    /// Return the active solid-history chain in root-to-active order.
+    ///
+    /// Parent evaluation ids, rather than step ordering, determine the chain.
+    /// Missing, cyclic, or ambiguous links make the graph unusable.
+    pub fn solid_history_operations(&self, entity: Handle) -> Option<Vec<SolidHistoryOperation>> {
+        let graph = self.solid_history_graph(entity)?;
+        let active_step = match self.objects.get(&graph.root)? {
+            ObjectType::DynamicBlock(value) => match &value.data {
+                DynamicBlockData::SolidHistory(history) => history.history_node_id,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let operations = graph
+            .nodes
+            .iter()
+            .filter_map(|handle| match self.objects.get(handle) {
+                Some(ObjectType::DynamicBlock(value)) => match &value.data {
+                    DynamicBlockData::SolidHistoryNode(operation) => Some(operation),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut active_matches = operations.iter().copied().filter(|operation| {
+            operation.base().is_some_and(|base| {
+                if base.eval.node_id > 0 {
+                    base.eval.node_id == active_step
+                } else {
+                    base.step_id == active_step
+                }
+            })
+        });
+        let mut current = active_matches.next()?;
+        if active_matches.next().is_some() {
+            return None;
+        }
+
+        let mut reversed = Vec::new();
+        let mut visited = Vec::new();
+        loop {
+            let base = current.base()?;
+            let node_id = if base.eval.node_id > 0 {
+                base.eval.node_id
+            } else {
+                base.step_id
+            };
+            let parent_id = base.eval.parent_id;
+            if node_id <= 0 || visited.contains(&node_id) {
+                return None;
+            }
+            visited.push(node_id);
+            reversed.push((*current).clone());
+            if parent_id == 0 {
+                break;
+            }
+            let mut parent_matches = operations.iter().copied().filter(|operation| {
+                operation.base().is_some_and(|candidate| {
+                    let node_id = if candidate.eval.node_id > 0 {
+                        candidate.eval.node_id
+                    } else {
+                        candidate.step_id
+                    };
+                    node_id == parent_id
+                })
+            });
+            current = parent_matches.next()?;
+            if parent_matches.next().is_some() {
+                return None;
+            }
+        }
+        reversed.reverse();
+        Some(reversed)
     }
 
     pub fn create_solid_history(
@@ -2241,6 +2326,87 @@ impl CadDocument {
         })
     }
 
+    /// Append a new operation to an entity's existing solid-history graph.
+    ///
+    /// The existing root and nodes remain intact. The appended operation is
+    /// assigned a new step/evaluation id, linked to the active node, and made
+    /// the graph's active operation.
+    pub fn append_solid_history(
+        &mut self,
+        entity: Handle,
+        mut operation: SolidHistoryOperation,
+    ) -> Option<SolidHistoryGraph> {
+        let (dxf_name, cpp_class_name) = operation.class_names()?;
+        self.solid_history_operations(entity)?;
+        let mut graph = self.solid_history_graph(entity)?;
+        let active_step = match self.objects.get(&graph.root)? {
+            ObjectType::DynamicBlock(value) => match &value.data {
+                DynamicBlockData::SolidHistory(history) => history.history_node_id,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let bases = graph
+            .nodes
+            .iter()
+            .filter_map(|handle| match self.objects.get(handle) {
+                Some(ObjectType::DynamicBlock(value)) => match &value.data {
+                    DynamicBlockData::SolidHistoryNode(operation) => operation.base(),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut parent_matches = bases.iter().copied().filter(|base| {
+            if base.eval.node_id > 0 {
+                base.eval.node_id == active_step
+            } else {
+                base.step_id == active_step
+            }
+        });
+        let parent = parent_matches.next()?;
+        if parent_matches.next().is_some() {
+            return None;
+        }
+        let parent_node_id = if parent.eval.node_id > 0 {
+            parent.eval.node_id
+        } else {
+            parent.step_id
+        };
+        if parent_node_id <= 0 {
+            return None;
+        }
+        let step_id = bases
+            .iter()
+            .flat_map(|base| [base.step_id.max(0), base.eval.node_id.max(0)])
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)?;
+        let base = operation.base_mut()?;
+        base.step_id = step_id;
+        base.eval.node_id = step_id;
+        base.eval.parent_id = parent_node_id;
+
+        if !self.classes.contains(dxf_name) {
+            self.classes
+                .add_or_update(crate::classes::DxfClass::new(dxf_name, cpp_class_name));
+        }
+        let node = self.allocate_handle();
+        let mut node_object = DynamicBlockObject::new(dxf_name, cpp_class_name);
+        node_object.handle = node;
+        node_object.owner = graph.root;
+        node_object.data = DynamicBlockData::SolidHistoryNode(operation);
+        self.objects
+            .insert(node, ObjectType::DynamicBlock(node_object));
+        if let Some(ObjectType::DynamicBlock(value)) = self.objects.get_mut(&graph.root) {
+            if let DynamicBlockData::SolidHistory(history) = &mut value.data {
+                history.history_node_id = step_id;
+            }
+        }
+        graph.nodes.push(node);
+        Some(graph)
+    }
+
     pub fn update_solid_history(
         &mut self,
         entity: Handle,
@@ -2261,9 +2427,15 @@ impl CadDocument {
             .copied()
             .find(|handle| match self.objects.get(handle) {
                 Some(ObjectType::DynamicBlock(value)) => match &value.data {
-                    DynamicBlockData::SolidHistoryNode(current) => current
-                        .base()
-                        .is_some_and(|base| base.step_id == current_id),
+                    DynamicBlockData::SolidHistoryNode(current) => {
+                        current.base().is_some_and(|base| {
+                            if base.eval.node_id > 0 {
+                                base.eval.node_id == current_id
+                            } else {
+                                base.step_id == current_id
+                            }
+                        })
+                    }
                     _ => false,
                 },
                 _ => false,
@@ -2294,6 +2466,90 @@ impl CadDocument {
             if let DynamicBlockData::SolidHistory(history) = &mut value.data {
                 history.history_node_id = step_id;
             }
+        }
+        let ObjectType::DynamicBlock(value) = self.objects.get_mut(&node)? else {
+            return None;
+        };
+        value.dxf_name = dxf_name.to_string();
+        value.cpp_class_name = cpp_class_name.to_string();
+        let DynamicBlockData::SolidHistoryNode(current) = &mut value.data else {
+            return None;
+        };
+        Some(std::mem::replace(current, operation))
+    }
+
+    /// Replace one existing operation in the active history chain without
+    /// changing which node is active.
+    ///
+    /// The operation's evaluation node id identifies the node to replace. Its
+    /// step id is used for older histories that do not carry evaluation ids.
+    pub fn update_solid_history_step(
+        &mut self,
+        entity: Handle,
+        mut operation: SolidHistoryOperation,
+    ) -> Option<SolidHistoryOperation> {
+        let (dxf_name, cpp_class_name) = operation.class_names()?;
+        let chain = self.solid_history_operations(entity)?;
+        let graph = self.solid_history_graph(entity)?;
+        let replacement_base = operation.base()?;
+        let replacement_id = if replacement_base.eval.node_id > 0 {
+            replacement_base.eval.node_id
+        } else {
+            replacement_base.step_id
+        };
+        if replacement_id <= 0 {
+            return None;
+        }
+        let mut chain_matches = chain.iter().filter(|current| {
+            current.base().is_some_and(|base| {
+                let node_id = if base.eval.node_id > 0 {
+                    base.eval.node_id
+                } else {
+                    base.step_id
+                };
+                node_id == replacement_id
+            })
+        });
+        chain_matches.next()?;
+        if chain_matches.next().is_some() {
+            return None;
+        }
+        let mut node_matches = graph.nodes.iter().copied().filter(|handle| {
+            let Some(ObjectType::DynamicBlock(value)) = self.objects.get(handle) else {
+                return false;
+            };
+            let DynamicBlockData::SolidHistoryNode(current) = &value.data else {
+                return false;
+            };
+            current.base().is_some_and(|base| {
+                let node_id = if base.eval.node_id > 0 {
+                    base.eval.node_id
+                } else {
+                    base.step_id
+                };
+                node_id == replacement_id
+            })
+        });
+        let node = node_matches.next()?;
+        if node_matches.next().is_some() {
+            return None;
+        }
+
+        let current_base = match self.objects.get(&node)? {
+            ObjectType::DynamicBlock(value) => match &value.data {
+                DynamicBlockData::SolidHistoryNode(current) => current.base()?.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let replacement_base = operation.base_mut()?;
+        replacement_base.step_id = current_base.step_id;
+        replacement_base.eval.node_id = current_base.eval.node_id;
+        replacement_base.eval.parent_id = current_base.eval.parent_id;
+
+        if !self.classes.contains(dxf_name) {
+            self.classes
+                .add_or_update(crate::classes::DxfClass::new(dxf_name, cpp_class_name));
         }
         let ObjectType::DynamicBlock(value) = self.objects.get_mut(&node)? else {
             return None;

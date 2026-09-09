@@ -1,20 +1,9 @@
-//! Writing the same document twice must produce the same bytes.
-//!
-//! `CadDocument::objects` is a `HashMap`, and every map hashes with its own
-//! random state, so iterating it directly makes the output depend on the
-//! iteration order of the moment. The writers sort by handle wherever they
-//! walk that map: the DWG object writer for the orphaned objects it drains
-//! in its second phase, the DXF section writer for the OBJECTS section, and
-//! the "Standard" MLINESTYLE fallback in the header. These tests pin that
-//! down with enough orphaned objects that an unsorted walk cannot pass by
-//! luck.
+//! Writing the same document repeatedly must produce identical bytes.
 
 use acadrust::objects::{Dictionary, ObjectType};
 use acadrust::{CadDocument, DwgWriter, DxfWriter};
 
-/// Dictionaries that no other object owns: exactly the objects the DWG
-/// writer only reaches in its second phase, and a permutation the DXF
-/// OBJECTS section shows in full.
+// Exercise orphaned objects in both writers.
 const ORPHANED_DICTIONARIES: usize = 32;
 
 fn document_with_orphaned_objects() -> CadDocument {

@@ -14,9 +14,12 @@
 
 use std::io::Cursor;
 
+use acadrust::entities::{
+    BoundaryEdge, BoundaryPath, BoundaryPathFlags, HatchPatternLine, LineEdge,
+};
 use acadrust::objects::{
-    DimContext, DimSubtype, MTextColumns, MTextContext, ObjectContextData, ObjectContextKind,
-    ObjectType, Scale,
+    DimContext, DimSubtype, HatchLoopContext, HatchScaleContext, HatchViewContext, MTextColumns,
+    MTextContext, ObjectContextData, ObjectContextKind, ObjectType, Scale,
 };
 use acadrust::types::{DxfVersion, Vector2, Vector3};
 use acadrust::{CadDocument, DwgReader, DwgWriter, Handle};
@@ -279,6 +282,46 @@ fn synth_mtext_columns_roundtrips() {
         got, kind,
         "MTEXT (columns) fields did not survive round-trip"
     );
+}
+
+#[test]
+fn synth_hatch_view_context_roundtrips_inline_boundaries() {
+    let mut boundary = BoundaryPath::with_flags(BoundaryPathFlags::from_bits(1560));
+    boundary.add_edge(BoundaryEdge::Line(LineEdge {
+        start: Vector2::new(1.0, 2.0),
+        end: Vector2::new(3.0, 4.0),
+    }));
+    let kind = ObjectContextKind::HatchView(HatchViewContext {
+        hatch: HatchScaleContext {
+            pattern_lines: vec![HatchPatternLine {
+                angle: 0.5,
+                base_point: Vector2::new(5.0, 6.0),
+                offset: Vector2::new(0.25, 0.5),
+                dash_lengths: vec![1.0, -0.5],
+            }],
+            pattern_scale: 2.0,
+            pattern_base: Vector3::new(7.0, 8.0, 9.0),
+            loops: vec![
+                HatchLoopContext {
+                    loop_type: 7,
+                    supports_context: true,
+                    boundary: None,
+                },
+                HatchLoopContext {
+                    loop_type: 1560,
+                    supports_context: false,
+                    boundary: Some(boundary),
+                },
+            ],
+        },
+        view: Handle::from(0x45u64),
+        view_normal: Vector3::new(0.0, 0.0, 12.5),
+        view_rotation: 0.75,
+        evaluate_hatch: true,
+    });
+    let (_h, got, _cv, _def) =
+        synth_roundtrip_leaf("ACDB_HATCHVIEWCONTEXTDATA_CLASS", kind.clone());
+    assert_eq!(got, kind, "hatch-view fields did not survive round-trip");
 }
 
 fn dim_ctx(subtype: DimSubtype) -> DimContext {

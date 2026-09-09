@@ -16,6 +16,7 @@
 use crate::document::CadDocument;
 use crate::entities::EntityCommon;
 use crate::entities::*;
+use crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader;
 use crate::io::dwg::dwg_stream_readers::object_reader::common::*;
 use crate::io::dwg::dwg_stream_readers::object_reader::entities;
 use crate::io::dwg::dwg_stream_readers::object_reader::objects;
@@ -36,7 +37,113 @@ use crate::io::read::{push_read_diagnostic, ReadDiagnostic, ReadStage};
 use crate::notification::{NotificationCollection, NotificationType};
 use crate::types::Handle;
 use crate::types::LineWeight;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+fn boundary_path_from_dwg(path: entities::HatchBoundaryPath) -> crate::entities::BoundaryPath {
+    use crate::entities::hatch::*;
+
+    let mut result = BoundaryPath::with_flags(BoundaryPathFlags::from_bits(path.flags as u32));
+    if !path.polyline_vertices.is_empty() {
+        result.add_edge(BoundaryEdge::Polyline(PolylineEdge {
+            vertices: path
+                .polyline_vertices
+                .into_iter()
+                .map(|(point, bulge)| crate::types::Vector3::new(point.x, point.y, bulge))
+                .collect(),
+            is_closed: path.polyline_closed,
+        }));
+    }
+    for edge in path.edges {
+        match edge {
+            entities::HatchEdge::Line(value) => result.add_edge(BoundaryEdge::Line(LineEdge {
+                start: value.start,
+                end: value.end,
+            })),
+            entities::HatchEdge::Arc(value) => {
+                result.add_edge(BoundaryEdge::CircularArc(CircularArcEdge {
+                    center: value.center,
+                    radius: value.radius,
+                    start_angle: value.start_angle,
+                    end_angle: value.end_angle,
+                    counter_clockwise: value.ccw,
+                }))
+            }
+            entities::HatchEdge::Ellipse(value) => {
+                result.add_edge(BoundaryEdge::EllipticArc(EllipticArcEdge {
+                    center: value.center,
+                    major_axis_endpoint: value.major_endpoint,
+                    minor_axis_ratio: value.minor_ratio,
+                    start_angle: value.start_angle,
+                    end_angle: value.end_angle,
+                    counter_clockwise: value.ccw,
+                }))
+            }
+            entities::HatchEdge::Spline(value) => {
+                result.add_edge(BoundaryEdge::Spline(SplineEdge {
+                    degree: value.degree,
+                    rational: value.rational,
+                    periodic: value.periodic,
+                    knots: value.knots,
+                    control_points: value.control_points,
+                    fit_points: value.fit_points,
+                    start_tangent: value.start_tangent,
+                    end_tangent: value.end_tangent,
+                }))
+            }
+        }
+    }
+    result
+}
+
+fn read_hatch_scale_context_data(
+    reader: &mut DwgMergedReader,
+    version: crate::io::dwg::DwgVersion,
+) -> crate::objects::HatchScaleContext {
+    let mut pattern_lines = Vec::new();
+    for _ in 0..reader.read_bit_short().max(0).min(10_000) {
+        let angle = reader.read_bit_double();
+        let base_point =
+            crate::types::Vector2::new(reader.read_bit_double(), reader.read_bit_double());
+        let offset = crate::types::Vector2::new(reader.read_bit_double(), reader.read_bit_double());
+        let mut dash_lengths = Vec::new();
+        for _ in 0..reader.read_bit_short().max(0).min(10_000) {
+            dash_lengths.push(reader.read_bit_double());
+        }
+        pattern_lines.push(crate::entities::HatchPatternLine {
+            angle,
+            base_point,
+            offset,
+            dash_lengths,
+        });
+    }
+    let pattern_scale = reader.read_bit_double();
+    let pattern_base = crate::types::Vector3::new(
+        reader.read_bit_double(),
+        reader.read_bit_double(),
+        reader.read_bit_double(),
+    );
+    let mut loops = Vec::new();
+    for _ in 0..reader.read_bit_long().max(0).min(100_000) {
+        let loop_type = reader.read_bit_long();
+        let supports_context = reader.read_bit();
+        let boundary = (!supports_context).then(|| {
+            boundary_path_from_dwg(entities::read_hatch_boundary_path_contents(
+                reader, version, loop_type, false,
+            ))
+        });
+        loops.push(crate::objects::HatchLoopContext {
+            loop_type,
+            supports_context,
+            boundary,
+        });
+    }
+    crate::objects::HatchScaleContext {
+        pattern_lines,
+        pattern_scale,
+        pattern_base,
+        loops,
+    }
+}
 
 /// Pending vertex data collected during Pass 2, keyed by owner (parent polyline) handle.
 enum PendingVertex {
@@ -69,6 +176,7 @@ struct Pass2Output {
     eed_by_handle: HashMap<Handle, Vec<(u64, Vec<u8>)>>,
     xdic_by_handle: HashMap<Handle, Handle>,
     reactors_by_handle: HashMap<Handle, Vec<Handle>>,
+    dwg_data_store_handles: HashSet<Handle>,
     context_scales: HashMap<Handle, Handle>,
     block_visibility_params: HashMap<Handle, crate::objects::BlockVisibilityParameter>,
     block_representations: HashMap<Handle, Handle>,
@@ -98,6 +206,7 @@ impl Pass2Output {
             eed_by_handle: HashMap::new(),
             xdic_by_handle: HashMap::new(),
             reactors_by_handle: HashMap::new(),
+            dwg_data_store_handles: HashSet::new(),
             context_scales: HashMap::new(),
             block_visibility_params: HashMap::new(),
             block_representations: HashMap::new(),
@@ -1503,6 +1612,9 @@ impl DwgDocumentBuilder {
                 document
                     .reactors_by_handle
                     .extend(chunk.output.reactors_by_handle.drain());
+                document
+                    .dwg_data_store_handles
+                    .extend(chunk.output.dwg_data_store_handles.drain());
                 document
                     .context_scales
                     .extend(chunk.output.context_scales.drain());
@@ -3374,66 +3486,7 @@ impl DwgDocumentBuilder {
                     // Collect boundary handle counts before consuming paths
                     let boundary_handle_counts: Vec<i32> =
                         data.paths.iter().map(|p| p.boundary_handle_count).collect();
-                    // Convert DWG boundary paths to entity BoundaryPath
-                    e.paths = data.paths.into_iter().map(|hp| {
-                        use crate::entities::hatch::*;
-                        let mut bp = BoundaryPath::with_flags(
-                            BoundaryPathFlags::from_bits(hp.flags as u32),
-                        );
-                        // Polyline boundary path
-                        if !hp.polyline_vertices.is_empty() {
-                            let pe = PolylineEdge {
-                                vertices: hp.polyline_vertices.iter()
-                                    .map(|(pt, bulge)| crate::types::Vector3::new(pt.x, pt.y, *bulge))
-                                    .collect(),
-                                is_closed: hp.polyline_closed,
-                            };
-                            bp.add_edge(BoundaryEdge::Polyline(pe));
-                        }
-                        // Edge-type boundary path
-                        for edge in hp.edges {
-                            match edge {
-                                crate::io::dwg::dwg_stream_readers::object_reader::entities::HatchEdge::Line(l) => {
-                                    bp.add_edge(BoundaryEdge::Line(LineEdge {
-                                        start: l.start,
-                                        end: l.end,
-                                    }));
-                                }
-                                crate::io::dwg::dwg_stream_readers::object_reader::entities::HatchEdge::Arc(a) => {
-                                    bp.add_edge(BoundaryEdge::CircularArc(CircularArcEdge {
-                                        center: a.center,
-                                        radius: a.radius,
-                                        start_angle: a.start_angle,
-                                        end_angle: a.end_angle,
-                                        counter_clockwise: a.ccw,
-                                    }));
-                                }
-                                crate::io::dwg::dwg_stream_readers::object_reader::entities::HatchEdge::Ellipse(el) => {
-                                    bp.add_edge(BoundaryEdge::EllipticArc(EllipticArcEdge {
-                                        center: el.center,
-                                        major_axis_endpoint: el.major_endpoint,
-                                        minor_axis_ratio: el.minor_ratio,
-                                        start_angle: el.start_angle,
-                                        end_angle: el.end_angle,
-                                        counter_clockwise: el.ccw,
-                                    }));
-                                }
-                                crate::io::dwg::dwg_stream_readers::object_reader::entities::HatchEdge::Spline(s) => {
-                                    bp.add_edge(BoundaryEdge::Spline(SplineEdge {
-                                        degree: s.degree,
-                                        rational: s.rational,
-                                        periodic: s.periodic,
-                                        knots: s.knots,
-                                        control_points: s.control_points,
-                                        fit_points: s.fit_points,
-                                        start_tangent: s.start_tangent,
-                                        end_tangent: s.end_tangent,
-                                    }));
-                                }
-                            }
-                        }
-                        bp
-                    }).collect();
+                    e.paths = data.paths.into_iter().map(boundary_path_from_dwg).collect();
                     e.seed_points = data.seed_points;
                     e.mpolygon_hatch_color = data.mpolygon_hatch_color;
                     e.mpolygon_x_direction = data.mpolygon_x_direction;
@@ -4615,6 +4668,11 @@ impl DwgDocumentBuilder {
                 .obj_reader
                 .read_common_non_entity_data(&mut reader, type_code);
             let owner_handle = Handle::from(non_entity_data.owner_handle);
+            if non_entity_data.has_ds_data {
+                document
+                    .dwg_data_store_handles
+                    .insert(Handle::from(non_entity_data.common.handle));
+            }
             // Save raw EED blobs for DWG round-trip write-back
             if !non_entity_data.common.eed_raw.is_empty() {
                 document.eed_by_handle.insert(
@@ -4746,7 +4804,7 @@ impl DwgDocumentBuilder {
                         .xdictionary_handle
                         .map(Handle::from);
                     obj.flags = data.flags;
-                    obj.tab_order = data.tab_order as i16;
+                    obj.tab_order = data.tab_order;
                     obj.min_limits = data.min_limits;
                     obj.max_limits = data.max_limits;
                     obj.insertion_base = (
@@ -6385,53 +6443,13 @@ impl DwgDocumentBuilder {
                             "ACDB_HATCHSCALECONTEXTDATA_CLASS" => {
                                 let class_version = reader.read_bit_short();
                                 let is_default = reader.read_bit();
-                                let mut pattern_lines = Vec::new();
-                                for _ in 0..reader.read_bit_short().max(0).min(10_000) {
-                                    let angle = reader.read_bit_double();
-                                    let base_point = crate::types::Vector2::new(
-                                        reader.read_bit_double(),
-                                        reader.read_bit_double(),
-                                    );
-                                    let offset = crate::types::Vector2::new(
-                                        reader.read_bit_double(),
-                                        reader.read_bit_double(),
-                                    );
-                                    let mut dash_lengths = Vec::new();
-                                    for _ in
-                                        0..reader.read_bit_short().max(0).min(10_000)
-                                    {
-                                        dash_lengths.push(reader.read_bit_double());
-                                    }
-                                    pattern_lines.push(
-                                        crate::entities::HatchPatternLine {
-                                            angle,
-                                            base_point,
-                                            offset,
-                                            dash_lengths,
-                                        },
-                                    );
-                                }
-                                let pattern_scale = reader.read_bit_double();
-                                let pattern_base = crate::types::Vector3::new(
-                                    reader.read_bit_double(),
-                                    reader.read_bit_double(),
-                                    reader.read_bit_double(),
-                                );
-                                let mut loop_types = Vec::new();
-                                for _ in 0..reader.read_bit_long().max(0).min(100_000) {
-                                    loop_types.push(reader.read_bit_long());
-                                }
-                                let supports_context = reader.read_bit();
                                 let scale = reader.read_handle();
                                 Some((
                                     crate::objects::ObjectContextKind::HatchScale(
-                                        crate::objects::HatchScaleContext {
-                                            pattern_lines,
-                                            pattern_scale,
-                                            pattern_base,
-                                            loop_types,
-                                            supports_context,
-                                        },
+                                        read_hatch_scale_context_data(
+                                            &mut reader,
+                                            self.obj_reader.version(),
+                                        ),
                                     ),
                                     class_version,
                                     is_default,
@@ -6441,43 +6459,10 @@ impl DwgDocumentBuilder {
                             "ACDB_HATCHVIEWCONTEXTDATA_CLASS" => {
                                 let class_version = reader.read_bit_short();
                                 let is_default = reader.read_bit();
-                                let mut pattern_lines = Vec::new();
-                                for _ in 0..reader.read_bit_short().max(0).min(10_000) {
-                                    let angle = reader.read_bit_double();
-                                    let base_point = crate::types::Vector2::new(
-                                        reader.read_bit_double(),
-                                        reader.read_bit_double(),
-                                    );
-                                    let offset = crate::types::Vector2::new(
-                                        reader.read_bit_double(),
-                                        reader.read_bit_double(),
-                                    );
-                                    let mut dash_lengths = Vec::new();
-                                    for _ in
-                                        0..reader.read_bit_short().max(0).min(10_000)
-                                    {
-                                        dash_lengths.push(reader.read_bit_double());
-                                    }
-                                    pattern_lines.push(
-                                        crate::entities::HatchPatternLine {
-                                            angle,
-                                            base_point,
-                                            offset,
-                                            dash_lengths,
-                                        },
-                                    );
-                                }
-                                let pattern_scale = reader.read_bit_double();
-                                let pattern_base = crate::types::Vector3::new(
-                                    reader.read_bit_double(),
-                                    reader.read_bit_double(),
-                                    reader.read_bit_double(),
+                                let hatch = read_hatch_scale_context_data(
+                                    &mut reader,
+                                    self.obj_reader.version(),
                                 );
-                                let mut loop_types = Vec::new();
-                                for _ in 0..reader.read_bit_long().max(0).min(100_000) {
-                                    loop_types.push(reader.read_bit_long());
-                                }
-                                let supports_context = reader.read_bit();
                                 let view_normal = crate::types::Vector3::new(
                                     reader.read_bit_double(),
                                     reader.read_bit_double(),
@@ -6490,13 +6475,7 @@ impl DwgDocumentBuilder {
                                 Some((
                                     crate::objects::ObjectContextKind::HatchView(
                                         crate::objects::HatchViewContext {
-                                            hatch: crate::objects::HatchScaleContext {
-                                                pattern_lines,
-                                                pattern_scale,
-                                                pattern_base,
-                                                loop_types,
-                                                supports_context,
-                                            },
+                                            hatch,
                                             view: Handle::from(view),
                                             view_normal,
                                             view_rotation,
@@ -6665,20 +6644,19 @@ impl DwgDocumentBuilder {
                             .collect();
                         let xdictionary_handle =
                             non_entity_data.xdictionary_handle.map(Handle::from);
+                        let object = crate::objects::ObjectContextData {
+                            handle: Handle::from(handle),
+                            owner_handle,
+                            reactors,
+                            xdictionary_handle,
+                            class_version,
+                            is_default,
+                            scale: Handle::from(scale),
+                            kind,
+                        };
                         document.objects.insert(
                             Handle::from(handle),
-                            crate::objects::ObjectType::ObjectContextData(
-                                crate::objects::ObjectContextData {
-                                    handle: Handle::from(handle),
-                                    owner_handle,
-                                    reactors,
-                                    xdictionary_handle,
-                                    class_version,
-                                    is_default,
-                                    scale: Handle::from(scale),
-                                    kind,
-                                },
-                            ),
+                            crate::objects::ObjectType::ObjectContextData(object),
                         );
                     } else {
                         // Non-modeled context leaf: still capture its annotation
@@ -7135,5 +7113,132 @@ mod sdb_regression_tests {
         assert_eq!(viewport_override_base_layer("Layer @ viewport"), None);
         assert_eq!(viewport_override_base_layer(" @ 8"), None);
         assert_eq!(viewport_override_base_layer("Layer @ "), None);
+    }
+}
+
+#[cfg(test)]
+mod hatch_context_regression_tests {
+    use super::{read_hatch_scale_context_data, DwgMergedReader, DwgObjectReader};
+    use crate::io::dwg::DwgVersion;
+    use crate::types::DxfVersion;
+    use std::collections::HashMap;
+
+    struct DecodedView {
+        owner: u64,
+        reactor: u64,
+        scale: u64,
+        hatch: crate::objects::HatchScaleContext,
+        view: u64,
+        normal: crate::types::Vector3,
+        rotation: f64,
+        evaluate: bool,
+        main_remaining: i64,
+        handle_remaining: i64,
+    }
+
+    fn decode_view(hex: &str, handle_bits: i64) -> DecodedView {
+        let bytes: Vec<u8> = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
+        let mut reader = DwgMergedReader::new(bytes.clone(), DxfVersion::AC1032, 0);
+        let type_code = reader.read_object_type();
+        reader.setup_text_and_handle(bytes.len() as i64 * 8 - handle_bits);
+        let object_reader =
+            DwgObjectReader::new(Vec::new(), DxfVersion::AC1032, HashMap::new()).unwrap();
+        let common = object_reader.read_common_non_entity_data(&mut reader, type_code);
+        assert_eq!(reader.read_bit_short(), 4);
+        assert!(reader.read_bit());
+        let scale = reader.read_handle();
+        let hatch = read_hatch_scale_context_data(&mut reader, DwgVersion::AC24);
+        let normal = crate::types::Vector3::new(
+            reader.read_bit_double(),
+            reader.read_bit_double(),
+            reader.read_bit_double(),
+        );
+        let rotation = reader.read_bit_double();
+        let evaluate = reader.read_bit();
+        let view = reader.read_handle();
+        DecodedView {
+            owner: common.owner_handle,
+            reactor: common.reactors[0],
+            scale,
+            hatch,
+            view,
+            normal,
+            rotation,
+            evaluate,
+            main_remaining: reader.main_remaining_bits(),
+            handle_remaining: reader.handle_remaining_bits(),
+        }
+    }
+
+    #[test]
+    fn hatch_view_records_consume_each_loop_flag_before_the_view_tail() {
+        let dense = decode_view(
+            "5500C3010CA40641281D000000000000045811F753E3A49AC5707F0305A88A9F643F27F000000000000045807DD4F8E926B1645F81D09BD9D51CAD478811F753E3A49AC5707E7DD4F8E926B15C5F8305A88A9F643F27E7DD4F8E926B15C1F800000000000045807DD4F8E926B1645F81D09BD9D51CAD478811F753E3A49AC5717E7DD4F8E926B15C1FB520E83D07A0F41E83D078300C0001A62010C3010C54C1F849503F",
+            86,
+        );
+        assert_eq!(dense.owner, 0xC0431);
+        assert_eq!(dense.reactor, 0xC0431);
+        assert_eq!(dense.scale, 0x7E125);
+        assert_eq!(dense.hatch.loops.len(), 7);
+        assert_eq!(
+            dense
+                .hatch
+                .loops
+                .iter()
+                .map(|entry| entry.loop_type)
+                .collect::<Vec<_>>(),
+            [7, 7, 7, 7, 7, 7, 1560]
+        );
+        assert!(dense.hatch.loops.iter().all(|entry| entry.supports_context));
+        assert!(dense
+            .hatch
+            .loops
+            .iter()
+            .all(|entry| entry.boundary.is_none()));
+        assert_eq!(dense.view, 0);
+        assert_eq!(dense.normal, crate::types::Vector3::UNIT_Z);
+        assert_eq!(dense.rotation, 0.0);
+        assert!(!dense.evaluate);
+        assert_eq!(dense.main_remaining, 0);
+        assert!(dense.handle_remaining <= 7);
+
+        let elevated = decode_view(
+            "5500C1BCD32406412810305A88A9F643F27E3A82004F7A7038A005CEC992033D8908029DC0F42F5A8F25FD0305A88A9F64212803A82004F7A7038A005CEC992033D89080000000000000505E0A5703D0BD6A3C97F3520480D11D154329133B33074811820A860DE68EA605198A8605BCDB",
+            113,
+        );
+        assert_eq!(elevated.owner, 0x6F347);
+        assert_eq!(elevated.reactor, 0x6F347);
+        assert_eq!(elevated.scale, 0x28CC5);
+        assert_eq!(
+            elevated
+                .hatch
+                .loops
+                .iter()
+                .map(|entry| entry.loop_type)
+                .collect::<Vec<_>>(),
+            [1, 17]
+        );
+        assert!(elevated
+            .hatch
+            .loops
+            .iter()
+            .all(|entry| entry.supports_context));
+        assert!(elevated
+            .hatch
+            .loops
+            .iter()
+            .all(|entry| entry.boundary.is_none()));
+        assert_eq!(elevated.view, 0x2DE6D);
+        assert_eq!(elevated.normal.x, 0.0);
+        assert_eq!(elevated.normal.y, 0.0);
+        assert!((elevated.normal.z - 26.59707029352436).abs() < 1e-12);
+        assert_eq!(elevated.rotation, 0.0);
+        assert!(!elevated.evaluate);
+        assert_eq!(elevated.main_remaining, 0);
+        assert!(elevated.handle_remaining <= 7);
     }
 }

@@ -25,8 +25,7 @@ pub mod entities;
 pub mod field;
 pub mod objects;
 
-use std::collections::HashSet;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::document::CadDocument;
 use crate::entities::{EntityCommon, EntityType};
@@ -110,6 +109,12 @@ pub struct DwgObjectWriter<'a> {
     pub(super) pending_has_ds_data: bool,
     /// Tracks which object handles have already been written to prevent duplicates.
     pub(super) visited_objects: HashSet<Handle>,
+    /// Number of emitted records for every class-based type code.
+    pub(super) class_instance_counts: HashMap<i16, i32>,
+    /// Type code belonging to the record currently being assembled.
+    pub(super) pending_type_code: Option<i16>,
+    /// False when an opaque record prevents an exact class census.
+    pub(super) class_counts_complete: bool,
     /// Every handle actually emitted to the object map. Central guard against
     /// writing the same handle twice (e.g. an xdictionary XRECORD reachable
     /// from more than one path): a duplicate handle is a hard DWG integrity
@@ -130,6 +135,8 @@ struct ParallelEntityBatch {
     handle_map: Vec<(u64, u32)>,
     object_queue: VecDeque<Handle>,
     registered_handles: HashSet<u64>,
+    class_instance_counts: HashMap<i16, i32>,
+    class_counts_complete: bool,
 }
 
 impl<'a> DwgObjectWriter<'a> {
@@ -246,6 +253,9 @@ impl<'a> DwgObjectWriter<'a> {
             sab_entries: Vec::new(),
             pending_has_ds_data: false,
             visited_objects: HashSet::new(),
+            class_instance_counts: HashMap::new(),
+            pending_type_code: None,
+            class_counts_complete: true,
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
         })
@@ -253,19 +263,33 @@ impl<'a> DwgObjectWriter<'a> {
 
     // ── Main entry point ────────────────────────────────────────────
 
-    /// Write all objects and return `(output_bytes, handle_map, model_space_extents, sab_entries)`.
+    pub fn write(
+        self,
+    ) -> (
+        Vec<u8>,
+        Vec<(u64, u32)>,
+        Option<BoundingBox3D>,
+        Vec<(Handle, Vec<u8>)>,
+    ) {
+        let (output, handles, extents, sab_entries, _, _) = self.write_with_class_metadata();
+        (output, handles, extents, sab_entries)
+    }
+
+    /// Write all objects and return the encoded records and their derived metadata.
     ///
     /// For AC1027+, ACIS entities (3DSOLID, REGION, BODY) are written with
     /// `acis_empty=true` in the entity stream; their SAB binary data is
     /// collected into `sab_entries` for writing into the `AcDb:AcDsPrototype_1b`
     /// section.
-    pub fn write(
+    pub(crate) fn write_with_class_metadata(
         mut self,
     ) -> (
         Vec<u8>,
         Vec<(u64, u32)>,
         Option<BoundingBox3D>,
         Vec<(Handle, Vec<u8>)>,
+        HashMap<i16, i32>,
+        bool,
     ) {
         // Compute model space extents for VPort view adjustment
         self.model_space_extents = self.compute_model_space_extents();
@@ -377,6 +401,8 @@ impl<'a> DwgObjectWriter<'a> {
             self.handle_map,
             self.model_space_extents,
             self.sab_entries,
+            self.class_instance_counts,
+            self.class_counts_complete,
         )
     }
 
@@ -1863,6 +1889,9 @@ impl<'a> DwgObjectWriter<'a> {
             sab_entries: Vec::new(),
             pending_has_ds_data: false,
             visited_objects: HashSet::new(),
+            class_instance_counts: HashMap::new(),
+            pending_type_code: None,
+            class_counts_complete: true,
             registered_handles: HashSet::with_capacity(handles.len()),
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
@@ -1877,6 +1906,8 @@ impl<'a> DwgObjectWriter<'a> {
             handle_map: worker.handle_map,
             object_queue: worker.object_queue,
             registered_handles: worker.registered_handles,
+            class_instance_counts: worker.class_instance_counts,
+            class_counts_complete: worker.class_counts_complete,
         }
     }
 
@@ -1898,6 +1929,10 @@ impl<'a> DwgObjectWriter<'a> {
         );
         self.object_queue.extend(batch.object_queue);
         self.registered_handles.extend(batch.registered_handles);
+        for (class_number, count) in batch.class_instance_counts {
+            *self.class_instance_counts.entry(class_number).or_default() += count;
+        }
+        self.class_counts_complete &= batch.class_counts_complete;
     }
 
     /// Write a BLOCK_HEADER (block record) object with explicit entity handles.
