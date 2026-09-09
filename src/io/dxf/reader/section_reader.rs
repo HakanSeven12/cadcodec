@@ -638,19 +638,19 @@ impl ClassDxfFields {
     }
 
     fn i16(&mut self, section: &str, code: i32) -> i16 {
-        self.string(section, code).parse().unwrap_or(0)
+        self.string(section, code).trim().parse().unwrap_or(0)
     }
 
     fn i32(&mut self, section: &str, code: i32) -> i32 {
-        self.string(section, code).parse().unwrap_or(0)
+        self.string(section, code).trim().parse().unwrap_or(0)
     }
 
     fn i64(&mut self, section: &str, code: i32) -> i64 {
-        self.string(section, code).parse().unwrap_or(0)
+        self.string(section, code).trim().parse().unwrap_or(0)
     }
 
     fn f64(&mut self, section: &str, code: i32) -> f64 {
-        self.string(section, code).parse().unwrap_or(0.0)
+        self.string(section, code).trim().parse().unwrap_or(0.0)
     }
 
     fn bool(&mut self, section: &str, code: i32) -> bool {
