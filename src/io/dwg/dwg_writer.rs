@@ -1089,12 +1089,9 @@ fn write_ac21_impl<W: Write + Seek>(
     fhw.add_section(output, section_names::SUMMARY_INFO, &summary_data)?;
 
     // Preview
-    // AC21 `encoding=1` sections store raw, un-RS-encoded, 32-byte-aligned data,
-    // so the preview container lands contiguously at the current file position
-    // (full 1024-byte pages leave no gaps) and its seeker in the header points
-    // straight at it. That position is the `base` the container's absolute image
-    // `start` offsets are relative to; compute it before building (the per-page
-    // checksum covers the final bytes).
+    // AC21 encoding=1 stores contiguous data followed by RS parity. The preview
+    // stays in one page, so its image offsets address the data at this position.
+    // Compute them before encoding, since the page CRC covers the final bytes.
     let preview_base = output.seek(std::io::SeekFrom::Current(0))? as u64;
     let preview_data =
         crate::io::dwg::preview::build_preview(document.preview.as_ref(), preview_base);

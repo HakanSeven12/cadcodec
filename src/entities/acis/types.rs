@@ -257,9 +257,9 @@ pub enum SatToken {
 
 /// Serde representation for [`SatToken`].
 ///
-/// Coordinate SAB tags retain their raw bytes in memory so a SAB writer can
-/// reproduce them exactly. JSON consumers, however, have historically seen
-/// them as the semantic `Position` token shared with SAT input.
+/// SAB tags retain their raw bytes in memory so a SAB writer can reproduce
+/// them exactly. JSON consumers, however, historically saw the corresponding
+/// semantic SAT token. Unsupported or malformed tags remain raw `Sab` values.
 #[cfg(feature = "serde")]
 #[derive(serde::Serialize)]
 enum SatTokenJson<'a> {
@@ -293,16 +293,47 @@ impl serde::Serialize for SatToken {
             Self::False => SatTokenJson::False,
             Self::Terminator => SatTokenJson::Terminator,
             Self::Enum(value) => SatTokenJson::Enum(value),
-            Self::Sab { tag, data } => match self.coordinate_components() {
-                Some(([x, y, z], 3)) => SatTokenJson::Position(x, y, z),
-                _ => SatTokenJson::Sab { tag: *tag, data },
-            },
+            Self::Sab { tag, data } => self.semantic_json_token(*tag, data),
         };
         serde::Serialize::serialize(&token, serializer)
     }
 }
 
 impl SatToken {
+    #[cfg(feature = "serde")]
+    fn semantic_json_token<'a>(&'a self, tag: u8, data: &'a [u8]) -> SatTokenJson<'a> {
+        let raw = || SatTokenJson::Sab { tag, data };
+
+        match tag {
+            0x02 | 0x03 | 0x04 | 0x15 | 0x17 => self
+                .as_integer()
+                .map(SatTokenJson::Integer)
+                .unwrap_or_else(raw),
+            0x05 | 0x06 => self.as_float().map(SatTokenJson::Float).unwrap_or_else(raw),
+            0x07 | 0x08 | 0x09 | 0x12 => sab_string_bytes_exact(tag, data)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(SatTokenJson::String)
+                .unwrap_or_else(raw),
+            0x0A if data.is_empty() => SatTokenJson::False,
+            0x0B if data.is_empty() => SatTokenJson::True,
+            0x0C if data.len() == 4 => SatTokenJson::Pointer(SatPointer::new(i32::from_le_bytes(
+                data.try_into().expect("checked pointer length"),
+            ))),
+            0x0D | 0x0E => sab_string_bytes_exact(tag, data)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(SatTokenJson::Ident)
+                .unwrap_or_else(raw),
+            0x0F if data.is_empty() => SatTokenJson::Ident("{"),
+            0x10 if data.is_empty() => SatTokenJson::Ident("}"),
+            0x11 if data.is_empty() => SatTokenJson::Terminator,
+            0x13 | 0x14 => match self.coordinate_components() {
+                Some(([x, y, z], 3)) => SatTokenJson::Position(x, y, z),
+                _ => raw(),
+            },
+            _ => raw(),
+        }
+    }
+
     /// Returns the token as a string if it is an identifier.
     pub fn as_ident(&self) -> Option<&str> {
         match self {
@@ -444,6 +475,28 @@ fn sab_string_bytes(tag: u8, data: &[u8]) -> Option<&[u8]> {
         _ => return None,
     };
     (data.len() >= prefix).then_some(&data[prefix..])
+}
+
+#[cfg(feature = "serde")]
+fn sab_string_bytes_exact(tag: u8, data: &[u8]) -> Option<&[u8]> {
+    let prefix = match tag {
+        0x07 | 0x0D | 0x0E => 1,
+        0x08 => 2,
+        0x09 | 0x12 => 4,
+        _ => return None,
+    };
+    if data.len() < prefix {
+        return None;
+    }
+
+    let declared_length = match prefix {
+        1 => data[0] as usize,
+        2 => u16::from_le_bytes(data[..2].try_into().ok()?) as usize,
+        4 => u32::from_le_bytes(data[..4].try_into().ok()?) as usize,
+        _ => unreachable!(),
+    };
+    let bytes = &data[prefix..];
+    (bytes.len() == declared_length).then_some(bytes)
 }
 
 impl fmt::Display for SatToken {
@@ -2946,6 +2999,30 @@ pub fn base_entity_type(entity_type: &str) -> &str {
 mod serde_tests {
     use super::*;
 
+    fn raw(tag: u8, data: Vec<u8>) -> SatToken {
+        SatToken::Sab { tag, data }
+    }
+
+    fn counted_string(prefix_size: usize, value: &str) -> Vec<u8> {
+        let mut data = match prefix_size {
+            1 => vec![value.len() as u8],
+            2 => (value.len() as u16).to_le_bytes().to_vec(),
+            4 => (value.len() as u32).to_le_bytes().to_vec(),
+            _ => unreachable!(),
+        };
+        data.extend_from_slice(value.as_bytes());
+        data
+    }
+
+    fn assert_semantic_json(token: SatToken, expected_json: serde_json::Value, expected: SatToken) {
+        let actual = serde_json::to_value(&token).unwrap();
+        assert_eq!(actual, expected_json);
+        assert_eq!(
+            serde_json::from_value::<SatToken>(actual).unwrap(),
+            expected
+        );
+    }
+
     #[test]
     fn sab_coordinate_tokens_use_the_legacy_position_json_shape() {
         let values = [8.863414495014042e-14, -1.0, 0.0];
@@ -2963,5 +3040,114 @@ mod serde_tests {
             serde_json::from_value::<SatToken>(serde_json::json!({ "Position": values })).unwrap(),
             SatToken::Position(values[0], values[1], values[2])
         );
+    }
+
+    #[test]
+    fn sab_numeric_tokens_use_their_legacy_json_shapes() {
+        assert_semantic_json(
+            raw(0x02, (-7i8).to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": -7 }),
+            SatToken::Integer(-7),
+        );
+        assert_semantic_json(
+            raw(0x03, (-300i16).to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": -300 }),
+            SatToken::Integer(-300),
+        );
+        assert_semantic_json(
+            raw(0x04, 42i32.to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": 42 }),
+            SatToken::Integer(42),
+        );
+        assert_semantic_json(
+            raw(0x15, 2i32.to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": 2 }),
+            SatToken::Integer(2),
+        );
+        assert_semantic_json(
+            raw(0x17, i64::MAX.to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": i64::MAX }),
+            SatToken::Integer(i64::MAX),
+        );
+        assert_semantic_json(
+            raw(0x05, 1.5f32.to_le_bytes().to_vec()),
+            serde_json::json!({ "Float": 1.5 }),
+            SatToken::Float(1.5),
+        );
+        assert_semantic_json(
+            raw(0x06, 1.0f64.to_le_bytes().to_vec()),
+            serde_json::json!({ "Float": 1.0 }),
+            SatToken::Float(1.0),
+        );
+    }
+
+    #[test]
+    fn sab_text_and_control_tokens_use_their_legacy_json_shapes() {
+        for (tag, prefix_size) in [(0x07, 1), (0x08, 2), (0x09, 4), (0x12, 4)] {
+            assert_semantic_json(
+                raw(tag, counted_string(prefix_size, "unknown")),
+                serde_json::json!({ "String": "unknown" }),
+                SatToken::String("unknown".to_string()),
+            );
+        }
+        for tag in [0x0D, 0x0E] {
+            assert_semantic_json(
+                raw(tag, counted_string(1, "curve")),
+                serde_json::json!({ "Ident": "curve" }),
+                SatToken::Ident("curve".to_string()),
+            );
+        }
+        assert_semantic_json(
+            raw(0x0A, Vec::new()),
+            serde_json::json!("False"),
+            SatToken::False,
+        );
+        assert_semantic_json(
+            raw(0x0B, Vec::new()),
+            serde_json::json!("True"),
+            SatToken::True,
+        );
+        assert_semantic_json(
+            raw(0x0C, 123i32.to_le_bytes().to_vec()),
+            serde_json::json!({ "Pointer": 123 }),
+            SatToken::Pointer(SatPointer::new(123)),
+        );
+        assert_semantic_json(
+            raw(0x0F, Vec::new()),
+            serde_json::json!({ "Ident": "{" }),
+            SatToken::Ident("{".to_string()),
+        );
+        assert_semantic_json(
+            raw(0x10, Vec::new()),
+            serde_json::json!({ "Ident": "}" }),
+            SatToken::Ident("}".to_string()),
+        );
+        assert_semantic_json(
+            raw(0x11, Vec::new()),
+            serde_json::json!("Terminator"),
+            SatToken::Terminator,
+        );
+    }
+
+    #[test]
+    fn unsupported_and_malformed_sab_tokens_keep_the_raw_json_shape() {
+        let tokens = [
+            raw(0x06, vec![0; 7]),
+            raw(0x07, vec![2, b'a']),
+            raw(0x07, vec![1, 0xFF]),
+            raw(0x0F, vec![0]),
+            raw(0x16, vec![0; 16]),
+            raw(0xFF, vec![1, 2, 3]),
+        ];
+
+        for token in tokens {
+            let expected = token.clone();
+            let json = serde_json::to_value(&token).unwrap();
+            assert!(
+                json.get("Sab").is_some(),
+                "unexpected semantic JSON: {json}"
+            );
+            assert_eq!(serde_json::from_value::<SatToken>(json).unwrap(), expected);
+        }
     }
 }

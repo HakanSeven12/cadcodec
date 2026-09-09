@@ -2179,7 +2179,8 @@ impl<R: Read + Seek> DwgReader<R> {
         let total_size = section.compressed_size as usize;
         let mut result = Vec::with_capacity(total_size);
 
-        // encoding=1 (stored): data is stored raw — no RS encoding, no LZ77.
+        // encoding=1 (stored): contiguous data followed by non-interleaved RS
+        // parity. Reading only the payload deliberately skips that parity.
         // encoding=4 (compressed): data is LZ77-compressed then RS-encoded with RS(255,251).
         // System pages (page map, section map) use RS(255,239) per §5.3,
         // but those are decoded separately in read_page_map_ac21 / read_section_map_ac21.
