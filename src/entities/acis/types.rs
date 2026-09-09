@@ -2364,6 +2364,19 @@ pub struct SatDocument {
     pub records: Vec<SatRecord>,
 }
 
+pub(super) fn transform_flags(matrix: [[f64; 3]; 3], scale: f64) -> [&'static str; 3] {
+    let m = crate::types::Matrix3::from_rows(matrix[0], matrix[1], matrix[2]);
+    let rotated = (0..3).any(|i| (0..3).any(|j| i != j && matrix[i][j].abs() > 1e-10));
+    let reflected = m.determinant() * scale < 0.0;
+    let rows = matrix.map(|row| crate::types::Vector3::new(row[0], row[1], row[2]));
+    let sheared = (0..3).any(|i| (i + 1..3).any(|j| rows[i].dot(&rows[j]).abs() > 1e-10));
+    [
+        if rotated { "rotate" } else { "no_rotate" },
+        if reflected { "reflect" } else { "no_reflect" },
+        if sheared { "shear" } else { "no_shear" },
+    ]
+}
+
 impl SatDocument {
     /// Creates a new empty SAT document with ACIS 7.0 header.
     pub fn new() -> Self {
@@ -2459,11 +2472,7 @@ impl SatDocument {
             tokens.push(SatToken::Float(x));
         }
         tokens.push(SatToken::Float(scale));
-        // rotate / reflect / shear — a composed matrix may be non-orthogonal,
-        // so flag it as a general (shear) placement.
-        tokens.push(SatToken::Integer(0));
-        tokens.push(SatToken::Integer(0));
-        tokens.push(SatToken::Integer(1));
+        tokens.extend(transform_flags(matrix, scale).map(|flag| SatToken::Ident(flag.into())));
 
         if let Some(rec) = self
             .records

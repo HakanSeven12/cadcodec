@@ -4507,9 +4507,9 @@ pub fn read_multileader(
         }
     }
 
-    // Pre-R2007 only: num_arrowheads (BL) + override-arrowhead list.
+    // Through R2007: num_arrowheads (BL) + override-arrowhead list.
     let mut arrowhead_overrides = Vec::new();
-    if !version.r2007_plus() {
+    if !version.r2010_plus() {
         let ah_count = safe_count(reader.read_bit_long());
         arrowhead_overrides.reserve(ah_count as usize);
         for index in 0..ah_count {

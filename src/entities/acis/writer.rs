@@ -27,29 +27,17 @@ impl SatWriter {
         ));
 
         // Header line 2: product info
-        if doc.header.version.has_counted_strings() {
-            // ACIS 7.0+ format with @-prefixed counted strings
-            output.push_str(&format!(
-                "@{} {} @{} {} @{} {}\n",
-                doc.header.product_id.len(),
-                doc.header.product_id,
-                doc.header.product_version.len(),
-                doc.header.product_version,
-                doc.header.date.len(),
-                doc.header.date,
-            ));
-        } else {
-            // Legacy format with length-prefixed strings
-            output.push_str(&format!(
-                "{} {} {} {} {} {}\n",
-                doc.header.product_id.len(),
-                doc.header.product_id,
-                doc.header.product_version.len(),
-                doc.header.product_version,
-                doc.header.date.len(),
-                doc.header.date,
-            ));
-        }
+        // Header string lengths have no '@', even in SAT 7.0. Only strings
+        // inside entity records use the @-prefixed representation.
+        output.push_str(&format!(
+            "{} {} {} {} {} {}\n",
+            doc.header.product_id.len(),
+            doc.header.product_id,
+            doc.header.product_version.len(),
+            doc.header.product_version,
+            doc.header.date.len(),
+            doc.header.date,
+        ));
 
         // Header line 3: tolerances
         if let Some(resfit) = doc.header.resfit_tolerance {
@@ -80,6 +68,23 @@ impl SatWriter {
 
     /// Write a single entity record.
     fn write_record(output: &mut String, record: &SatRecord, version: &SatVersion) {
+        // Transform has attribute/id fields but no pattern pointer.
+        if record.entity_type == "transform" {
+            output.push_str(&format!("transform {}", record.attribute));
+            if version.major >= 7 {
+                output.push_str(&format!(" {}", record.subtype_id));
+            }
+            for token in record
+                .tokens
+                .iter()
+                .skip_while(|token| matches!(token, SatToken::Pointer(_)))
+            {
+                output.push(' ');
+                Self::write_token(output, token, version);
+            }
+            output.push_str(" #\n");
+            return;
+        }
         // Entity type (no explicit index prefix — ACIS 7.0+ doesn't use them in DXF)
         output.push_str(&record.entity_type);
         output.push(' ');
@@ -141,6 +146,8 @@ impl SatWriter {
                 output.push(' ');
                 output.push_str(&format_float(*z));
             }
+            SatToken::True => output.push('T'),
+            SatToken::False => output.push('F'),
             _ => {
                 output.push_str(&format!("{}", token));
             }
@@ -241,6 +248,9 @@ impl SatDocument {
 
         // Scale
         record.tokens.push(SatToken::Float(scale));
+        record
+            .tokens
+            .extend(transform_flags(rotation, scale).map(|flag| SatToken::Ident(flag.into())));
 
         self.records.push(record);
         self.header.num_records = self.records.len();

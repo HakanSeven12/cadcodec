@@ -535,53 +535,27 @@ impl AcisData {
 }
 
 impl AcisData {
-    /// Apply the symmetric SAT/DXF character cipher.
-    ///
-    /// Every printable ASCII character except space is mapped to
-    /// `(159 - c)`.  Spaces, newlines, and non-ASCII bytes pass through
-    /// unchanged.  The cipher is its own inverse: `cipher(cipher(x)) == x`.
-    fn sat_cipher(text: &str) -> String {
-        text.chars()
-            .map(|c| {
-                let b = c as u32;
-                if b >= 0x21 && b <= 0x7E {
-                    // Safety: 159 - b is in 0x21..=0x7E, always valid.
-                    char::from_u32(159 - b).unwrap_or(c)
-                } else {
-                    c
-                }
-            })
-            .collect()
+    /// Encode plaintext SAT for DXF storage (Version 1 cipher).
+    /// ASCII DXF adds a protective space after each encoded `A` (caret).
+    pub fn encode_sat(text: &str) -> String {
+        Self::encode_sat_impl(text, true)
     }
 
-    /// Encode plaintext SAT for DXF storage (Version 1 cipher).
-    ///
-    /// AutoCAD DXF files (R2004 / AC1018 and later) store ACIS SAT data
-    /// using a simple symmetric character cipher: every printable ASCII
-    /// character except space is mapped to `(159 - c)`.  Spaces, newlines,
-    /// and non-ASCII bytes are passed through unchanged.
-    ///
-    /// After applying the cipher, a protective space is inserted after any
-    /// `^` (0x5E) that would otherwise be followed by a character in the
-    /// 0x40–0x5F range.  In DXF, the two-character sequence `^X` (where X
-    /// is in 0x40–0x5F) is interpreted as a control character and would
-    /// corrupt the data stream.  The plaintext letter `A` (0x41) encodes
-    /// to `^` (0x5E), so sequences like `AC` become `^\` which DXF readers
-    /// would mis-interpret as a File Separator control code.
-    pub fn encode_sat(text: &str) -> String {
-        let ciphered = Self::sat_cipher(text);
-        let bytes = ciphered.as_bytes();
-        let mut result = String::with_capacity(ciphered.len() + 16);
-        for i in 0..bytes.len() {
-            result.push(bytes[i] as char);
-            // Insert a protective space after '^' when the next character
-            // falls in the DXF control-character trigger range 0x40-0x5F.
-            if bytes[i] == 0x5E {
-                if let Some(&next) = bytes.get(i + 1) {
-                    if (0x40..=0x5F).contains(&next) {
-                        result.push(' ');
-                    }
-                }
+    pub(crate) fn encode_sat_binary(text: &str) -> String {
+        Self::encode_sat_impl(text, false)
+    }
+
+    fn encode_sat_impl(text: &str, escape_caret: bool) -> String {
+        let mut result = String::with_capacity(text.len() + 16);
+        for c in text.chars() {
+            result.push(match c {
+                ' ' | '\r' | '\n' | '\t' => c,
+                '@'..='_' => char::from(159 - c as u8),
+                c if c.is_ascii() => char::from(c as u8 ^ 0x5F),
+                _ => c,
+            });
+            if escape_caret && c == 'A' {
+                result.push(' ');
             }
         }
         result
@@ -592,22 +566,28 @@ impl AcisData {
     /// Strips protective spaces that were inserted after `^` to prevent
     /// DXF control-character interpretation, then applies the cipher.
     pub fn decode_sat(text: &str) -> String {
-        let bytes = text.as_bytes();
-        let mut cleaned = String::with_capacity(text.len());
-        let mut i = 0;
-        while i < bytes.len() {
-            cleaned.push(bytes[i] as char);
-            // If we see '^' followed by a space and then a char in
-            // 0x40-0x5F, the space is a protective insertion – skip it.
-            if bytes[i] == 0x5E && i + 2 < bytes.len() && bytes[i + 1] == 0x20 {
-                let after = bytes[i + 2];
-                if (0x40..=0x5F).contains(&after) {
-                    i += 1; // skip the protective space
-                }
+        Self::decode_sat_impl(text, true)
+    }
+
+    pub(crate) fn decode_sat_binary(text: &str) -> String {
+        Self::decode_sat_impl(text, false)
+    }
+
+    fn decode_sat_impl(text: &str, escape_caret: bool) -> String {
+        let mut decoded = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            decoded.push(match c {
+                ' ' | '\r' | '\n' | '\t' => c,
+                '@'..='_' => char::from(159 - c as u8),
+                c if c.is_ascii() => char::from(c as u8 ^ 0x5F),
+                _ => c,
+            });
+            if escape_caret && c == '^' && chars.peek() == Some(&' ') {
+                chars.next();
             }
-            i += 1;
         }
-        Self::sat_cipher(&cleaned)
+        decoded
     }
 }
 

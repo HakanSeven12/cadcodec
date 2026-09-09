@@ -3934,7 +3934,7 @@ impl<'a> SectionReader<'a> {
                 }
                 let version = fields.i16(modeler, 70);
                 if version == 1 {
-                    text = AcisData::decode_sat(&text);
+                    text = AcisData::decode_sat_binary(&text);
                 }
                 acis_data.sat_data = AcisData::strip_sat_terminator(&text);
                 DynamicBlockData::SolidHistoryNode(SolidHistoryOperation::Brep(SolidHistoryBrep {
@@ -17934,7 +17934,8 @@ impl<'a> SectionReader<'a> {
 
         // Version 1: SAT data is stored with a character cipher — decode it.
         if acis_version == 1 && !acis_data.is_empty() {
-            acis_data = crate::entities::solid3d::AcisData::decode_sat(&acis_data);
+            // The ASCII stream reader has already removed caret escapes.
+            acis_data = AcisData::decode_sat_binary(&acis_data);
         }
 
         // Normalise: strip "End-of-ACIS-data" / "End-of-ASM-data" terminator.
@@ -18448,7 +18449,7 @@ impl<'a> SectionReader<'a> {
         }
 
         if acis_version == 1 && !acis_text.is_empty() {
-            acis_text = AcisData::decode_sat(&acis_text);
+            acis_text = AcisData::decode_sat_binary(&acis_text);
         }
         surface.acis_data.sat_data = AcisData::strip_sat_terminator(&acis_text);
         surface.acis_data.version = if acis_version == 2 {
@@ -19714,6 +19715,7 @@ impl<'a> SectionReader<'a> {
         utype: crate::entities::underlay::UnderlayType,
     ) -> Result<Option<crate::objects::UnderlayDefinition>> {
         let mut def = crate::objects::UnderlayDefinition::new(utype);
+        let mut in_reactors = false;
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
@@ -19721,6 +19723,7 @@ impl<'a> SectionReader<'a> {
                 break;
             }
             match pair.code {
+                102 => in_reactors = pair.value_string == "{ACAD_REACTORS",
                 5 => {
                     if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
                         def.handle = Handle::new(h);
@@ -19728,7 +19731,8 @@ impl<'a> SectionReader<'a> {
                 }
                 330 => {
                     if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
-                        def.owner_handle = Handle::new(h);
+                        if in_reactors { def.reactors.push(Handle::new(h)); }
+                        else { def.owner_handle = Handle::new(h); }
                     }
                 }
                 1 => def.file_path = pair.value_string.clone(),

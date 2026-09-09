@@ -171,6 +171,37 @@ impl SabWriter {
         // Subtype ID (plain integer, not pointer)
         Self::write_integer(buf, record.subtype_id);
 
+        if record.entity_type == "transform"
+            && !record
+                .tokens
+                .iter()
+                .any(|t| matches!(t, SatToken::Sab { .. }))
+        {
+            let tokens: Vec<_> = record
+                .tokens
+                .iter()
+                .filter(|t| !matches!(t, SatToken::Pointer(_)))
+                .collect();
+            for row in tokens[..tokens.len().min(12)].chunks(3) {
+                if row.len() == 3 {
+                    Self::write_direction(
+                        buf,
+                        row[0].as_float().unwrap_or(0.0),
+                        row[1].as_float().unwrap_or(0.0),
+                        row[2].as_float().unwrap_or(0.0),
+                    );
+                }
+            }
+            if let Some(scale) = tokens.get(12) {
+                Self::write_double(buf, scale.as_float().unwrap_or(1.0));
+            }
+            for flag in tokens.iter().skip(13) {
+                Self::write_token(buf, flag, false);
+            }
+            buf.push(tags::END_OF_RECORD);
+            return;
+        }
+
         // Remaining tokens — with entity-type-aware coordinate grouping.
         // In SAT text, coordinates are individual Float tokens, but SAB uses
         // composite position(0x13)/direction(0x14) tags for coordinate triplets.
@@ -361,8 +392,10 @@ impl SabWriter {
     /// Returns `Some(true)` for forward/positive, `Some(false)` for reversed/negative.
     fn string_to_boolean(s: &str) -> Option<bool> {
         match s {
-            "forward_v" | "I" | "forward" | "single" | "in" => Some(true),
-            "reverse_v" | "reversed_v" | "reversed" | "double" | "out" | "F" => Some(false),
+            "forward_v" | "I" | "forward" | "single" | "in" | "no_rotate" | "no_reflect"
+            | "no_shear" => Some(true),
+            "reverse_v" | "reversed_v" | "reversed" | "double" | "out" | "F" | "rotate"
+            | "reflect" | "shear" => Some(false),
             _ => None,
         }
     }

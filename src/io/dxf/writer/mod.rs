@@ -79,7 +79,11 @@ impl<'a> DxfWriter<'a> {
 
     /// Write DXF content to a stream writer
     fn write_dxf<W: DxfStreamWriter>(&self, writer: &mut W) -> Result<()> {
-        let prepared = crate::io::loft_parameters::prepared(self.document);
+        let mut prepared = crate::io::loft_parameters::prepared(self.document);
+        // DXF and DWG share the same ownership graph. Repair table-backed
+        // entities before either writer snapshots handles, otherwise an
+        // ACAD_TABLE can emit a null/nonexistent block-record pointer.
+        crate::io::dwg::dwg_writer::prepare_database_references(&mut prepared);
         self.write_prepared_dxf(writer, prepared.as_ref())
     }
 
@@ -172,8 +176,11 @@ fn count_extra_handles(document: &CadDocument, version: crate::types::DxfVersion
                 count += 1;
             }
             EntityType::Insert(insert) => {
-                // SEQEND for attribute sequence
                 if insert.has_attributes() {
+                    count += insert.attributes.iter()
+                        .filter(|attribute| attribute.common.handle.is_null())
+                        .count() as u64;
+                    // SEQEND for attribute sequence
                     count += 1;
                 }
             }
@@ -209,6 +216,11 @@ fn compute_max_handle(document: &CadDocument) -> u64 {
         let h = entity.common().handle.value();
         if h >= max {
             max = h + 1;
+        }
+        if let EntityType::Insert(insert) = entity {
+            for attribute in &insert.attributes {
+                max = max.max(attribute.common.handle.value().saturating_add(1));
+            }
         }
     }
     for (handle, _) in &document.objects {

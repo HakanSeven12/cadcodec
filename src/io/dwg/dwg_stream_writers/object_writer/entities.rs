@@ -4098,7 +4098,8 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_cm_color(&e.line_color);
 
         // 341 LeaderLineTypeID (handle) - HardPointer
-        let lt = e.line_type_handle.unwrap_or(Handle::NULL);
+        let lt = e.line_type_handle.filter(|handle| !handle.is_null())
+            .unwrap_or(self.document.header.bylayer_linetype_handle);
         self.writer
             .write_handle(DwgReferenceType::HardPointer, lt.value());
 
@@ -4168,9 +4169,8 @@ impl<'a> DwgObjectWriter<'a> {
         // 293 Enable Annotation Scale / Is annotative (B)
         self.writer.write_bit(e.enable_annotation_scale);
 
-        // Pre-R2007 only: num_arrowheads (BL) + the override-arrowhead list
-        // (typically empty). R2007+ drops this list.
-        if !self.version.r2007_plus() {
+        // Through R2007 (ODA 20.4.48): count and arrowhead overrides.
+        if !self.version.r2010_plus() {
             self.writer
                 .write_bit_long(e.arrowhead_overrides.len() as i32);
             for override_value in &e.arrowhead_overrides {
@@ -4978,6 +4978,10 @@ impl<'a> DwgObjectWriter<'a> {
             }
         }
 
+        if self.version.r2007_plus() && !acds {
+            self.writer.write_handle(DwgReferenceType::SoftPointer,
+                e.history_handle.unwrap_or(Handle::NULL).value());
+        }
         self.register_object(e.common.handle);
     }
 
@@ -5447,6 +5451,14 @@ impl<'a> DwgObjectWriter<'a> {
         silhouettes: &[Silhouette],
         inline: bool,
     ) -> bool {
+        if self.version.r2007_plus() && !acis.is_binary && !acis.sat_data.is_empty() {
+            if let Ok(sat) = crate::entities::acis::SatDocument::parse(&acis.sat_data) {
+                let mut binary = acis.clone();
+                binary.is_binary = true;
+                binary.sab_data = crate::entities::acis::SabWriter::write(&sat);
+                return self.write_acis_data_impl(point, &binary, wires, silhouettes, inline);
+            }
+        }
         let has_data = acis.has_data();
         self.writer.write_bit(!has_data); // acis_empty (inverted: true = empty)
 
@@ -5463,12 +5475,7 @@ impl<'a> DwgObjectWriter<'a> {
                     let wireframe_present =
                         self.write_acis_wireframe(point, acis, wires, silhouettes);
                     if inline || wireframe_present || !self.version.r2013_plus(self.dxf_version) {
-                        self.writer.write_bit(
-                            acis.extra_acis_data
-                                .as_ref()
-                                .map(|_| false)
-                                .unwrap_or(acis.acis_empty_bit),
-                        );
+                        self.writer.write_bit(acis.extra_acis_data.is_none());
                         self.write_extra_acis_data(acis);
                     }
                     self.write_acis_materials(acis, inline);
@@ -5509,14 +5516,14 @@ impl<'a> DwgObjectWriter<'a> {
                 full.push_str("End-of-ACIS-data\n");
                 let plain = full.as_bytes();
 
-                // Encrypt with selective 159-substitution cipher
-                // (per LibreDWG dwg.spec: bytes <= 32 pass through, bytes > 32: 159 - byte)
+                // ODA 20.4.41: DWG substitutes printable ASCII, including
+                // spaces. This differs from the DXF SAT cipher.
                 let mut encrypted = Vec::with_capacity(plain.len());
                 for &b in plain.iter() {
-                    if b <= 32 {
-                        encrypted.push(b);
-                    } else {
+                    if (32..=126).contains(&b) {
                         encrypted.push(159u8.wrapping_sub(b));
+                    } else {
+                        encrypted.push(b);
                     }
                 }
 
@@ -5529,12 +5536,8 @@ impl<'a> DwgObjectWriter<'a> {
 
         let wireframe_present = self.write_acis_wireframe(point, acis, wires, silhouettes);
         if inline || wireframe_present || !self.version.r2013_plus(self.dxf_version) {
-            self.writer.write_bit(
-                acis.extra_acis_data
-                    .as_ref()
-                    .map(|_| false)
-                    .unwrap_or(acis.acis_empty_bit),
-            );
+            // ODA 20.4.41: true terminates the modeler payload chain.
+            self.writer.write_bit(acis.extra_acis_data.is_none());
             self.write_extra_acis_data(acis);
         }
         if self.version.r2007_plus() {

@@ -85,7 +85,25 @@ impl DwgWriter {
                     owned.assign_table_entry_handles();
                 }
                 if owned.version < DxfVersion::AC1027 {
+                    let required: Vec<_> = owned
+                        .entities()
+                        .filter_map(|entity| {
+                            let name = match entity {
+                                crate::entities::EntityType::Surface(surface) => surface.kind.dxf_name(),
+                                crate::entities::EntityType::Extended(entity) => entity.class_name(),
+                                crate::entities::EntityType::Underlay(entity) => entity.entity_name(),
+                                _ => entity.as_entity().entity_type(),
+                            };
+                            owned.classes.get_by_name(name).cloned()
+                        })
+                        .collect();
                     owned.classes.retain_legacy_dwg_classes();
+                    for mut class in required {
+                        if !owned.classes.contains(&class.dxf_name) {
+                            class.class_number = 0;
+                            owned.classes.add_or_update(class);
+                        }
+                    }
                     prepare_legacy_document(&mut owned);
                 }
                 &owned
@@ -146,40 +164,98 @@ impl DwgWriter {
 /// Repair relationships that are stored in both directions in a DWG database.
 /// The caller's document stays unchanged; corrections exist only in the output
 /// copy.
-fn prepare_database_references(document: &mut std::borrow::Cow<'_, CadDocument>) {
+pub(crate) fn prepare_database_references(document: &mut std::borrow::Cow<'_, CadDocument>) {
     use crate::entities::EntityType;
     use crate::objects::ObjectType;
     use std::collections::{HashMap, HashSet};
 
     let mut missing_hatch_reactors = Vec::new();
     let mut invalid_hatches = Vec::new();
+    let mut table_repairs = Vec::new();
+    let mut table_style_repairs = Vec::new();
+    let mut mline_repairs = Vec::new();
+    let mut underlay_reactors = Vec::new();
     for entity in document.entities() {
-        let EntityType::Hatch(hatch) = entity else {
-            continue;
-        };
-        if !hatch.is_associative {
-            continue;
-        }
-        let boundaries: Vec<Handle> = hatch
-            .paths
-            .iter()
-            .flat_map(|path| path.boundary_handles.iter().copied())
-            .collect();
-        if boundaries.is_empty()
-            || boundaries
-                .iter()
-                .any(|handle| document.get_entity(*handle).is_none())
-        {
-            invalid_hatches.push(hatch.common.handle);
-            continue;
-        }
-        for boundary_handle in boundaries {
-            if document
-                .get_entity(boundary_handle)
-                .is_some_and(|boundary| !boundary.common().reactors.contains(&hatch.common.handle))
-            {
-                missing_hatch_reactors.push((boundary_handle, hatch.common.handle));
+        match entity {
+            EntityType::Hatch(hatch) => {
+                if !hatch.is_associative {
+                    continue;
+                }
+                let boundaries: Vec<Handle> = hatch
+                    .paths
+                    .iter()
+                    .flat_map(|path| path.boundary_handles.iter().copied())
+                    .collect();
+                if boundaries.is_empty()
+                    || boundaries
+                        .iter()
+                        .any(|handle| document.get_entity(*handle).is_none())
+                {
+                    invalid_hatches.push(hatch.common.handle);
+                    continue;
+                }
+                for boundary_handle in boundaries {
+                    if document
+                        .get_entity(boundary_handle)
+                        .is_some_and(|boundary| {
+                            !boundary.common().reactors.contains(&hatch.common.handle)
+                        })
+                    {
+                        missing_hatch_reactors.push((boundary_handle, hatch.common.handle));
+                    }
+                }
             }
+            EntityType::Table(table) => {
+                if table.table_style_handle.is_none_or(|handle| handle.is_null()) {
+                    let style = document.objects.get(&document.header.named_objects_dict_handle)
+                        .and_then(|object| match object {
+                            ObjectType::Dictionary(root) => root.get("ACAD_TABLESTYLE"),
+                            _ => None,
+                        })
+                        .and_then(|handle| document.objects.get(&handle))
+                        .and_then(|object| match object {
+                            ObjectType::Dictionary(styles) => styles.get(&document.header.current_table_style_name)
+                                .or_else(|| styles.get("Standard")),
+                            _ => None,
+                        })
+                        .filter(|handle| matches!(document.objects.get(handle), Some(ObjectType::TableStyle(_))));
+                    if let Some(style) = style { table_style_repairs.push((table.common.handle, style)); }
+                }
+                let resolved = table.block_record_handle
+                    .filter(|handle| !handle.is_null())
+                    .and_then(|handle| document.block_records.iter().find(|record| record.handle == handle))
+                    .or_else(|| document.block_records.get(&table.block_name));
+                if resolved.is_none_or(|record| {
+                    table.block_record_handle != Some(record.handle)
+                        || table.block_name != record.name
+                        || record.handle.is_null()
+                        || record.block_entity_handle.is_null()
+                        || record.block_end_handle.is_null()
+                }) {
+                    table_repairs.push((
+                        table.common.handle,
+                        resolved.map(|record| record.name.clone())
+                            .unwrap_or_else(|| table.block_name.clone()),
+                    ));
+                }
+            }
+            EntityType::MLine(mline) if mline.style_handle.is_none_or(|handle| handle.is_null()) => {
+                let style = document.objects.iter().find_map(|(handle, object)| match object {
+                    ObjectType::MLineStyle(style) if style.name.eq_ignore_ascii_case(&mline.style_name) => Some(*handle),
+                    _ => None,
+                }).unwrap_or(document.header.current_multiline_style_handle);
+                if !style.is_null() {
+                    mline_repairs.push((mline.common.handle, style));
+                }
+            }
+            EntityType::Underlay(underlay) => {
+                if let Some(ObjectType::UnderlayDefinition(definition)) = document.objects.get(&underlay.definition_handle) {
+                    if !definition.reactors.contains(&underlay.common.handle) {
+                        underlay_reactors.push((underlay.definition_handle, underlay.common.handle));
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -223,12 +299,75 @@ fn prepare_database_references(document: &mut std::borrow::Cow<'_, CadDocument>)
 
     if missing_hatch_reactors.is_empty()
         && invalid_hatches.is_empty()
+        && table_repairs.is_empty()
+        && table_style_repairs.is_empty()
+        && mline_repairs.is_empty()
+        && underlay_reactors.is_empty()
         && !layout_dictionary_needs_repair
     {
         return;
     }
 
     let output = document.to_mut();
+    for (handle, style) in table_style_repairs {
+        if let Some(EntityType::Table(table)) = output.get_entity_mut(handle) {
+            table.table_style_handle = Some(style);
+        }
+    }
+    for (definition, reactor) in underlay_reactors {
+        if let Some(ObjectType::UnderlayDefinition(definition)) = output.objects.get_mut(&definition) {
+            if !definition.reactors.contains(&reactor) {
+                definition.reactors.push(reactor);
+            }
+        }
+    }
+    for (handle, style) in mline_repairs {
+        if let Some(EntityType::MLine(mline)) = output.get_entity_mut(handle) {
+            mline.style_handle = Some(style);
+        }
+    }
+    if !table_repairs.is_empty() {
+        output.synchronize_handle_allocator();
+        for (table_handle, requested_name) in table_repairs {
+            let existing = if !requested_name.is_empty() {
+                output.block_records.get(&requested_name).cloned()
+            } else {
+                None
+            };
+            let (block_record_handle, block_name) = if let Some(mut record) = existing {
+                if record.name.starts_with("*T") { record.flags.anonymous = true; }
+                if record.handle.is_null() { record.handle = output.allocate_handle(); }
+                if record.block_entity_handle.is_null() { record.block_entity_handle = output.allocate_handle(); }
+                if record.block_end_handle.is_null() { record.block_end_handle = output.allocate_handle(); }
+                let result = (record.handle, record.name.clone());
+                output.block_records.add_or_replace(record);
+                result
+            } else {
+                let name = if requested_name.is_empty() {
+                    let mut index = 1;
+                    while output.block_records.get(&format!("*T{index}")).is_some() {
+                        index += 1;
+                    }
+                    format!("*T{index}")
+                } else {
+                    requested_name
+                };
+                let mut record = crate::tables::BlockRecord::new(&name);
+                record.handle = output.allocate_handle();
+                record.block_entity_handle = output.allocate_handle();
+                record.block_end_handle = output.allocate_handle();
+                record.flags.anonymous = name.starts_with('*');
+                let handle = record.handle;
+                output.block_records.add(record)
+                    .expect("new table block name is unique");
+                (handle, name)
+            };
+            if let Some(EntityType::Table(table)) = output.get_entity_mut(table_handle) {
+                table.block_record_handle = Some(block_record_handle);
+                table.block_name = block_name;
+            }
+        }
+    }
     for (boundary_handle, hatch_handle) in missing_hatch_reactors {
         if let Some(boundary) = output.get_entity_mut(boundary_handle) {
             if !boundary.common().reactors.contains(&hatch_handle) {
@@ -304,13 +443,8 @@ fn prepare_surface_classes(document: &mut std::borrow::Cow<'_, CadDocument>) {
     }
 }
 
-/// Remove default objects that use post-R2000 binary layouts.
-///
-/// The modern document initializer adds `ACAD_MLEADERSTYLE` and
-/// `ACAD_TABLESTYLE`. Their object encodings are not valid in AC15 streams,
-/// so an otherwise valid R13-R2000 drawing is rejected before its entities are
-/// loaded. The corresponding root-dictionary entries and owned objects must
-/// be removed together.
+/// Remove style dictionaries only before the versions introducing their
+/// objects: TABLESTYLE in R2004 and MLEADERSTYLE in R2007.
 fn prepare_legacy_document(document: &mut CadDocument) {
     use crate::objects::ObjectType;
 
@@ -318,7 +452,8 @@ fn prepare_legacy_document(document: &mut CadDocument) {
     let mut obsolete = Vec::new();
     if let Some(ObjectType::Dictionary(root)) = document.objects.get_mut(&root_handle) {
         root.entries.retain(|(name, handle)| {
-            let remove = matches!(name.as_str(), "ACAD_MLEADERSTYLE" | "ACAD_TABLESTYLE");
+            let remove = (name == "ACAD_MLEADERSTYLE" && document.version < DxfVersion::AC1021)
+                || (name == "ACAD_TABLESTYLE" && document.version < DxfVersion::AC1018);
             if remove {
                 obsolete.push(*handle);
             }
@@ -2089,7 +2224,9 @@ mod tests {
         let decoded = reader.read().unwrap();
 
         // Mirrors the compact profile in BricsCAD-valid R2000 fixtures.
-        assert_eq!(decoded.classes.len(), 38);
+        let mut expected = doc.classes.clone();
+        expected.retain_legacy_dwg_classes();
+        assert_eq!(decoded.classes.len(), expected.len());
         assert_eq!(decoded.objects.len(), 13);
     }
 
@@ -2313,20 +2450,7 @@ mod tests {
     // ── File-level DWG roundtrip tests for 3DSOLID / REGION / BODY ──
 
     fn make_sat_sample() -> &'static str {
-        "700 0 1 0\n\
-         @7 unknown 12 ACIS 7.0 NT 24 Wed Jan 01 00:00:00 2025 1.0 9.9999999999999995e-007 1e-010\n\
-         body $-1 $1 $-1 $-1 #\n\
-         lump $-1 $-1 $2 $0 #\n\
-         shell $-1 $-1 $-1 $3 $-1 $1 #\n\
-         face $-1 $-1 $-1 $4 $2 $5 forward single #\n\
-         loop $-1 $-1 $6 $3 #\n\
-         plane-surface $-1 0 0 5 0 0 1 1 0 0 forward_v I I I I #\n\
-         coedge $-1 $6 $6 $-1 $7 forward $4 $-1 #\n\
-         edge $-1 $8 0 $8 1 $6 $9 forward #\n\
-         vertex $-1 $7 $10 #\n\
-         straight-curve $-1 -5 -5 5 1 0 0 I I #\n\
-         point $-1 -5 -5 5 #\n\
-         End-of-ACIS-data\n"
+        include_str!("../../../examples/entity_atlas_assets/region.sat")
     }
 
     /// Write a Solid3D with SAT data to DWG R2000, read back, verify SAT preserved.
@@ -2536,9 +2660,9 @@ mod tests {
         // Verify data integrity on each
         for e in doc2.entities() {
             match e {
-                EntityType::Solid3D(s) => assert!(s.acis_data.sat_data.contains("body")),
-                EntityType::Region(r) => assert!(r.acis_data.sat_data.contains("body")),
-                EntityType::Body(b) => assert!(b.acis_data.sat_data.contains("body")),
+                EntityType::Solid3D(s) => assert_eq!(s.acis_data.parse().unwrap().bodies().len(), 1),
+                EntityType::Region(r) => assert_eq!(r.acis_data.parse().unwrap().bodies().len(), 1),
+                EntityType::Body(b) => assert_eq!(b.acis_data.parse().unwrap().bodies().len(), 1),
                 _ => {}
             }
         }

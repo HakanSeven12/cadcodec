@@ -321,6 +321,7 @@ fn default_classes() -> Vec<DxfClass> {
         ("DWFUNDERLAY", "AcDbDwfReference", 1, "ObjectDBX Classes", true),
         ("DGNUNDERLAY", "AcDbDgnReference", 1, "ObjectDBX Classes", true),
         ("HELIX", "AcDbHelix", 0, "ObjectDBX Classes", true),
+        ("LIGHT", "AcDbLight", 1153, "SCENEOE", true),
         ("MULTILEADER", "AcDbMLeader", 1025, "ACDB_MLEADER_CLASS", true),
         ("OLE2FRAME", "AcDbOle2Frame", 1, "ObjectDBX Classes", true),
         ("MLINE", "AcDbMline", 1, "ObjectDBX Classes", true),

@@ -830,8 +830,8 @@ pub fn build_pyramid(center: [f64; 3], base_size: f64, height: f64) -> SatDocume
 
     let hb = base_size / 2.0;
     let s5 = (1.0 + (height / hb).powi(2)).sqrt(); // slant normalization
-    let n_horiz = 1.0 / s5;
-    let n_vert = (height / hb) / s5;
+    let n_horiz = (height / hb) / s5;
+    let n_vert = 1.0 / s5;
     let lat_len = (hb * hb + hb * hb + height * height).sqrt();
     let s6 = lat_len; // edge length from corner to apex
 
@@ -965,7 +965,7 @@ pub fn build_pyramid(center: [f64; 3], base_size: f64, height: f64) -> SatDocume
     sat.add_coedge(
         ptr(co(1)),
         ptr(co(3)),
-        ptr(co(15)),
+        ptr(co(13)),
         ptr(e3),
         Sense::Reversed,
         ptr(loop_base),

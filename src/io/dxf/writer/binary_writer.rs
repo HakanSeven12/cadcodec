@@ -93,6 +93,8 @@ impl<W: Write> DxfBinaryWriter<W> {
 }
 
 impl<W: Write> DxfStreamWriter for DxfBinaryWriter<W> {
+    fn is_binary(&self) -> bool { true }
+
     fn write_string(&mut self, code: i32, value: &str) -> Result<()> {
         if self.write_typed_text(code, value)? {
             return Ok(());
