@@ -345,6 +345,50 @@ fn validate_version(version: DxfVersion) -> Result<()> {
     }
 }
 
+/// Build class records from the objects that were actually encoded.
+///
+/// A zero-version class with no emitted instances is an unloaded declaration,
+/// not a live runtime class. Describing it as live leaves class dictionary
+/// slots that a database audit has to replace with dummy entries. Fixed object
+/// classes remain registered even when their records use fixed type codes.
+fn reconciled_classes(
+    document: &CadDocument,
+    instance_counts: &std::collections::HashMap<i16, i32>,
+    counts_complete: bool,
+) -> Vec<crate::classes::DxfClass> {
+    const FIXED_CLASSES: &[&str] = &[
+        "ACDBDICTIONARYWDFLT",
+        "DICTIONARYVAR",
+        "LAYOUT",
+        "ACDBPLACEHOLDER",
+        "PLOTSETTINGS",
+        "SCALE",
+    ];
+
+    document
+        .classes
+        .iter()
+        .cloned()
+        .map(|mut class| {
+            if let Some(&count) = instance_counts.get(&class.class_number) {
+                class.instance_count = count;
+                class.was_zombie = false;
+            } else if counts_complete {
+                class.instance_count = 0;
+                if class.dwg_version == 0
+                    && class.maintenance_version == 0
+                    && !FIXED_CLASSES
+                        .iter()
+                        .any(|name| class.dxf_name.eq_ignore_ascii_case(name))
+                {
+                    class.was_zombie = true;
+                }
+            }
+            class
+        })
+        .collect()
+}
+
 fn acds_data<'a>(
     document: &'a CadDocument,
     version: DxfVersion,
@@ -708,7 +752,14 @@ fn write_ac15<W: Write + Seek>(
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
-    let (obj_data, handle_map_u32, extents, _sab_entries) = obj_writer.write();
+    let (
+        obj_data,
+        handle_map_u32,
+        extents,
+        _sab_entries,
+        class_instance_counts,
+        class_counts_complete,
+    ) = obj_writer.write_with_class_metadata();
     if std::env::var_os("PERF").is_some() {
         eprintln!(
             "[perf] dwg-write objects={:.1}ms bytes={} handles={} format=ac15",
@@ -735,7 +786,7 @@ fn write_ac15<W: Write + Seek>(
     fhw.add_section(section_names::HEADER, header_data);
 
     // ── Section: Classes ──
-    let classes: Vec<_> = document.classes.iter().cloned().collect();
+    let classes = reconciled_classes(document, &class_instance_counts, class_counts_complete);
     let classes_data =
         classes_writer::write_classes_with_encoding(version, &classes, maint, header_encoding);
     fhw.add_section(section_names::CLASSES, classes_data);
@@ -808,7 +859,14 @@ fn write_ac18<W: Write + Seek>(
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
-    let (obj_data, handle_map_u32, extents, sab_entries) = obj_writer.write();
+    let (
+        obj_data,
+        handle_map_u32,
+        extents,
+        sab_entries,
+        class_instance_counts,
+        class_counts_complete,
+    ) = obj_writer.write_with_class_metadata();
     if std::env::var_os("PERF").is_some() {
         eprintln!(
             "[perf] dwg-write objects={:.1}ms bytes={} handles={} format=ac18",
@@ -834,7 +892,7 @@ fn write_ac18<W: Write + Seek>(
     fhw.add_section(output, section_names::HEADER, &header_data, true, PAGE_SIZE)?;
 
     // ── Section: Classes ──
-    let classes: Vec<_> = document.classes.iter().cloned().collect();
+    let classes = reconciled_classes(document, &class_instance_counts, class_counts_complete);
     let classes_data =
         classes_writer::write_classes_with_encoding(version, &classes, maint, header_encoding);
     fhw.add_section(
@@ -999,7 +1057,14 @@ fn write_ac21_impl<W: Write + Seek>(
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
-    let (obj_data, handle_map_u32, extents, sab_entries) = obj_writer.write();
+    let (
+        obj_data,
+        handle_map_u32,
+        extents,
+        sab_entries,
+        class_instance_counts,
+        class_counts_complete,
+    ) = obj_writer.write_with_class_metadata();
     if std::env::var_os("PERF").is_some() {
         eprintln!(
             "[perf] dwg-write objects={:.1}ms bytes={} handles={} format=ac21",
@@ -1071,7 +1136,7 @@ fn write_ac21_impl<W: Write + Seek>(
     fhw.add_section(output, section_names::HANDLES, &handles_data)?;
 
     // Classes
-    let classes: Vec<_> = document.classes.iter().cloned().collect();
+    let classes = reconciled_classes(document, &class_instance_counts, class_counts_complete);
     let maint = document.maintenance_version;
     let header_encoding =
         crate::io::dxf::code_page::encoding_from_code_page(&document.header.code_page)
@@ -1749,6 +1814,36 @@ mod tests {
     #[test]
     fn test_validate_version_r2010_ok() {
         assert!(validate_version(DxfVersion::AC1024).is_ok());
+    }
+
+    #[test]
+    fn class_metadata_matches_emitted_records() {
+        let document = CadDocument::with_version(DxfVersion::AC1032);
+        let action_param = document
+            .classes
+            .get_by_name("ACDBASSOCACTIONPARAM")
+            .expect("action parameter class");
+        let point_ref = document
+            .classes
+            .get_by_name("ACDBASSOCPOINTREFACTIONPARAM")
+            .expect("point reference class");
+        assert!(!action_param.was_zombie);
+        assert!(!point_ref.was_zombie);
+
+        let (_, _, _, _, counts, complete) = DwgObjectWriter::new(&document)
+            .expect("object writer")
+            .write_with_class_metadata();
+        let classes = reconciled_classes(&document, &counts, complete);
+        let by_name = |name: &str| {
+            classes
+                .iter()
+                .find(|class| class.dxf_name.eq_ignore_ascii_case(name))
+                .expect("class entry")
+        };
+
+        assert!(by_name("ACDBASSOCACTIONPARAM").was_zombie);
+        assert!(by_name("ACDBASSOCPOINTREFACTIONPARAM").was_zombie);
+        assert!(by_name("ACDBDICTIONARYWDFLT").instance_count > 0);
     }
 
     #[test]

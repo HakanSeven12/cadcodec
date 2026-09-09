@@ -169,6 +169,7 @@ impl<'a> DwgObjectWriter<'a> {
         // hard integrity error AutoCAD's audit rejects.
         if !handle.is_null() && !self.registered_handles.insert(handle.value()) {
             self.writer.reset();
+            self.pending_type_code = None;
             return;
         }
 
@@ -234,6 +235,10 @@ impl<'a> DwgObjectWriter<'a> {
             self.handle_map.push((handle.value(), pos));
         }
 
+        if let Some(type_code) = self.pending_type_code.take().filter(|code| *code >= 500) {
+            *self.class_instance_counts.entry(type_code).or_default() += 1;
+        }
+
         // 6. Reset per-object writer for the next object
         self.writer.reset();
     }
@@ -245,6 +250,7 @@ impl<'a> DwgObjectWriter<'a> {
     /// that was between `[ModularShort(size)]` and `[CRC16]` in the
     /// original file.  We re-frame it with a fresh MS prefix and CRC.
     pub fn register_raw_object(&mut self, handle: Handle, raw_data: &[u8], handle_bits: i64) {
+        self.class_counts_complete = false;
         // Duplicate-handle guard (see register_object).
         if !handle.is_null() && !self.registered_handles.insert(handle.value()) {
             return;
@@ -283,6 +289,7 @@ impl<'a> DwgObjectWriter<'a> {
         handle: Handle,
         xdata: &crate::xdata::ExtendedData,
     ) {
+        self.pending_type_code = Some(type_code);
         // Object type (BS or MC depending on version)
         self.writer.write_object_type(type_code);
 
@@ -697,6 +704,7 @@ impl<'a> DwgObjectWriter<'a> {
     ) {
         // ── writeCommonData portion ──
 
+        self.pending_type_code = Some(type_code);
         // Object type
         self.writer.write_object_type(type_code);
 
