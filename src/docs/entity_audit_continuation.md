@@ -23,6 +23,7 @@ Statuses distinguish native presence, proxy fallback, changed type, missing reco
 - AcDs extraction recognizes the tagged `End-of-ACIS-data` terminator and aligned blob area; native surface geometry previously disappeared during library readback despite external acceptance.
 - SAB output maps surface boolean keywords back to boolean tags. Binary modeler transformations preserve typed SAB records and wireframe metadata instead of converting through SAT. Native modeler header flags greater than one are also preserved through SAT/SAB conversion.
 - DXF common-field parsing retains layer, indexed color and lineweight for surfaces and lights. Those entities previously appeared missing from their atlas layers even though their bodies were present.
+- Modern ShapeManager SAT exported to DXF now declares its actual record count. A zero count made BricsCAD report a nonempty surface body as `Data stream is empty`. SAB boolean decoding now restores the third face containment role and transform role names, so DXF emits `forward/reversed`, `single/double`, `in/out`, and `no_rotate/no_reflect/no_shear` instead of context-free `T`/`F` values.
 
 ## Evidence
 
@@ -49,7 +50,7 @@ Complete DWG atlas results after the legacy and arc-text repairs:
 
 ARCALIGNEDTEXT is now native and audit-clean in BricsCAD on every included version (AC1014 through AC1032); AutoCAD Core Console retains it as a proxy. Its repaired reader also decodes BricsCAD's native reference from `target/arc-native-reference.dwg`. The six D2T fields agree with [LibreDWG's record description](https://github.com/LibreDWG/libredwg/blob/master/src/dwg2.spec); the supplied ODA PDF covers the common DWG/EED layouts but does not list this Express Tools entity. AC1021 ELLIPSE and LWPOLYLINE pass on retry; their previous failures were engine startup failures.
 
-AutoCAD opens all eight ASCII/binary DXF pairs with zero audit errors. With the new native construction fixtures, BricsCAD reports four invalid advanced surfaces in AC1021/AC1024 DXF; its other versions audit clean. This replaces the earlier DXF results from generic planar placeholders. Proxy cells remain distinct from native passes, and neither audit nor type presence proves appearance or editing-history fidelity.
+AutoCAD and BricsCAD now open all eight ASCII/binary DXF pairs with zero audit errors. A separately AutoCAD-authored AC1021 DXF control established that BricsCAD accepts the same four native construction surface types; comparing its modeler stream exposed the record-count and role-name defects above. Proxy cells remain distinct from native passes, and neither audit nor type presence proves appearance or editing-history fidelity.
 
 The atlas now contains authored construction fixtures in `examples/entity_atlas_assets/native_surfaces.dwg`, with provenance and authoring commands in the adjacent Markdown file. All four advanced surface subtypes are retained, including complete embedded profiles. The original seven-case surface catalog remains intact. Diagnostic `--exclude` corpora are only for isolating failures and are never used as the complete-atlas matrix.
 
@@ -57,13 +58,12 @@ The matrix has a per-version DWG summary and 3,408 detailed cells. Engine startu
 
 When duplicate isolated corpora cover a case, the matrix prefers current hashes and then the latest result, not directory enumeration order. Full BricsCAD AC1024 and AC1027 individual batches ran during this continuation; the latest combined results supersede their older surface failures after fixture and codec repair.
 
-Verification on 2026-09-10: the full Rust test suite passes (1,278 library tests plus integration suites). The audit regression suite has 20 tests, native surface tests cover geometry and construction data, and TABLE regressions cover both version defaults. The optional AutoCAD integration test opens all nine controls directly with zero audit errors. All-target checks, including the serde feature, pass.
+Verification on 2026-09-10: the full Rust test suite passes (1,279 library tests plus integration suites). The audit regression suite has 20 tests, seven native surface tests cover geometry, construction data and both DXF encodings, and TABLE regressions cover both version defaults. The optional AutoCAD integration test opens all nine controls directly with zero audit errors. All-target checks, including the serde feature, pass.
 
 ## Remaining Work
 
 - NURBSURFACE remains rejected by AutoCAD in AC1021/AC1024 DWG. AutoCAD itself saves an authored NURBSURFACE as generic SURFACE in those formats, while retaining NURBSURFACE in AC1032. The matrix keeps the rejected native fixture explicit; it is not silently removed or downgraded to obtain a pass.
 - A freshly authored AC1032 NURBSURFACE has more complex native data than the current planar atlas fixture, and the reader's fields need investigation. An audit-clean planar fixture is not full NURBSURFACE support.
-- BricsCAD's legacy DXF modeler conversion still rejects four advanced surface construction fixtures. Native DWG bodies now pass; compare SAT/modeler and embedded DXF profiles without discarding construction data.
 - Recheck full imported-document round-trips independently. Earlier EXTRUDEDSURFACE and REGION failures may involve metadata or multiple-body AcDs defects now repaired, but this broader workflow has not yet been revalidated.
 - SAT 700-to-400 conversion is demonstrated for analytic fixtures only. Arbitrary newer ASM schemas and mixed imported VX tables require additional coverage.
 - The unsynthesized OLE, point-cloud, coordination, model-documentation and dynamic families still need valid payload/ownership fixtures. Their UT cells are not completed validation.

@@ -9,6 +9,11 @@ param(
     [switch]$Resume
 )
 $ErrorActionPreference = 'Stop'
+function SharedHash([string]$Path) {
+    $stream = [IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { [Convert]::ToHexString($algorithm.ComputeHash($stream)) } finally { $algorithm.Dispose(); $stream.Dispose() }
+}
 & cargo build --example entity_atlas --quiet
 if ($LASTEXITCODE -ne 0) { throw 'Failed to build entity atlas' }
 New-Item -ItemType Directory -Force -Path $Root | Out-Null
@@ -27,7 +32,7 @@ foreach ($entity in $drawing.cases | Where-Object { $_.included -and $_.name -li
         $drawingPath = Join-Path $destination "$Version/$name.$(if($Format -eq 'dwg'){'dwg'}else{'dxf'})"
         if (Test-Path -LiteralPath $resultPath) {
             $previous = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
-            if ($previous.source_sha256 -eq (Get-FileHash -LiteralPath $drawingPath).Hash -and
+            if ($previous.source_sha256 -eq (SharedHash $drawingPath) -and
                 $previous.status -ne 'ENGINE_STARTUP_FAILED' -and -not $previous.timed_out) {
                 Write-Output "ENTITY $($entity.name): unchanged, $($previous.status)"
                 continue

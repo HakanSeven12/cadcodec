@@ -1,5 +1,5 @@
 use acadrust::entities::{EntityCommon, EntityType, Surface, SurfaceData, SurfaceKind};
-use acadrust::{CadDocument, DwgReader, DwgWriter, DxfVersion, Vector3};
+use acadrust::{CadDocument, DwgReader, DwgWriter, DxfReader, DxfVersion, DxfWriter, Vector3};
 use std::io::Cursor;
 
 fn native_surfaces() -> Vec<Surface> {
@@ -231,5 +231,103 @@ fn native_modeler_header_flags_survive_sat_and_sab_conversions() {
         let mut edited = native;
         edited.header.has_history = false;
         assert_eq!(&SabWriter::write(&edited)[27..31], &0u32.to_le_bytes());
+    }
+}
+
+#[test]
+fn native_surface_sat_is_not_declared_empty() {
+    for surface in native_surfaces() {
+        let document = surface.acis_data.parse().unwrap();
+        let text = document.to_sat_string();
+        let count: usize = text
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(count, document.records.len());
+        for face in document
+            .records
+            .iter()
+            .filter(|record| record.entity_type == "face")
+        {
+            let roles: Vec<_> = face
+                .tokens
+                .iter()
+                .filter_map(|token| match token.as_ident() {
+                    Some(name)
+                        if matches!(
+                            name,
+                            "forward" | "reversed" | "single" | "double" | "in" | "out"
+                        ) =>
+                    {
+                        Some(name)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(matches!(
+                roles.as_slice(),
+                ["forward" | "reversed", "single" | "double"]
+                    | ["forward" | "reversed", "single" | "double", "in" | "out"]
+            ));
+        }
+        assert!(!text.lines().any(|line| {
+            (line.starts_with("face ") || line.starts_with("transform "))
+                && line
+                    .split_whitespace()
+                    .any(|word| word == "T" || word == "F")
+        }));
+    }
+}
+
+#[test]
+fn translated_native_surface_dxf_streams_are_nonempty_in_both_encodings() {
+    use acadrust::entities::Entity;
+
+    for version in [DxfVersion::AC1021, DxfVersion::AC1024] {
+        let mut source = CadDocument::with_version(version);
+        for (index, mut surface) in native_surfaces().into_iter().enumerate() {
+            surface.common = EntityCommon::default();
+            surface.history_handle = None;
+            surface.translate(Vector3::new(index as f64 * 150., -700., 0.));
+            source.add_entity(EntityType::Surface(surface)).unwrap();
+        }
+        for binary in [false, true] {
+            let mut writer = DxfWriter::new(&source);
+            writer.binary = binary;
+            let loaded = DxfReader::from_reader(Cursor::new(writer.write_to_vec().unwrap()))
+                .unwrap()
+                .read()
+                .unwrap();
+            let surfaces: Vec<_> = loaded
+                .entities()
+                .filter_map(|entity| match entity {
+                    EntityType::Surface(surface) => Some(surface),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(surfaces.len(), 4, "{version:?}, binary={binary}");
+            for surface in surfaces {
+                let lines: Vec<_> = surface.acis_data.sat_data.lines().collect();
+                let count: usize = lines[0].split_whitespace().nth(1).unwrap().parse().unwrap();
+                assert!(
+                    count > 0,
+                    "{version:?}, binary={binary}, {:?}",
+                    surface.kind
+                );
+                assert!(!lines.iter().any(|line| {
+                    (line.starts_with("face ") || line.starts_with("transform "))
+                        && line
+                            .split_whitespace()
+                            .any(|word| word == "T" || word == "F")
+                }));
+                assert!(lines.iter().any(|line| line.starts_with("transform ")
+                    && line.contains("no_rotate no_reflect no_shear")));
+            }
+        }
     }
 }

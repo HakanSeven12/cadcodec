@@ -5,6 +5,11 @@ param(
     [string[]]$IsolatedRoots = @()
 )
 $ErrorActionPreference = 'Stop'
+function SharedHash([string]$Path) {
+    $stream = [IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { [Convert]::ToHexString($algorithm.ComputeHash($stream)) } finally { $algorithm.Dispose(); $stream.Dispose() }
+}
 $repo = Split-Path $PSScriptRoot -Parent
 $rootPath = (Resolve-Path -LiteralPath $Root).Path
 $manifest = @(Get-Content (Join-Path $rootPath 'manifest.json') -Raw | ConvertFrom-Json)
@@ -35,10 +40,10 @@ function Load-Result($Drawing, [string]$Engine, [string]$SourceRoot) {
     $hash = $result.source_sha256
     if (-not $hash) {
         $copy = Join-Path $result.log_directory ([IO.Path]::GetFileName($result.file))
-        if (Test-Path -LiteralPath $copy) { $hash = (Get-FileHash -LiteralPath $copy).Hash }
+        if (Test-Path -LiteralPath $copy) { $hash = SharedHash $copy }
     }
     $current = (Test-Path -LiteralPath $Drawing.file) -and $hash -and
-        $hash -eq (Get-FileHash -LiteralPath $Drawing.file).Hash
+        $hash -eq (SharedHash $Drawing.file)
     $entry = [pscustomobject]@{result=$result; current=[bool]$current; path=$path; hash=$hash; drawing=$Drawing; checked=(Get-Item -LiteralPath $path).LastWriteTimeUtc}
     $evidence.Add([pscustomobject]@{engine=$Engine; version=$Drawing.version; format=$Drawing.format;
         file=$Drawing.file; result=$path; sha256=$hash; current=[bool]$current; status=$result.status})

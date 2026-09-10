@@ -20,6 +20,11 @@ $manifest = Get-Content -LiteralPath (Join-Path $rootPath 'manifest.json') -Raw 
 $resultsRoot = Join-Path $rootPath "validation/$Engine"
 New-Item -ItemType Directory -Force -Path $resultsRoot | Out-Null
 $results = [Collections.Generic.List[object]]::new()
+function SharedHash([string]$Path) {
+    $stream = [IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { [Convert]::ToHexString($algorithm.ComputeHash($stream)) } finally { $algorithm.Dispose(); $stream.Dispose() }
+}
 function LispPath([string]$Path) { $Path.Replace('\','/').Replace('"','\"') }
 function ReadLog([string]$Path) {
     $stream = [IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
@@ -46,7 +51,7 @@ foreach ($drawing in $manifest) {
     }
     if ($Resume -and (Test-Path -LiteralPath $previous)) {
         $oldResult = Get-Content -LiteralPath $previous -Raw | ConvertFrom-Json
-        if ($oldResult.source_sha256 -eq (Get-FileHash -LiteralPath $drawing.file).Hash -and
+        if ($oldResult.source_sha256 -eq (SharedHash $drawing.file) -and
             $oldResult.status -ne 'ENGINE_STARTUP_FAILED' -and -not $oldResult.timed_out) {
             $results.Add($oldResult)
             continue
@@ -62,7 +67,7 @@ foreach ($drawing in $manifest) {
     if (Test-Path -LiteralPath $shapeFont) {
         Copy-Item -LiteralPath $shapeFont -Destination (Join-Path $directory 'ltypeshp.shx') -Force
     }
-    $sourceHash = (Get-FileHash -LiteralPath $drawing.file -Algorithm SHA256).Hash
+    $sourceHash = SharedHash $drawing.file
     $script = Join-Path $directory 'audit.scr'
     $entities = Join-Path $directory 'entities.txt'
     $loaded = Join-Path $directory 'loaded.txt'
@@ -171,7 +176,7 @@ foreach ($drawing in $manifest) {
     $diagnostics = @($logText -split "`r?`n" | Where-Object { $_ -match 'ErrorStatus|improperly|corrupt|recover|Invalid|invalid|modeling failure|Modeling operation error|64 bit long|not found|unable|Unable|Error [0-9]|discarded|unknown command' } | Select-Object -Unique)
     $stage=if(Test-Path (Join-Path $directory 'stage.txt')){Get-Content (Join-Path $directory 'stage.txt') -Raw}else{''}
     if($Engine -eq 'BCAD' -and $stage -eq 'STARTUP' -and -not $wasLoaded){$status='ENGINE_STARTUP_FAILED'}
-    $row=[pscustomobject]@{engine=$Engine;version=$drawing.version;format=$drawing.format;file=$drawing.file;status=$status;loaded=$wasLoaded;completed=$completed;unreadable_records=$unreadable;timed_out=$timedOut;stage=$stage;audit_errors=$auditErrors;expected_cases=$included.Count;present_cases=($included.Count-$missing.Count);missing=$missing;records=$records;cases=$caseResults;diagnostics=$diagnostics;seconds=[Math]::Round($timer.Elapsed.TotalSeconds,2);source_unchanged=((Get-FileHash -LiteralPath $drawing.file -Algorithm SHA256).Hash -eq $sourceHash);log_directory=$directory}
+    $row=[pscustomobject]@{engine=$Engine;version=$drawing.version;format=$drawing.format;file=$drawing.file;status=$status;loaded=$wasLoaded;completed=$completed;unreadable_records=$unreadable;timed_out=$timedOut;stage=$stage;audit_errors=$auditErrors;expected_cases=$included.Count;present_cases=($included.Count-$missing.Count);missing=$missing;records=$records;cases=$caseResults;diagnostics=$diagnostics;seconds=[Math]::Round($timer.Elapsed.TotalSeconds,2);source_unchanged=((SharedHash $drawing.file) -eq $sourceHash);log_directory=$directory}
     $row | Add-Member -NotePropertyName source_sha256 -NotePropertyValue $sourceHash
     $row | Add-Member -NotePropertyName proxy_records -NotePropertyValue $proxyRecords
     $results.Add($row)

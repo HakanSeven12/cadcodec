@@ -12,9 +12,12 @@ impl SatWriter {
     pub fn write(doc: &SatDocument) -> String {
         let mut output = String::new();
 
-        // Header line 1: version, num_records (always 0 for v7+), num_bodies, has_history
-        let num_records_out = if doc.header.version.has_explicit_indices() {
-            0 // ACIS 7.0+ always writes 0 for record count
+        // Classic SAT 7.0 uses zero here. Modern ShapeManager SAT exports
+        // carry the actual record count; BricsCAD treats zero as empty data.
+        let num_records_out = if doc.header.version.major == 7 {
+            0
+        } else if doc.header.version.major > 7 {
+            doc.records.len()
         } else {
             doc.header.num_records
         };
