@@ -4,9 +4,11 @@
 [![Documentation](https://docs.rs/acadrust/badge.svg)](https://docs.rs/acadrust)
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL%202.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
 
-**A pure Rust library for reading and writing CAD files (DXF and DWG).**
+**A pure Rust crate for reading, writing, and inspecting CAD files.**
 
-Supports DXF (ASCII & Binary) and DWG (R13–R2018) files.
+acadrust handles ASCII and binary DXF plus native binary DWG without requiring
+an installed CAD application. File support spans DXF R12 through R2018+ and DWG
+R13 through R2018+.
 
 ## Quick Start
 
@@ -16,37 +18,71 @@ acadrust = "0.5.4"
 ```
 
 ```rust
-use acadrust::{CadDocument, DxfReader, DxfWriter};
+use acadrust::{DxfReader, DxfWriter};
 
 fn main() -> acadrust::Result<()> {
-    // Read
     let doc = DxfReader::from_file("input.dxf")?.read()?;
     println!("{} entities", doc.entities().count());
 
-    // Write
-    let writer = DxfWriter::new(&doc);
-    writer.write_to_file("output.dxf")?;
+    DxfWriter::new(&doc).write_to_file("output.dxf")?;
     Ok(())
 }
 ```
 
+`DxfReader` detects ASCII and binary input automatically. To produce binary
+DXF, use `DxfWriter::new_binary(&doc)`.
+
+### Cargo features
+
+| Feature | Default | Adds |
+|---------|---------|------|
+| `serde` | No | `Serialize` and `Deserialize` implementations for document types |
+| `import` | No | STL, COLLADA, OBJ, glTF/GLB, and FBX importers |
+
+Enable optional features as needed:
+
+```toml
+[dependencies]
+acadrust = { version = "0.5.4", features = ["serde", "import"] }
+```
+
 ## Features
 
-- **DXF Read/Write** — ASCII and Binary formats, R12–R2018+
-- **DWG Read/Write** — Native binary, R13–R2018 (208/208 roundtrip-perfect)
-- **41 Entity Types** — Lines, arcs, polylines, hatches, dimensions, 3D solids, viewports, and more
-- **Tables & Objects** — Layers, linetypes, styles, dictionaries, layouts, materials
-- **Serde Support** — Optional `Serialize`/`Deserialize` for all types (`features = ["serde"]`)
-- **Failsafe Mode** — Error-tolerant parsing with structured diagnostics
-- **Encoding Support** — ~40 code pages for pre-2007 files
+- **DXF I/O** — ASCII and binary formats, R12 through R2018+
+- **DWG I/O** — Native binary formats, R13 through R2018+
+- **Broad entity coverage** — 48 top-level `EntityType` variants covering 2D
+  geometry, annotations, dimensions, meshes, underlays, viewports, 3D solids,
+  regions, bodies, and native surfaces
+- **ACIS modeling data** — SAT/SAB parsing and writing, B-rep topology, solid
+  history, and primitive builders
+- **Tables and objects** — Layers, linetypes, styles, dictionaries, layouts,
+  materials, fields, dynamic blocks, and associative data
+- **Resilient reads** — Optional failsafe recovery with bounded, structured
+  diagnostics and read statistics
+- **Encoding support** — Automatic handling of roughly 40 code pages for
+  pre-2007 drawings
+- **Optional serialization** — Serde support for document data
+- **Optional 3D imports** — STL, COLLADA, OBJ, glTF/GLB, and FBX converted to
+  acadrust documents
 
 ## File Version Support
 
-| Version | AutoCAD | DXF | DWG |
-|---------|---------|-----|-----|
-| AC1009 | R12 | ✅ | — |
-| AC1012–AC1014 | R13–R14 | ✅ | ✅ |
-| AC1015–AC1032 | 2000–2018+ | ✅ | ✅ |
+| File code | AutoCAD release | DXF | DWG |
+|-----------|-----------------|-----|-----|
+| AC1009 | R12 | R/W | — |
+| AC1012 | R13 | R/W | R/W |
+| AC1014 | R14 | R/W | R/W |
+| AC1015 | 2000 | R/W | R/W |
+| AC1018 | 2004 | R/W | R/W |
+| AC1021 | 2007 | R/W | R/W |
+| AC1024 | 2010 | R/W | R/W |
+| AC1027 | 2013 | R/W | R/W |
+| AC1032 | 2018+ | R/W | R/W |
+
+`R/W` means read and write support. Entity availability varies by file version;
+see the [per-version compatibility matrix](src/docs/entity_status_matrix.md)
+for results from the 71-case entity atlas. The matrix records tested fixtures
+and CAD-engine audit results, not a guarantee for every possible drawing.
 
 ## Examples
 
@@ -54,22 +90,16 @@ fn main() -> acadrust::Result<()> {
 <summary>DWG Read/Write</summary>
 
 ```rust
-use acadrust::{CadDocument, DwgWriter};
-use acadrust::io::dwg::DwgReader;
-use acadrust::entities::*;
-use acadrust::types::{Color, Vector3};
+use acadrust::{CadDocument, Color, DwgReader, DwgWriter, EntityType, Line};
 
 fn main() -> acadrust::Result<()> {
-    // Read DWG
     let mut reader = DwgReader::from_file("drawing.dwg")?;
     let doc = reader.read()?;
 
-    // Iterate entities
     for entity in doc.entities() {
         println!("{:?}", entity);
     }
 
-    // Create & Write DWG
     let mut doc = CadDocument::new();
     let mut line = Line::from_coords(0.0, 0.0, 0.0, 100.0, 50.0, 0.0);
     line.common.color = Color::RED;
@@ -102,20 +132,61 @@ fn main() -> acadrust::Result<()> {
     doc.add_paper_space_entity(EntityType::Viewport(overall_vp))?;
 
     // Detail viewport using builder pattern
-    let vp1 = Viewport::new()
+    let mut vp1 = Viewport::new()
         .with_center(Vector3::new(148.5, 105.0, 0.0))
         .with_view_target(Vector3::new(50.0, 50.0, 0.0))
         .with_scale(1.0)
         .with_locked();
+    vp1.id = 2;
     doc.add_paper_space_entity(EntityType::Viewport(vp1))?;
 
     // Create a second layout with its own viewport
     doc.add_layout("Layout2")?;
     let mut vp2 = Viewport::with_size(Vector3::new(200.0, 150.0, 0.0), 400.0, 300.0);
-    vp2.id = 1;
+    vp2.id = 2;
     doc.add_entity_to_layout(EntityType::Viewport(vp2), "Layout2")?;
 
     DxfWriter::new(&doc).write_to_file("layouts.dxf")?;
+    Ok(())
+}
+```
+</details>
+
+<details>
+<summary>Failsafe Reading and Diagnostics</summary>
+
+```rust
+use acadrust::{DxfReader, DxfReaderConfiguration};
+
+fn main() -> acadrust::Result<()> {
+    let config = DxfReaderConfiguration {
+        failsafe: true,
+        ..Default::default()
+    };
+    let outcome = DxfReader::from_file("drawing.dxf")?
+        .with_configuration(config)
+        .read_with_stats()?;
+
+    println!("{} entities", outcome.document.entities().count());
+    for diagnostic in &outcome.stats.diagnostics {
+        eprintln!("{}: {}", diagnostic.code, diagnostic.message);
+    }
+    Ok(())
+}
+```
+</details>
+
+<details>
+<summary>Import a 3D Model</summary>
+
+Requires `features = ["import"]`.
+
+```rust
+use acadrust::{import_file, DwgWriter, ImportConfig};
+
+fn main() -> acadrust::Result<()> {
+    let doc = import_file("model.glb", &ImportConfig::default())?;
+    DwgWriter::write_to_file("model.dwg", &doc)?;
     Ok(())
 }
 ```
@@ -139,12 +210,39 @@ fn main() -> acadrust::Result<()> {
 
 ## Documentation
 
-Full API docs: [docs.rs/acadrust](https://docs.rs/acadrust)
+- [API documentation](https://docs.rs/acadrust)
+- [Entity compatibility matrix](src/docs/entity_status_matrix.md)
+- [Entity atlas generator](examples/entity_atlas.rs)
+- [Paper-space viewport example](examples/viewport_layouts.rs)
+
+## Development
+
+```console
+cargo test
+cargo test --all-features
+cargo check --all-targets --all-features
+```
 
 ---
 
 ## Changelog
 
+### Unreleased
+
+- **Cross-application compatibility atlas** — Added a 71-case entity atlas,
+  version-aware fixtures, isolated-case validation, and generated audit matrices
+  for AutoCAD and BricsCAD across AC1012 through AC1032.
+- **DWG compatibility** — Improved AC1021 Reed-Solomon handling, legacy viewport
+  records, class metadata, table styles, annotative context data, arc-aligned
+  text, and complete database-record output.
+- **ACIS and native surfaces** — Preserved solid-history edits, pcurves, NURBS
+  data, SAT/SAB tokens, multi-body datastores, and lofted, revolved, swept, and
+  extruded surface construction data across round trips.
+- **DXF fidelity** — Corrected binary group-code widths, legacy space aliases,
+  handle allocation, typed raw-record output, and audit failures in native
+  surface records.
+- **Stable editing and output** — Preserved opaque source data when editing
+  known records and ordered written objects by handle for deterministic output.
 
 ### 0.5.4
 
