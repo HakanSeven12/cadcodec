@@ -14,7 +14,7 @@ R13 through R2018+.
 
 ```toml
 [dependencies]
-acadrust = "0.5.4"
+acadrust = "0.5.5"
 ```
 
 ```rust
@@ -43,7 +43,7 @@ Enable optional features as needed:
 
 ```toml
 [dependencies]
-acadrust = { version = "0.5.4", features = ["serde", "import"] }
+acadrust = { version = "0.5.5", features = ["serde", "import"] }
 ```
 
 ## Features
@@ -227,7 +227,7 @@ cargo check --all-targets --all-features
 
 ## Changelog
 
-### Unreleased
+### 0.5.5
 
 - **Cross-application compatibility atlas** — Added a 71-case entity atlas,
   version-aware fixtures, isolated-case validation, and generated audit matrices

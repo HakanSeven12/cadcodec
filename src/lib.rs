@@ -1,126 +1,159 @@
 //! # acadrust
 //!
-//! A pure Rust library for reading and writing CAD files in **DXF** and **DWG** formats.
-//!
-//! acadrust provides comprehensive support for both file formats with a focus on
-//! correctness, type safety, and completeness — full-featured CAD file
-//! manipulation for the Rust ecosystem.
+//! A pure Rust library for reading, writing, and inspecting CAD files in DXF
+//! (ASCII and binary) and native binary DWG formats. DXF support spans R12
+//! through R2018+; DWG support spans R13 through R2018+.
 //!
 //! ## Highlights
 //!
-//! - **DXF** — Read and write ASCII and Binary DXF (R12 through R2018+)
-//! - **DWG** — Read and write native DWG binary files (R13 through R2018+)
-//! - **41 entity types**, 9 table types, 20+ non-graphical objects
-//! - **ACIS/SAT/SAB** — Parse and write ACIS solid-model data (SAT text and SAB binary);
-//!   parametric primitive builders for box, wedge, pyramid, cylinder, cone, sphere, and torus
-//! - **Type safe** — strongly-typed entities, tables, and enums
-//! - **Failsafe mode** — error-tolerant parsing that collects diagnostics
-//! - **Encoding support** — automatic code page detection for pre-2007 files
-//! - **Serde support** — optional `Serialize`/`Deserialize` for all types (enable the `serde` feature)
+//! - **48 top-level [`EntityType`] variants** for geometry, annotations,
+//!   dimensions, meshes, solids, regions, bodies, and surfaces.
+//! - **ACIS/SAT/SAB** parsing and writing, including solid history and primitive
+//!   builders.
+//! - **Tables and objects** for layers, styles, dictionaries, layouts, fields,
+//!   materials, and associative data.
+//! - **Failsafe reads** with bounded [`ReadDiagnostic`] values and aggregate
+//!   [`ReadStats`] returned by [`DxfReader::read_with_stats`] and
+//!   [`DwgReader::read_with_stats`].
+//! - **Automatic code-page handling** for older drawings.
+//! - Optional Serde serialization and 3D import support.
 //!
 //! ## Feature Flags
 //!
 //! | Feature | Description |
 //! |---------|-------------|
-//! | `serde` | Enables `serde::Serialize` and `serde::Deserialize` on all document types |
+//! | `serde` | Enables `serde::Serialize` and `serde::Deserialize` implementations. |
+//! | `import` | Enables STL, COLLADA, OBJ, glTF/GLB, and FBX importers. |
 //!
 //! ```toml
 //! [dependencies]
-//! acadrust = { version = "0.5.4", features = ["serde"] }
+//! acadrust = { version = "0.5.5", features = ["serde", "import"] }
 //! ```
-//!
-//! ### Serialize an entity to JSON
-//!
-//! ```rust,ignore
-//! use acadrust::entities::Line;
-//!
-//! let line = Line::from_coords(0.0, 0.0, 0.0, 100.0, 50.0, 0.0);
-//! let json = serde_json::to_string_pretty(&line).unwrap();
-//! println!("{json}");
-//! ```
-//!
-//! ### Round-trip a full document
-//!
-//! ```rust,ignore
-//! use acadrust::{CadDocument, DxfReader};
-//!
-//! let doc = DxfReader::from_file("input.dxf")?.read()?;
-//!
-//! // Serialize
-//! let json = serde_json::to_string(&doc).unwrap();
-//!
-//! // Deserialize
-//! let doc2: CadDocument = serde_json::from_str(&json).unwrap();
-//! assert_eq!(doc2.entities().count(), doc.entities().count());
-//! ```
-//!
-//! See the [`examples/serde_json.rs`](https://github.com/hakanaktt/acadrust/blob/main/examples/serde_json.rs)
-//! example for more patterns including web-API-style entity lists.
 //!
 //! ## Quick Start — DXF
 //!
-//! ```rust,ignore
-//! use acadrust::{CadDocument, DxfReader, DxfWriter};
+//! ```rust,no_run
+//! use acadrust::DxfReader;
+//! use acadrust::DxfWriter;
 //!
-//! // Read
+//! # fn main() -> acadrust::Result<()> {
 //! let doc = DxfReader::from_file("input.dxf")?.read()?;
 //! println!("Entities: {}", doc.entities().count());
-//!
-//! // Write
 //! DxfWriter::new(&doc).write_to_file("output.dxf")?;
-//! # Ok::<(), acadrust::error::DxfError>(())
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Quick Start — DWG
 //!
-//! ```rust,ignore
-//! use acadrust::{CadDocument, DwgWriter};
-//! use acadrust::io::dwg::DwgReader;
-//! use acadrust::entities::*;
-//! use acadrust::types::{Color, Vector3};
+//! ```rust,no_run
+//! use acadrust::{CadDocument, Color, DwgReader, DwgWriter, EntityType, Line};
 //!
-//! // Read
+//! # fn main() -> acadrust::Result<()> {
 //! let mut reader = DwgReader::from_file("input.dwg")?;
 //! let doc = reader.read()?;
+//! println!("Entities: {}", doc.entities().count());
 //!
-//! // Create and write
-//! let mut doc = CadDocument::new();
+//! let mut output = CadDocument::new();
 //! let mut line = Line::from_coords(0.0, 0.0, 0.0, 100.0, 50.0, 0.0);
 //! line.common.color = Color::RED;
-//! doc.add_entity(EntityType::Line(line))?;
-//! DwgWriter::write_to_file("output.dwg", &doc)?;
-//! # Ok::<(), acadrust::error::DxfError>(())
+//! output.add_entity(EntityType::Line(line))?;
+//! DwgWriter::write_to_file("output.dwg", &output)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Failsafe Reading and Diagnostics
+//!
+//! Set [`DxfReaderConfiguration::failsafe`] to continue past recoverable
+//! record errors. The returned [`ReadOutcome`] contains the document plus
+//! source/decode counts and structured diagnostics; strict mode remains the
+//! default.
+//!
+//! ```rust,no_run
+//! use acadrust::{DxfReader, DxfReaderConfiguration};
+//!
+//! # fn main() -> acadrust::Result<()> {
+//! let config = DxfReaderConfiguration { failsafe: true, ..Default::default() };
+//! let outcome = DxfReader::from_file("drawing.dxf")?
+//!     .with_configuration(config)
+//!     .read_with_stats()?;
+//! println!("{} entities, {} diagnostics", outcome.stats.output_entities,
+//!     outcome.stats.diagnostics.len());
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Optional 3D Imports
+//!
+//! With `features = ["import"]`, `import_file` auto-detects STL, COLLADA,
+//! OBJ, glTF/GLB, and FBX by extension and converts them to a [`CadDocument`].
+//!
+//! ```rust,no_run
+//! # fn main() -> acadrust::Result<()> {
+//! # #[cfg(feature = "import")]
+//! # {
+//! use acadrust::{import_file, ImportConfig};
+//!
+//! let doc = import_file("model.glb", &ImportConfig::default())?;
+//! println!("Imported {} entities", doc.entities().count());
+//! # }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Serde
+//!
+//! With `features = ["serde"]`, document types implement Serde traits and can
+//! be serialized to JSON using your chosen JSON crate.
+//!
+//! ```rust,no_run
+//! # fn main() -> acadrust::Result<()> {
+//! # #[cfg(feature = "serde")]
+//! # {
+//! use acadrust::{CadDocument, DxfReader};
+//!
+//! let doc = DxfReader::from_file("drawing.dxf")?.read()?;
+//! let json = serde_json::to_string(&doc).unwrap();
+//! let restored: CadDocument = serde_json::from_str(&json).unwrap();
+//! assert_eq!(restored.entities().count(), doc.entities().count());
+//! # }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Module Overview
 //!
 //! | Module | Contents |
 //! |--------|----------|
-//! | [`document`] | [`CadDocument`] — the central drawing container |
-//! | [`entities`] | 41 graphical entity types ([`Line`], [`Circle`], [`Spline`], …) |
-//! | [`tables`]   | Table entries ([`Layer`], [`LineType`], [`TextStyle`], [`DimStyle`], …) |
-//! | [`objects`]   | Non-graphical objects (dictionaries, layouts, styles) |
-//! | [`types`]     | Primitives ([`Vector3`], [`Color`], [`Handle`], [`DxfVersion`], …) |
-//! | [`io`]        | Readers and writers for DXF and DWG |
-//! | [`entities::acis`] | ACIS/SAT/SAB solid-model parser, writer, and primitive builders |
-//! | [`classes`]   | DXF class definitions (CLASSES section) |
-//! | [`xdata`]     | Extended data (XData) attached to entities |
-//! | [`error`]     | Error types ([`DxfError`]) and [`Result`] alias |
-//! | [`notification`] | Structured parse diagnostics |
+//! | [`document`] | [`CadDocument`] — central drawing container |
+//! | [`entities`] | 48 top-level entity variants |
+//! | [`tables`] | Table entries such as [`Layer`] and [`LineType`] |
+//! | [`objects`] | Non-graphical objects, dictionaries, layouts, and styles |
+//! | [`types`] | Primitives such as [`Vector3`], [`Color`], and [`DxfVersion`] |
+//! | [`io`] | DXF, DWG, and optional import readers and writers |
+//! | [`entities::acis`] | ACIS/SAT/SAB parsing, writing, and primitive builders |
+//! | [`notification`] | Structured parse notifications and recovery counts |
 //!
 //! ## File Version Support
 //!
 //! | Code | AutoCAD | DXF | DWG |
 //! |------|---------|-----|-----|
-//! | AC1009 | R12     | R/W | —   |
-//! | AC1012 | R13     | R/W | R/W |
-//! | AC1014 | R14     | R/W | R/W |
-//! | AC1015 | 2000    | R/W | R/W |
-//! | AC1018 | 2004    | R/W | R/W |
-//! | AC1021 | 2007    | R/W | R/W |
-//! | AC1024 | 2010    | R/W | R/W |
-//! | AC1027 | 2013    | R/W | R/W |
-//! | AC1032 | 2018+   | R/W | R/W |
+//! | AC1009 | R12 | R/W | — |
+//! | AC1012 | R13 | R/W | R/W |
+//! | AC1014 | R14 | R/W | R/W |
+//! | AC1015 | 2000 | R/W | R/W |
+//! | AC1018 | 2004 | R/W | R/W |
+//! | AC1021 | 2007 | R/W | R/W |
+//! | AC1024 | 2010 | R/W | R/W |
+//! | AC1027 | 2013 | R/W | R/W |
+//! | AC1032 | 2018+ | R/W | R/W |
+//!
+//! `R/W` describes the format-level reader and writer paths. Entity
+//! availability varies by file version. See the
+//! [per-version compatibility matrix](https://github.com/hakanaktt/acadrust/blob/main/src/docs/entity_status_matrix.md),
+//! which records tested fixtures and CAD-engine audit results rather than a
+//! guarantee for every possible drawing.
 
 #![allow(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
