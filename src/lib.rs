@@ -204,3 +204,5 @@ mod tests {
         assert_eq!(doc2.version, DxfVersion::AC1015);
     }
 }
+
+mod drawing_variables;
