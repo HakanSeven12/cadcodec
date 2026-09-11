@@ -577,6 +577,9 @@ pub(crate) fn transform_hatch(e: &mut Hatch, transform: &Transform) {
     e.pattern_angle = transformed_p_ocs_dir.y.atan2(transformed_p_ocs_dir.x);
     e.pattern_scale *= scale_x;
 
+    let pattern_origin = transform_ocs_point(e.pattern_origin());
+    e.record_pattern_origin(pattern_origin);
+
     for line in &mut e.pattern.lines {
         let l_dir = Vector2::new(line.angle.cos(), line.angle.sin());
         let l_wcs_dir = old_ocs_to_wcs * Vector3::new(l_dir.x, l_dir.y, 0.0);

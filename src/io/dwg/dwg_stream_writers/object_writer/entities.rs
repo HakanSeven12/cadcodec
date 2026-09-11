@@ -1783,7 +1783,13 @@ impl<'a> DwgObjectWriter<'a> {
             self.write_mpolygon(e);
             return;
         }
-        self.entity_preamble(common::OBJ_HATCH, &e.common);
+        let mut common = e.common.clone();
+        if e.stored_pattern_origin().is_some() {
+            if let Some(app) = self.document.app_ids.get("ACAD") {
+                common.extended_data.raw_dwg_eed.retain(|(handle, _)| *handle != app.handle.value());
+            }
+        }
+        self.entity_preamble(common::OBJ_HATCH, &common);
 
         // Gradient color data (R2004+)
         if self.version.r2004_plus() {
