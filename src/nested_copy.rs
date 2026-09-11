@@ -39,9 +39,33 @@ fn destinations(names: impl Iterator<Item=String>,mode:NestedCopyMode)->HashMap<
     result
 }
 
+// A reserved Global name can still carry edited appearance. Only the implicit
+// appearance is portable without copying a material and its dependency graph.
+fn implicit_material(material: &crate::objects::Material, document: &CadDocument) -> bool {
+    let mut value = material.clone();
+    value.handle = Handle::NULL;
+    value.owner = Handle::NULL;
+    value.reactors.clear();
+    value.name.clear();
+    if let Some(dictionary) = value.xdictionary_handle.take() {
+        let Some(crate::objects::ObjectType::Dictionary(dictionary)) = document.objects.get(&dictionary) else { return false; };
+        if dictionary.xdictionary_handle.is_some() || dictionary.entries.iter().any(|(name, _)| {
+            !["BUMPTILE", "DIFFUSETILE", "OPACITYTILE", "REFLECTIONTILE", "REFRACTIONTILE", "SPECULARTILE"]
+                .iter().any(|allowed| name.eq_ignore_ascii_case(allowed))
+        }) { return false; }
+    }
+    for map in [&mut value.diffuse_map, &mut value.specular_map, &mut value.reflection_map,
+        &mut value.opacity_map, &mut value.bump_map, &mut value.refraction_map, &mut value.normal_map] {
+        if map.source != 0 || !map.file_name.is_empty() || map.texture.is_some() { return false; }
+        // Mapping coordinates and their tiling records have no effect without a texture.
+        map.transform = crate::objects::MaterialMap::default().transform;
+    }
+    value == crate::objects::Material::default()
+}
+
 impl CadDocument {
     /// Normalize only source dictionary entries with default, document-independent semantics.
-    /// Null retains the model's implicit default; writers resolve it to host default handles.
+    /// Null retains the model's implicit default without carrying a source-document handle.
     pub fn normalize_imported_layer_defaults(&self, layer: &mut Layer) {
         let named = |dictionary: Handle, name: &str, handle: Handle| -> bool {
             if handle.is_null() { return false; }
@@ -56,7 +80,11 @@ impl CadDocument {
         if named(self.header.acad_plotstylename_dict_handle, "Normal", layer.plotstyle_handle) {
             layer.plotstyle_handle = Handle::NULL;
         }
-        if named(self.header.acad_material_dict_handle, "ByLayer", layer.material) {
+        if named(self.header.acad_material_dict_handle, "ByLayer", layer.material)
+            || (named(self.header.acad_material_dict_handle, "Global", layer.material)
+                && matches!(self.objects.get(&layer.material),
+                    Some(crate::objects::ObjectType::Material(material)) if implicit_material(material, self)))
+        {
             layer.material = Handle::NULL;
         }
     }
