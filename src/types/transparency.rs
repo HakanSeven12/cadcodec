@@ -26,7 +26,9 @@ impl Transparency {
     }
 
     pub fn from_percent(percent: f64) -> Self {
-        Self::Explicit((percent.clamp(0.0, 1.0) * 255.0) as u8)
+        // Packed CAD alpha stores opacity rounded down. The complementary
+        // transparency amount therefore rounds up to the next byte value.
+        Self::Explicit((percent.clamp(0.0, 1.0) * 255.0).ceil() as u8)
     }
 
     /// Decode a packed DXF or DWG transparency value.
