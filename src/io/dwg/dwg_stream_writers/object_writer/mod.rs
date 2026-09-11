@@ -1954,7 +1954,13 @@ impl<'a> DwgObjectWriter<'a> {
         // Anonymous flag
         self.writer.write_bit(record.flags.anonymous);
         // Has attributes
-        self.writer.write_bit(record.flags.has_attributes);
+        let has_attributes = record.entity_handles.iter().any(|handle| {
+            matches!(
+                self.document.get_entity(*handle),
+                Some(EntityType::AttributeDefinition(_))
+            )
+        });
+        self.writer.write_bit(has_attributes);
         // Is xref
         self.writer.write_bit(record.flags.is_xref);
         // Is xref overlay

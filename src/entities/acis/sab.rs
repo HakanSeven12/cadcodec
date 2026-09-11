@@ -171,12 +171,50 @@ impl SabWriter {
         // Subtype ID (plain integer, not pointer)
         Self::write_integer(buf, record.subtype_id);
 
+        if record.entity_type == "transform"
+            && !record
+                .tokens
+                .iter()
+                .any(|t| matches!(t, SatToken::Sab { .. }))
+        {
+            let tokens: Vec<_> = record
+                .tokens
+                .iter()
+                .filter(|t| !matches!(t, SatToken::Pointer(_)))
+                .collect();
+            for row in tokens[..tokens.len().min(12)].chunks(3) {
+                if row.len() == 3 {
+                    Self::write_direction(
+                        buf,
+                        row[0].as_float().unwrap_or(0.0),
+                        row[1].as_float().unwrap_or(0.0),
+                        row[2].as_float().unwrap_or(0.0),
+                    );
+                }
+            }
+            if let Some(scale) = tokens.get(12) {
+                Self::write_double(buf, scale.as_float().unwrap_or(1.0));
+            }
+            for flag in tokens.iter().skip(13) {
+                Self::write_token(buf, flag, false);
+            }
+            buf.push(tags::END_OF_RECORD);
+            return;
+        }
+
         // Remaining tokens — with entity-type-aware coordinate grouping.
         // In SAT text, coordinates are individual Float tokens, but SAB uses
         // composite position(0x13)/direction(0x14) tags for coordinate triplets.
         let layout = CoordLayout::for_entity(&record.entity_type);
         let ints_as_doubles = Self::integers_are_doubles(&record.entity_type);
-        Self::write_tokens_with_coord_grouping(buf, &record.tokens, &layout, ints_as_doubles);
+        let contextual;
+        let tokens = if base_entity_type(&record.entity_type) == "face" {
+            contextual = Self::encode_face_boolean_roles(&record.tokens);
+            &contextual
+        } else {
+            &record.tokens
+        };
+        Self::write_tokens_with_coord_grouping(buf, tokens, &layout, ints_as_doubles);
 
         // End of record
         buf.push(tags::END_OF_RECORD);
@@ -361,8 +399,10 @@ impl SabWriter {
     /// Returns `Some(true)` for forward/positive, `Some(false)` for reversed/negative.
     fn string_to_boolean(s: &str) -> Option<bool> {
         match s {
-            "forward_v" | "I" | "forward" | "single" | "in" => Some(true),
-            "reverse_v" | "reversed_v" | "reversed" | "double" | "out" | "F" => Some(false),
+            "forward_v" | "I" | "forward" | "single" | "in" | "no_rotate" | "no_reflect"
+            | "no_shear" => Some(true),
+            "reverse_v" | "reversed_v" | "reversed" | "double" | "out" | "F" | "rotate"
+            | "reflect" | "shear" => Some(false),
             _ => None,
         }
     }
@@ -383,6 +423,10 @@ impl SabWriter {
     }
 
     fn write_enum_token(buf: &mut Vec<u8>, name: &str) {
+        if let Some(value) = Self::string_to_boolean(name) {
+            buf.push(if value { tags::TRUE } else { tags::FALSE });
+            return;
+        }
         match name {
             "full" | "open" | "none" | "closed" | "periodic" => {
                 let value: i32 = match name {
@@ -393,11 +437,43 @@ impl SabWriter {
                 buf.push(tags::ENUM);
                 buf.extend_from_slice(&value.to_le_bytes());
             }
-            "forward" | "single" | "in" => buf.push(tags::TRUE),
-            "reversed" | "double" | "out" => buf.push(tags::FALSE),
             // "unknown" and other enum values → string
             _ => Self::write_string(buf, name),
         }
+    }
+
+    fn encode_face_boolean_roles(tokens: &[SatToken]) -> Vec<SatToken> {
+        let mut result = tokens.to_vec();
+        let semantic: Vec<_> = result
+            .iter()
+            .enumerate()
+            .filter(|(_, token)| {
+                matches!(token, SatToken::True | SatToken::False)
+                    || token.as_ident().is_some_and(|name| {
+                        matches!(
+                            name,
+                            "forward" | "reversed" | "single" | "double" | "in" | "out"
+                        )
+                    })
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let start = semantic.len().saturating_sub(3);
+        for (role, &index) in semantic[start..].iter().enumerate() {
+            let raw = match &result[index] {
+                SatToken::True => true,
+                SatToken::False => false,
+                token => match (role, token.as_ident()) {
+                    (0, Some("forward")) | (1, Some("single")) => true,
+                    (0, Some("reversed")) | (1, Some("double")) => false,
+                    (2, Some("out")) => true,
+                    (2, Some("in")) => false,
+                    _ => continue,
+                },
+            };
+            result[index] = if raw { SatToken::True } else { SatToken::False };
+        }
+        result
     }
 
     fn write_entity_type(buf: &mut Vec<u8>, name: &str) {
@@ -937,23 +1013,77 @@ impl SabReader {
 fn convert_sab_booleans(entity_type: &str, tokens: &mut Vec<SatToken>) {
     match base_entity_type(entity_type) {
         "face" => {
-            // face: ... sense side #
-            // After v700 normalization: tok[0]=sentinel, tok[1..N-2]=ptrs,
-            // tok[N-2]=sense, tok[N-1]=side
-            let len = tokens.len();
-            if len >= 2 {
-                // sense: True=forward, False=reversed
-                if matches!(tokens[len - 2], SatToken::True | SatToken::False) {
-                    let is_forward = matches!(tokens[len - 2], SatToken::True);
-                    tokens[len - 2] =
-                        SatToken::Enum(if is_forward { "forward" } else { "reversed" }.to_string());
-                }
-                // side: True=single, False=double
-                if matches!(tokens[len - 1], SatToken::True | SatToken::False) {
-                    let is_single = matches!(tokens[len - 1], SatToken::True);
-                    tokens[len - 1] =
-                        SatToken::Enum(if is_single { "single" } else { "double" }.to_string());
-                }
+            // Modern faces end in sense, sidedness, and containment. The
+            // containment bit is inverted from the generic in/out mapping.
+            let bools: Vec<_> = tokens
+                .iter()
+                .enumerate()
+                .filter(|(_, token)| matches!(token, SatToken::True | SatToken::False))
+                .map(|(index, _)| index)
+                .collect();
+            let start = bools.len().saturating_sub(3);
+            for (role, &index) in bools[start..].iter().enumerate() {
+                let value = matches!(tokens[index], SatToken::True);
+                let name = match role {
+                    0 => {
+                        if value {
+                            "forward"
+                        } else {
+                            "reversed"
+                        }
+                    }
+                    1 => {
+                        if value {
+                            "single"
+                        } else {
+                            "double"
+                        }
+                    }
+                    _ => {
+                        if value {
+                            "out"
+                        } else {
+                            "in"
+                        }
+                    }
+                };
+                tokens[index] = SatToken::Enum(name.to_string());
+            }
+        }
+        "transform" => {
+            let bools: Vec<_> = tokens
+                .iter()
+                .enumerate()
+                .filter(|(_, token)| matches!(token, SatToken::True | SatToken::False))
+                .map(|(index, _)| index)
+                .collect();
+            let start = bools.len().saturating_sub(3);
+            for (role, &index) in bools[start..].iter().enumerate() {
+                let value = matches!(tokens[index], SatToken::True);
+                let name = match role {
+                    0 => {
+                        if value {
+                            "no_rotate"
+                        } else {
+                            "rotate"
+                        }
+                    }
+                    1 => {
+                        if value {
+                            "no_reflect"
+                        } else {
+                            "reflect"
+                        }
+                    }
+                    _ => {
+                        if value {
+                            "no_shear"
+                        } else {
+                            "shear"
+                        }
+                    }
+                };
+                tokens[index] = SatToken::Ident(name.to_string());
             }
         }
         "coedge" => {
@@ -1250,6 +1380,34 @@ mod tests {
         let last_two: Vec<_> = face2.tokens.iter().rev().take(2).collect();
         assert_eq!(last_two[0], &SatToken::Enum("double".to_string()));
         assert_eq!(last_two[1], &SatToken::Enum("reversed".to_string()));
+    }
+
+    #[test]
+    fn modern_face_and_transform_boolean_roles_roundtrip() {
+        let sat = "21200 2 1 26\n0  0  0 \n1 0.000001 0.0000000001\n\
+            face $-1 -1 $-1 $-1 $-1 $-1 forward double out #\n\
+            transform $-1 -1 1 0 0 0 1 0 0 0 1 5 6 7 1 no_rotate no_reflect no_shear #\n\
+            End-of-ACIS-data\n";
+        let document = SatDocument::parse(sat).unwrap();
+        let roundtrip = SabReader::read(&SabWriter::write(&document)).unwrap();
+        assert_eq!(roundtrip.records[0].tokens, document.records[0].tokens);
+        assert_eq!(roundtrip.placement(), document.placement());
+        let transform = roundtrip
+            .records
+            .iter()
+            .find(|record| record.entity_type == "transform")
+            .unwrap();
+        assert_eq!(
+            transform.tokens[transform.tokens.len() - 3..]
+                .iter()
+                .filter_map(SatToken::as_ident)
+                .collect::<Vec<_>>(),
+            ["no_rotate", "no_reflect", "no_shear"]
+        );
+        let text = roundtrip.to_sat_string();
+        assert!(text.starts_with("21200 2 1 1\n"));
+        assert!(text.contains(" forward double out #\n"));
+        assert!(text.contains(" no_rotate no_reflect no_shear #\n"));
     }
 
     #[test]

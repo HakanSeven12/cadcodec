@@ -354,6 +354,12 @@ impl SatParser {
         }
 
         // Normalize v400 (pre-7.0) records to v700 token layout.
+        if version.major >= 7
+            && entity_type == "transform"
+            && !matches!(tokens.first(), Some(SatToken::Pointer(_)))
+        {
+            tokens.insert(0, SatToken::Pointer(SatPointer::NULL));
+        }
         //
         // ACIS 7.0+ added an extra sentinel `$-1` pointer to most entity
         // records (right after the attribute/id fields).  Without this

@@ -78,20 +78,41 @@ impl DwgWriter {
         // the controls, entries and handle map all agree (issue #51/#64
         // class of bug).
         let mut owned;
-        let document: &CadDocument =
-            if document.has_null_table_entries() || document.version < DxfVersion::AC1027 {
-                owned = document.clone();
-                if owned.has_null_table_entries() {
-                    owned.assign_table_entry_handles();
+        let document: &CadDocument = if document.has_null_table_entries()
+            || document.version < DxfVersion::AC1027
+        {
+            owned = document.clone();
+            if owned.has_null_table_entries() {
+                owned.assign_table_entry_handles();
+            }
+            if owned.version < DxfVersion::AC1027 {
+                let required: Vec<_> = owned
+                    .entities()
+                    .filter_map(|entity| {
+                        let name = match entity {
+                            crate::entities::EntityType::Surface(surface) => {
+                                surface.kind.dxf_name()
+                            }
+                            crate::entities::EntityType::Extended(entity) => entity.class_name(),
+                            crate::entities::EntityType::Underlay(entity) => entity.entity_name(),
+                            _ => entity.as_entity().entity_type(),
+                        };
+                        owned.classes.get_by_name(name).cloned()
+                    })
+                    .collect();
+                owned.classes.retain_legacy_dwg_classes();
+                for mut class in required {
+                    if !owned.classes.contains(&class.dxf_name) {
+                        class.class_number = 0;
+                        owned.classes.add_or_update(class);
+                    }
                 }
-                if owned.version < DxfVersion::AC1027 {
-                    owned.classes.retain_legacy_dwg_classes();
-                    prepare_legacy_document(&mut owned);
-                }
-                &owned
-            } else {
-                document
-            };
+                prepare_legacy_document(&mut owned);
+            }
+            &owned
+        } else {
+            document
+        };
 
         let result = if uses_ac21_format(version) {
             write_ac21(&mut output, document, version)
@@ -146,40 +167,131 @@ impl DwgWriter {
 /// Repair relationships that are stored in both directions in a DWG database.
 /// The caller's document stays unchanged; corrections exist only in the output
 /// copy.
-fn prepare_database_references(document: &mut std::borrow::Cow<'_, CadDocument>) {
+pub(crate) fn prepare_database_references(document: &mut std::borrow::Cow<'_, CadDocument>) {
     use crate::entities::EntityType;
     use crate::objects::ObjectType;
     use std::collections::{HashMap, HashSet};
 
     let mut missing_hatch_reactors = Vec::new();
     let mut invalid_hatches = Vec::new();
+    let mut table_repairs = Vec::new();
+    let mut table_style_repairs = Vec::new();
+    let mut mline_repairs = Vec::new();
+    let mut underlay_reactors = Vec::new();
     for entity in document.entities() {
-        let EntityType::Hatch(hatch) = entity else {
-            continue;
-        };
-        if !hatch.is_associative {
-            continue;
-        }
-        let boundaries: Vec<Handle> = hatch
-            .paths
-            .iter()
-            .flat_map(|path| path.boundary_handles.iter().copied())
-            .collect();
-        if boundaries.is_empty()
-            || boundaries
-                .iter()
-                .any(|handle| document.get_entity(*handle).is_none())
-        {
-            invalid_hatches.push(hatch.common.handle);
-            continue;
-        }
-        for boundary_handle in boundaries {
-            if document
-                .get_entity(boundary_handle)
-                .is_some_and(|boundary| !boundary.common().reactors.contains(&hatch.common.handle))
-            {
-                missing_hatch_reactors.push((boundary_handle, hatch.common.handle));
+        match entity {
+            EntityType::Hatch(hatch) => {
+                if !hatch.is_associative {
+                    continue;
+                }
+                let boundaries: Vec<Handle> = hatch
+                    .paths
+                    .iter()
+                    .flat_map(|path| path.boundary_handles.iter().copied())
+                    .collect();
+                if boundaries.is_empty()
+                    || boundaries
+                        .iter()
+                        .any(|handle| document.get_entity(*handle).is_none())
+                {
+                    invalid_hatches.push(hatch.common.handle);
+                    continue;
+                }
+                for boundary_handle in boundaries {
+                    if document
+                        .get_entity(boundary_handle)
+                        .is_some_and(|boundary| {
+                            !boundary.common().reactors.contains(&hatch.common.handle)
+                        })
+                    {
+                        missing_hatch_reactors.push((boundary_handle, hatch.common.handle));
+                    }
+                }
             }
+            EntityType::Table(table) => {
+                if table
+                    .table_style_handle
+                    .is_none_or(|handle| handle.is_null())
+                {
+                    let style = document
+                        .objects
+                        .get(&document.header.named_objects_dict_handle)
+                        .and_then(|object| match object {
+                            ObjectType::Dictionary(root) => root.get("ACAD_TABLESTYLE"),
+                            _ => None,
+                        })
+                        .and_then(|handle| document.objects.get(&handle))
+                        .and_then(|object| match object {
+                            ObjectType::Dictionary(styles) => styles
+                                .get(&document.header.current_table_style_name)
+                                .or_else(|| styles.get("Standard")),
+                            _ => None,
+                        })
+                        .filter(|handle| {
+                            matches!(
+                                document.objects.get(handle),
+                                Some(ObjectType::TableStyle(_))
+                            )
+                        });
+                    if let Some(style) = style {
+                        table_style_repairs.push((table.common.handle, style));
+                    }
+                }
+                let resolved = table
+                    .block_record_handle
+                    .filter(|handle| !handle.is_null())
+                    .and_then(|handle| {
+                        document
+                            .block_records
+                            .iter()
+                            .find(|record| record.handle == handle)
+                    })
+                    .or_else(|| document.block_records.get(&table.block_name));
+                if resolved.is_none_or(|record| {
+                    table.block_record_handle != Some(record.handle)
+                        || table.block_name != record.name
+                        || record.handle.is_null()
+                        || record.block_entity_handle.is_null()
+                        || record.block_end_handle.is_null()
+                }) {
+                    table_repairs.push((
+                        table.common.handle,
+                        resolved
+                            .map(|record| record.name.clone())
+                            .unwrap_or_else(|| table.block_name.clone()),
+                    ));
+                }
+            }
+            EntityType::MLine(mline)
+                if mline.style_handle.is_none_or(|handle| handle.is_null()) =>
+            {
+                let style = document
+                    .objects
+                    .iter()
+                    .find_map(|(handle, object)| match object {
+                        ObjectType::MLineStyle(style)
+                            if style.name.eq_ignore_ascii_case(&mline.style_name) =>
+                        {
+                            Some(*handle)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(document.header.current_multiline_style_handle);
+                if !style.is_null() {
+                    mline_repairs.push((mline.common.handle, style));
+                }
+            }
+            EntityType::Underlay(underlay) => {
+                if let Some(ObjectType::UnderlayDefinition(definition)) =
+                    document.objects.get(&underlay.definition_handle)
+                {
+                    if !definition.reactors.contains(&underlay.common.handle) {
+                        underlay_reactors
+                            .push((underlay.definition_handle, underlay.common.handle));
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -223,12 +335,87 @@ fn prepare_database_references(document: &mut std::borrow::Cow<'_, CadDocument>)
 
     if missing_hatch_reactors.is_empty()
         && invalid_hatches.is_empty()
+        && table_repairs.is_empty()
+        && table_style_repairs.is_empty()
+        && mline_repairs.is_empty()
+        && underlay_reactors.is_empty()
         && !layout_dictionary_needs_repair
     {
         return;
     }
 
     let output = document.to_mut();
+    for (handle, style) in table_style_repairs {
+        if let Some(EntityType::Table(table)) = output.get_entity_mut(handle) {
+            table.table_style_handle = Some(style);
+        }
+    }
+    for (definition, reactor) in underlay_reactors {
+        if let Some(ObjectType::UnderlayDefinition(definition)) =
+            output.objects.get_mut(&definition)
+        {
+            if !definition.reactors.contains(&reactor) {
+                definition.reactors.push(reactor);
+            }
+        }
+    }
+    for (handle, style) in mline_repairs {
+        if let Some(EntityType::MLine(mline)) = output.get_entity_mut(handle) {
+            mline.style_handle = Some(style);
+        }
+    }
+    if !table_repairs.is_empty() {
+        output.synchronize_handle_allocator();
+        for (table_handle, requested_name) in table_repairs {
+            let existing = if !requested_name.is_empty() {
+                output.block_records.get(&requested_name).cloned()
+            } else {
+                None
+            };
+            let (block_record_handle, block_name) = if let Some(mut record) = existing {
+                if record.name.starts_with("*T") {
+                    record.flags.anonymous = true;
+                }
+                if record.handle.is_null() {
+                    record.handle = output.allocate_handle();
+                }
+                if record.block_entity_handle.is_null() {
+                    record.block_entity_handle = output.allocate_handle();
+                }
+                if record.block_end_handle.is_null() {
+                    record.block_end_handle = output.allocate_handle();
+                }
+                let result = (record.handle, record.name.clone());
+                output.block_records.add_or_replace(record);
+                result
+            } else {
+                let name = if requested_name.is_empty() {
+                    let mut index = 1;
+                    while output.block_records.get(&format!("*T{index}")).is_some() {
+                        index += 1;
+                    }
+                    format!("*T{index}")
+                } else {
+                    requested_name
+                };
+                let mut record = crate::tables::BlockRecord::new(&name);
+                record.handle = output.allocate_handle();
+                record.block_entity_handle = output.allocate_handle();
+                record.block_end_handle = output.allocate_handle();
+                record.flags.anonymous = name.starts_with('*');
+                let handle = record.handle;
+                output
+                    .block_records
+                    .add(record)
+                    .expect("new table block name is unique");
+                (handle, name)
+            };
+            if let Some(EntityType::Table(table)) = output.get_entity_mut(table_handle) {
+                table.block_record_handle = Some(block_record_handle);
+                table.block_name = block_name;
+            }
+        }
+    }
     for (boundary_handle, hatch_handle) in missing_hatch_reactors {
         if let Some(boundary) = output.get_entity_mut(boundary_handle) {
             if !boundary.common().reactors.contains(&hatch_handle) {
@@ -304,19 +491,51 @@ fn prepare_surface_classes(document: &mut std::borrow::Cow<'_, CadDocument>) {
     }
 }
 
-/// Remove default objects that use post-R2000 binary layouts.
-///
-/// The modern document initializer adds `ACAD_MLEADERSTYLE` and
-/// `ACAD_TABLESTYLE`. Their object encodings are not valid in AC15 streams,
-/// so their root-dictionary entries and owned objects must be removed together.
+/// Remove style dictionaries only before the versions introducing their
+/// objects: TABLESTYLE in R2004 and MLEADERSTYLE in R2007.
 fn prepare_legacy_document(document: &mut CadDocument) {
     use crate::objects::ObjectType;
+    if document.version <= DxfVersion::AC1014 {
+        let missing: Vec<_> = document
+            .entities()
+            .filter_map(|entity| match entity {
+                crate::entities::EntityType::Viewport(viewport)
+                    if !document
+                        .vx_table
+                        .iter()
+                        .any(|record| record.viewport == viewport.common.handle) =>
+                {
+                    Some((viewport.common.handle, viewport.status.is_on))
+                }
+                _ => None,
+            })
+            .collect();
+        if !missing.is_empty() && document.vx_table.is_empty() {
+            let mut reserved = crate::tables::VxTableRecord::new("");
+            reserved.handle = document.allocate_handle();
+            reserved.is_xref_reference = true;
+            document.vx_table.add_allow_duplicate(reserved);
+        }
+        for (viewport, is_on) in missing {
+            let first = document.header.current_vx_handle.is_null();
+            let mut record = crate::tables::VxTableRecord::new(if first { "1" } else { "" });
+            record.handle = document.allocate_handle();
+            record.viewport = viewport;
+            record.is_on = is_on;
+            record.is_xref_reference = true;
+            if first {
+                document.header.current_vx_handle = record.handle;
+            }
+            document.vx_table.add_allow_duplicate(record);
+        }
+    }
 
     let root_handle = document.header.named_objects_dict_handle;
     let mut obsolete = Vec::new();
     if let Some(ObjectType::Dictionary(root)) = document.objects.get_mut(&root_handle) {
         root.entries.retain(|(name, handle)| {
-            let remove = matches!(name.as_str(), "ACAD_MLEADERSTYLE" | "ACAD_TABLESTYLE");
+            let remove = (name == "ACAD_MLEADERSTYLE" && document.version < DxfVersion::AC1021)
+                || (name == "ACAD_TABLESTYLE" && document.version < DxfVersion::AC1018);
             if remove {
                 obsolete.push(*handle);
             }
@@ -739,7 +958,8 @@ fn write_ac15<W: Write + Seek>(
 ) -> Result<()> {
     let mut fhw = DwgFileHeaderWriterAC15::new(version);
     // New documents do not carry source maintenance metadata. AC15 files use
-    // the established R2000-era default rather than zero.
+    // the established R2000-era default rather than zero, which strict
+    // readers reject in the file header.
     fhw.set_maintenance_version(if document.maintenance_version == 0 {
         15
     } else {
@@ -1086,12 +1306,9 @@ fn write_ac21_impl<W: Write + Seek>(
     fhw.add_section(output, section_names::SUMMARY_INFO, &summary_data)?;
 
     // Preview
-    // AC21 `encoding=1` sections store raw, un-RS-encoded, 32-byte-aligned data,
-    // so the preview container lands contiguously at the current file position
-    // (full 1024-byte pages leave no gaps) and its seeker in the header points
-    // straight at it. That position is the `base` the container's absolute image
-    // `start` offsets are relative to; compute it before building (the per-page
-    // checksum covers the final bytes).
+    // AC21 encoding=1 stores contiguous data followed by RS parity. The preview
+    // stays in one page, so its image offsets address the data at this position.
+    // Compute them before encoding, since the page CRC covers the final bytes.
     let preview_base = output.seek(std::io::SeekFrom::Current(0))? as u64;
     let preview_data =
         crate::io::dwg::preview::build_preview(document.preview.as_ref(), preview_base);
@@ -1434,13 +1651,12 @@ fn build_acds_jard_header(segidx_offset: u32, file_size: u32) -> Vec<u8> {
 
 /// Build `_data_` segment id=2 containing one SAB record per ACIS entity.
 ///
-/// Each record is a 36-byte metadata block (record index, entity handle, blob
-/// size) followed by the raw SAB blob; records are concatenated in entity
-/// order and the whole segment is padded to a 16-byte boundary.
+/// A contiguous 20-byte record table precedes the length-prefixed SAB blobs.
+/// Offsets in the table are relative to the aligned blob area, not the segment.
 fn build_acds_data2_segment(entries: &[(Handle, Vec<u8>)]) -> Vec<u8> {
-    // Raw size = 48 (segment header) + Σ (36 metadata + blob) per record.
-    let records_size: usize = entries.iter().map(|(_, sab)| 36 + sab.len()).sum();
-    let raw_size = 48 + records_size;
+    let table_size = align16(entries.len() * 20);
+    let records_size: usize = entries.iter().map(|(_, sab)| 4 + sab.len()).sum();
+    let raw_size = 48 + table_size + records_size;
     let seg_size = align16(raw_size);
     let padding = seg_size - raw_size;
 
@@ -1454,19 +1670,21 @@ fn build_acds_data2_segment(entries: &[(Handle, Vec<u8>)]) -> Vec<u8> {
     seg.extend_from_slice(&1u32.to_le_bytes()); // ds_version (always 1, NOT the record count)
     seg.extend_from_slice(&0u32.to_le_bytes()); // unknown_3
     seg.extend_from_slice(&0u32.to_le_bytes()); // meta field1 = 0
-    seg.extend_from_slice(&5u32.to_le_bytes()); // meta field2 = 5 (num columns)
+    seg.extend_from_slice(&((48 + table_size) as u32 / 16).to_le_bytes()); // objdata_algn_offset
     seg.extend_from_slice(&[0x55; 8]); // fill "UUUUUUUU"
 
-    for (i, (handle, sab_data)) in entries.iter().enumerate() {
-        let handle_val = handle.value() as u32;
-        // Record metadata (36 bytes)
+    let mut blob_offset = 0u32;
+    for (handle, sab_data) in entries {
         seg.extend_from_slice(&0x14u32.to_le_bytes()); // col0 = 20
-        seg.extend_from_slice(&((i + 1) as u32).to_le_bytes()); // col1 = record index (1-based)
-        seg.extend_from_slice(&(handle_val as u64).to_le_bytes()); // col2 = entity handle
-        seg.extend_from_slice(&0u32.to_le_bytes()); // col3 = 0
-        seg.extend_from_slice(&[0x62; 12]); // col4 fill "bbbbbbbbbbbb"
+        seg.extend_from_slice(&1u32.to_le_bytes()); // schema revision, not record index
+        seg.extend_from_slice(&handle.value().to_le_bytes());
+        seg.extend_from_slice(&blob_offset.to_le_bytes());
+        blob_offset += 4 + sab_data.len() as u32;
+    }
+    seg.resize(48 + table_size, 0x62);
+    for (_, sab_data) in entries {
         seg.extend_from_slice(&(sab_data.len() as u32).to_le_bytes()); // SAB blob size
-        seg.extend_from_slice(sab_data); // SAB binary data
+        seg.extend_from_slice(sab_data);
     }
 
     // Padding with 0x70 to 16-byte alignment
@@ -1791,6 +2009,46 @@ mod tests {
     use crate::types::{DxfVersion, Handle};
 
     #[test]
+    fn acds_record_table_indexes_each_length_prefixed_blob() {
+        for count in [1, 2, 7, 8, 16] {
+            let entries: Vec<_> = (0..count)
+                .map(|index| {
+                    (
+                        Handle::new(0x100 + index as u64),
+                        vec![index as u8; 31 + index * 19],
+                    )
+                })
+                .collect();
+            let data = build_acds_data2_segment(&entries);
+            let index = build_acds_datidx(count);
+            let read_u32 = |bytes: &[u8], offset| {
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize
+            };
+            let blob_base = read_u32(&data, 36) * 16;
+            assert_eq!(blob_base, 48 + align16(count * 20));
+            let mut expected_offset = 0;
+            for (i, (handle, blob)) in entries.iter().enumerate() {
+                let record = 48 + read_u32(&index, 60 + i * 12);
+                assert_eq!(record, 48 + i * 20);
+                assert_eq!(read_u32(&data, record), 20);
+                assert_eq!(read_u32(&data, record + 4), 1);
+                assert_eq!(
+                    u64::from_le_bytes(data[record + 8..record + 16].try_into().unwrap()),
+                    handle.value()
+                );
+                let offset = read_u32(&data, record + 16);
+                assert_eq!(offset, expected_offset);
+                assert_eq!(read_u32(&data, blob_base + offset), blob.len());
+                assert_eq!(
+                    &data[blob_base + offset + 4..blob_base + offset + 4 + blob.len()],
+                    blob
+                );
+                expected_offset += 4 + blob.len();
+            }
+        }
+    }
+
+    #[test]
     fn test_validate_version_r2007_ok() {
         assert!(validate_version(DxfVersion::AC1021).is_ok());
     }
@@ -1821,11 +2079,11 @@ mod tests {
         let document = CadDocument::with_version(DxfVersion::AC1032);
         let action_param = document
             .classes
-            .get_by_name("ACDBASSOCACTIONPARAM")
+            .get_by_name("ACDBASSOCCOMPOUNDACTIONPARAM")
             .expect("action parameter class");
         let point_ref = document
             .classes
-            .get_by_name("ACDBASSOCPOINTREFACTIONPARAM")
+            .get_by_name("ACDBASSOCOSNAPPOINTREFACTIONPARAM")
             .expect("point reference class");
         assert!(!action_param.was_zombie);
         assert!(!point_ref.was_zombie);
@@ -1841,8 +2099,8 @@ mod tests {
                 .expect("class entry")
         };
 
-        assert!(by_name("ACDBASSOCACTIONPARAM").was_zombie);
-        assert!(by_name("ACDBASSOCPOINTREFACTIONPARAM").was_zombie);
+        assert!(by_name("ACDBASSOCCOMPOUNDACTIONPARAM").was_zombie);
+        assert!(by_name("ACDBASSOCOSNAPPOINTREFACTIONPARAM").was_zombie);
         assert!(by_name("ACDBDICTIONARYWDFLT").instance_count > 0);
     }
 
@@ -2088,7 +2346,10 @@ mod tests {
         let mut reader = crate::io::dwg::DwgReader::from_stream(std::io::Cursor::new(bytes));
         let decoded = reader.read().unwrap();
 
-        assert_eq!(decoded.classes.len(), 38);
+        // Mirrors the compact profile in validated R2000 fixtures.
+        let mut expected = doc.classes.clone();
+        expected.retain_legacy_dwg_classes();
+        assert_eq!(decoded.classes.len(), expected.len());
         assert_eq!(decoded.objects.len(), 13);
     }
 
@@ -2250,7 +2511,10 @@ mod tests {
 
         let prepared = prepare_header(&doc, &[], &None);
 
-        assert_eq!(prepared.current_multiline_style_handle, dictionary_standard);
+        assert_eq!(
+            prepared.current_multiline_style_handle, dictionary_standard,
+            "the ACAD_MLINESTYLE dictionary entry should be authoritative"
+        );
     }
 
     #[test]
@@ -2309,20 +2573,7 @@ mod tests {
     // ── File-level DWG roundtrip tests for 3DSOLID / REGION / BODY ──
 
     fn make_sat_sample() -> &'static str {
-        "700 0 1 0\n\
-         @7 unknown 12 ACIS 7.0 NT 24 Wed Jan 01 00:00:00 2025 1.0 9.9999999999999995e-007 1e-010\n\
-         body $-1 $1 $-1 $-1 #\n\
-         lump $-1 $-1 $2 $0 #\n\
-         shell $-1 $-1 $-1 $3 $-1 $1 #\n\
-         face $-1 $-1 $-1 $4 $2 $5 forward single #\n\
-         loop $-1 $-1 $6 $3 #\n\
-         plane-surface $-1 0 0 5 0 0 1 1 0 0 forward_v I I I I #\n\
-         coedge $-1 $6 $6 $-1 $7 forward $4 $-1 #\n\
-         edge $-1 $8 0 $8 1 $6 $9 forward #\n\
-         vertex $-1 $7 $10 #\n\
-         straight-curve $-1 -5 -5 5 1 0 0 I I #\n\
-         point $-1 -5 -5 5 #\n\
-         End-of-ACIS-data\n"
+        include_str!("../../../examples/entity_atlas_assets/region.sat")
     }
 
     /// Write a Solid3D with SAT data to DWG R2000, read back, verify SAT preserved.
@@ -2394,8 +2645,8 @@ mod tests {
             })
             .collect();
         assert_eq!(solids.len(), 1, "should have exactly one Solid3D");
-        assert!(!solids[0].acis_data.is_binary, "R2004 should use SAT text");
-        assert!(solids[0].acis_data.sat_data.contains("body"));
+        assert!(solids[0].acis_data.is_binary, "R2004 stores version-2 SAB");
+        assert_eq!(solids[0].acis_data.parse().unwrap().bodies().len(), 1);
     }
 
     /// Write a Solid3D with SAT data to DWG R2007 (SAB binary format), read back.
@@ -2491,7 +2742,7 @@ mod tests {
             })
             .collect();
         assert_eq!(bodies.len(), 1, "should have exactly one Body");
-        assert!(bodies[0].acis_data.sat_data.contains("body"));
+        assert_eq!(bodies[0].acis_data.parse().unwrap().bodies().len(), 1);
     }
 
     /// Write multiple ACIS entities to a single DWG at R2010, read back all three.
@@ -2532,9 +2783,11 @@ mod tests {
         // Verify data integrity on each
         for e in doc2.entities() {
             match e {
-                EntityType::Solid3D(s) => assert!(s.acis_data.sat_data.contains("body")),
-                EntityType::Region(r) => assert!(r.acis_data.sat_data.contains("body")),
-                EntityType::Body(b) => assert!(b.acis_data.sat_data.contains("body")),
+                EntityType::Solid3D(s) => {
+                    assert_eq!(s.acis_data.parse().unwrap().bodies().len(), 1)
+                }
+                EntityType::Region(r) => assert_eq!(r.acis_data.parse().unwrap().bodies().len(), 1),
+                EntityType::Body(b) => assert_eq!(b.acis_data.parse().unwrap().bodies().len(), 1),
                 _ => {}
             }
         }

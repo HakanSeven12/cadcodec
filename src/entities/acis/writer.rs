@@ -12,9 +12,12 @@ impl SatWriter {
     pub fn write(doc: &SatDocument) -> String {
         let mut output = String::new();
 
-        // Header line 1: version, num_records (always 0 for v7+), num_bodies, has_history
-        let num_records_out = if doc.header.version.has_explicit_indices() {
-            0 // ACIS 7.0+ always writes 0 for record count
+        // Classic SAT 7.0 uses zero here. Modern SAT exports carry the actual
+        // record count; some readers treat zero as empty data.
+        let num_records_out = if doc.header.version.major == 7 {
+            0
+        } else if doc.header.version.major > 7 {
+            doc.records.len()
         } else {
             doc.header.num_records
         };
@@ -23,33 +26,21 @@ impl SatWriter {
             doc.header.version.sat_version_number(),
             num_records_out,
             doc.header.num_bodies,
-            if doc.header.has_history { 1 } else { 0 }
+            u32::from(doc.header.has_history)
         ));
 
         // Header line 2: product info
-        if doc.header.version.has_counted_strings() {
-            // ACIS 7.0+ format with @-prefixed counted strings
-            output.push_str(&format!(
-                "@{} {} @{} {} @{} {}\n",
-                doc.header.product_id.len(),
-                doc.header.product_id,
-                doc.header.product_version.len(),
-                doc.header.product_version,
-                doc.header.date.len(),
-                doc.header.date,
-            ));
-        } else {
-            // Legacy format with length-prefixed strings
-            output.push_str(&format!(
-                "{} {} {} {} {} {}\n",
-                doc.header.product_id.len(),
-                doc.header.product_id,
-                doc.header.product_version.len(),
-                doc.header.product_version,
-                doc.header.date.len(),
-                doc.header.date,
-            ));
-        }
+        // Header string lengths have no '@', even in SAT 7.0. Only strings
+        // inside entity records use the @-prefixed representation.
+        output.push_str(&format!(
+            "{} {} {} {} {} {}\n",
+            doc.header.product_id.len(),
+            doc.header.product_id,
+            doc.header.product_version.len(),
+            doc.header.product_version,
+            doc.header.date.len(),
+            doc.header.date,
+        ));
 
         // Header line 3: tolerances
         if let Some(resfit) = doc.header.resfit_tolerance {
@@ -80,6 +71,23 @@ impl SatWriter {
 
     /// Write a single entity record.
     fn write_record(output: &mut String, record: &SatRecord, version: &SatVersion) {
+        // Transform has attribute/id fields but no pattern pointer.
+        if record.entity_type == "transform" {
+            output.push_str(&format!("transform {}", record.attribute));
+            if version.major >= 7 {
+                output.push_str(&format!(" {}", record.subtype_id));
+            }
+            for token in record
+                .tokens
+                .iter()
+                .skip_while(|token| matches!(token, SatToken::Pointer(_)))
+            {
+                output.push(' ');
+                Self::write_token(output, token, version);
+            }
+            output.push_str(" #\n");
+            return;
+        }
         // Entity type (no explicit index prefix — ACIS 7.0+ doesn't use them in DXF)
         output.push_str(&record.entity_type);
         output.push(' ');
@@ -113,6 +121,14 @@ impl SatWriter {
             if Some(i) == skip_index {
                 continue; // skip the synthetic sentinel
             }
+            // SAT 4.0 edges have no parameter pair or trailing tolerance
+            // descriptor: $start $end $coedge $curve sense.
+            if version.major < 7
+                && base_entity_type(&record.entity_type) == "edge"
+                && (i == 2 || i == 4 || i >= 8)
+            {
+                continue;
+            }
             output.push(' ');
             Self::write_token(output, token, version);
         }
@@ -141,6 +157,8 @@ impl SatWriter {
                 output.push(' ');
                 output.push_str(&format_float(*z));
             }
+            SatToken::True => output.push('T'),
+            SatToken::False => output.push('F'),
             _ => {
                 output.push_str(&format!("{}", token));
             }
@@ -241,6 +259,9 @@ impl SatDocument {
 
         // Scale
         record.tokens.push(SatToken::Float(scale));
+        record
+            .tokens
+            .extend(transform_flags(rotation, scale).map(|flag| SatToken::Ident(flag.into())));
 
         self.records.push(record);
         self.header.num_records = self.records.len();
@@ -650,20 +671,45 @@ impl SatDocument {
         let id = |value: &str| SatToken::Ident(value.to_string());
         let support_tokens = match support.entity_type.as_str() {
             "spline-surface" => {
-                let start = support.tokens.iter().position(|token| token.as_ident() == Some("{"))
+                let start = support
+                    .tokens
+                    .iter()
+                    .position(|token| token.as_ident() == Some("{"))
                     .expect("spline support subtype");
-                let end = support.tokens.iter().rposition(|token| token.as_ident() == Some("}"))
+                let end = support
+                    .tokens
+                    .iter()
+                    .rposition(|token| token.as_ident() == Some("}"))
                     .expect("spline support subtype end");
-                let subtype_index = if support.tokens.get(start + 1).and_then(SatToken::as_ident) == Some("ref") {
-                    support.tokens[start + 2].as_integer().expect("spline support subtype reference")
-                } else {
-                    self.records.iter().take(support_surface as usize).map(|record| {
-                        record.tokens.windows(2).filter(|pair| {
-                            pair[0].as_ident() == Some("{") && pair[1].as_ident() != Some("ref")
-                        }).count()
-                    }).sum::<usize>() as i64
-                };
-                let mut tokens = vec![id("spline"), support.tokens[1].clone(), id("{"), id("ref"), SatToken::Integer(subtype_index), id("}")];
+                let subtype_index =
+                    if support.tokens.get(start + 1).and_then(SatToken::as_ident) == Some("ref") {
+                        support.tokens[start + 2]
+                            .as_integer()
+                            .expect("spline support subtype reference")
+                    } else {
+                        self.records
+                            .iter()
+                            .take(support_surface as usize)
+                            .map(|record| {
+                                record
+                                    .tokens
+                                    .windows(2)
+                                    .filter(|pair| {
+                                        pair[0].as_ident() == Some("{")
+                                            && pair[1].as_ident() != Some("ref")
+                                    })
+                                    .count()
+                            })
+                            .sum::<usize>() as i64
+                    };
+                let mut tokens = vec![
+                    id("spline"),
+                    support.tokens[1].clone(),
+                    id("{"),
+                    id("ref"),
+                    SatToken::Integer(subtype_index),
+                    id("}"),
+                ];
                 tokens.extend_from_slice(&support.tokens[end + 1..]);
                 tokens
             }
@@ -677,7 +723,10 @@ impl SatDocument {
                 tokens.extend_from_slice(&support.tokens[1..]);
                 tokens
             }
-            _ => panic!("unsupported pcurve support surface: {}", support.entity_type),
+            _ => panic!(
+                "unsupported pcurve support surface: {}",
+                support.entity_type
+            ),
         };
         let index = self.records.len() as i32;
         let mut record = SatRecord::new(index, "pcurve");

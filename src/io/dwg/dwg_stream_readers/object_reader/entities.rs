@@ -464,16 +464,17 @@ pub fn read_section_object(reader: &mut DwgMergedReader) -> ExtendedEntityData {
 }
 
 pub fn read_arc_aligned_text(reader: &mut DwgMergedReader) -> ExtendedEntityData {
-    let text_size = reader.read_bit_double();
-    let x_scale = reader.read_bit_double();
-    let character_spacing = reader.read_bit_double();
+    // D2T fields are decimal strings, not bit doubles.
+    let text_size = reader.read_variable_text().parse().unwrap_or_default();
+    let x_scale = reader.read_variable_text().parse().unwrap_or_default();
+    let character_spacing = reader.read_variable_text().parse().unwrap_or_default();
     let style_name = reader.read_variable_text();
     let font_name = reader.read_variable_text();
     let big_font_name = reader.read_variable_text();
     let text = reader.read_variable_text();
-    let offset_from_arc = reader.read_bit_double();
-    let right_offset = reader.read_bit_double();
-    let left_offset = reader.read_bit_double();
+    let offset_from_arc = reader.read_variable_text().parse().unwrap_or_default();
+    let right_offset = reader.read_variable_text().parse().unwrap_or_default();
+    let left_offset = reader.read_variable_text().parse().unwrap_or_default();
     let center = reader.read_3bit_double();
     let radius = reader.read_bit_double();
     let start_angle = reader.read_bit_double();
@@ -1544,9 +1545,15 @@ pub fn read_mtext(
 
     let style_handle = reader.read_handle();
 
-    let linespacing_style = reader.read_bit_short();
-    let linespacing_factor = reader.read_bit_double();
-    let unknown_bit = reader.read_bit();
+    let (linespacing_style, linespacing_factor, unknown_bit) = if version.r2000_plus() {
+        (
+            reader.read_bit_short(),
+            reader.read_bit_double(),
+            reader.read_bit(),
+        )
+    } else {
+        (1, 1.0, false)
+    };
 
     let mut background_flags = 0i32;
     let mut background_scale = 1.5;
@@ -2039,7 +2046,7 @@ pub struct HatchData {
     pub mpolygon_boundary_handle_count: i32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ViewportData {
     pub center: Vector3,
@@ -2770,6 +2777,14 @@ pub fn read_viewport(
     let center = reader.read_3bit_double();
     let width = reader.read_bit_double();
     let height = reader.read_bit_double();
+    if version.r13_14_only() {
+        return ViewportData {
+            center,
+            width,
+            height,
+            ..Default::default()
+        };
+    }
 
     // View data (read for all versions)
     let view_target = reader.read_3bit_double();
@@ -4507,9 +4522,9 @@ pub fn read_multileader(
         }
     }
 
-    // Pre-R2007 only: num_arrowheads (BL) + override-arrowhead list.
+    // Through R2007: num_arrowheads (BL) + override-arrowhead list.
     let mut arrowhead_overrides = Vec::new();
-    if !version.r2007_plus() {
+    if !version.r2010_plus() {
         let ah_count = safe_count(reader.read_bit_long());
         arrowhead_overrides.reserve(ah_count as usize);
         for index in 0..ah_count {
@@ -5091,8 +5106,16 @@ pub fn read_acis_entity(
     dxf_version: DxfVersion,
     has_ds_data: bool,
 ) -> AcisEntityData {
-    read_acis_entity_impl(reader, version, dxf_version, has_ds_data, false, false, None)
-        .expect("database ACIS decoding retains unrecognized legacy payloads")
+    read_acis_entity_impl(
+        reader,
+        version,
+        dxf_version,
+        has_ds_data,
+        false,
+        false,
+        None,
+    )
+    .expect("database ACIS decoding retains unrecognized legacy payloads")
 }
 
 /// Solid-history B-rep objects keep their modeler body inline even in R2013+
@@ -5501,26 +5524,13 @@ pub fn read_surface(
     has_ds_data: bool,
     kind: SurfaceKind,
 ) -> SurfaceEntityData {
-    let acis = read_acis_entity_impl(
-        reader,
-        version,
-        dxf_version,
-        has_ds_data,
-        true,
-        false,
-        None,
-    )
+    let acis = read_acis_entity_impl(reader, version, dxf_version, has_ds_data, true, false, None)
         .expect("database surface decoding retains unrecognized legacy payloads");
     // Surface records do not have the 3DSOLID history-id handle slot.
     let history_handle = 0;
-    let mut modeler_format_version = 1;
-    if matches!(
-        kind,
-        SurfaceKind::Lofted | SurfaceKind::Revolved | SurfaceKind::Swept
-    ) && version.r2007_plus()
-    {
-        modeler_format_version = reader.read_bit_short();
-    }
+    // The modeler version is already part of the ACIS header. Native
+    // surfaces begin with the two isoline counts immediately after it.
+    let modeler_format_version = 1;
     let u_isolines = reader.read_bit_short();
     let v_isolines = reader.read_bit_short();
     let surface_data = match kind {
@@ -5551,9 +5561,6 @@ pub fn read_surface(
             let mut cross_section_entities = Vec::new();
             let mut guide_entities = Vec::new();
             let mut path_entity = None;
-            let mut cross_sections = Vec::new();
-            let mut guide_curves = Vec::new();
-            let mut path_curve = None;
             let (
                 plane_normal_lofting_type,
                 start_draft_angle,
@@ -5568,44 +5575,7 @@ pub fn read_surface(
                 solid,
                 ruled_surface,
                 virtual_guide,
-            ) = if version.r2007_plus() {
-                let values = (
-                    reader.read_bit_long(),
-                    reader.read_bit_double(),
-                    reader.read_bit_double(),
-                    reader.read_bit_double(),
-                    reader.read_bit_double(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                );
-                let cross_count = safe_count(reader.read_bit_short() as i32);
-                let guide_count = safe_count(reader.read_bit_short() as i32);
-                cross_sections.reserve(cross_count as usize);
-                guide_curves.reserve(guide_count as usize);
-                for _ in 0..cross_count {
-                    let handle = reader.read_handle();
-                    if handle != 0 {
-                        cross_sections.push(Handle::new(handle));
-                    }
-                }
-                for _ in 0..guide_count {
-                    let handle = reader.read_handle();
-                    if handle != 0 {
-                        guide_curves.push(Handle::new(handle));
-                    }
-                }
-                let handle = reader.read_handle();
-                if handle != 0 {
-                    path_curve = Some(Handle::new(handle));
-                }
-                values
-            } else {
+            ) = {
                 let cross_count = safe_count(reader.read_bit_short() as i32);
                 let guide_count = safe_count(reader.read_bit_short() as i32);
                 let has_path = reader.read_bit();
@@ -5664,84 +5634,37 @@ pub fn read_surface(
                 solid,
                 ruled_surface,
                 virtual_guide,
-                cross_sections,
-                guide_curves,
-                path_curve,
+                cross_sections: Vec::new(),
+                guide_curves: Vec::new(),
+                path_curve: None,
             }
         }
         SurfaceKind::Revolved => {
             let (
-                class_version,
-                entity_id,
                 draft_angle,
                 draft_start_distance,
                 draft_end_distance,
                 twist_angle,
                 solid,
                 close_to_axis,
-            ) = if version.r2007_plus() {
-                (
-                    reader.read_bit_long(),
-                    reader.read_bit_long(),
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    false,
-                    false,
-                )
-            } else {
-                (
-                    0,
-                    0,
-                    reader.read_bit_double(),
-                    reader.read_bit_double(),
-                    reader.read_bit_double(),
-                    reader.read_bit_double(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                )
-            };
+            ) = (
+                reader.read_bit_double(),
+                reader.read_bit_double(),
+                reader.read_bit_double(),
+                reader.read_bit_double(),
+                reader.read_bit(),
+                reader.read_bit(),
+            );
             let axis_point = reader.read_3bit_double();
             let axis_vector = reader.read_3bit_double();
             let revolve_angle = reader.read_bit_double();
             let start_angle = reader.read_bit_double();
             let entity_transform = read_surface_matrix(reader);
-            let (
-                draft_angle,
-                draft_start_distance,
-                draft_end_distance,
-                twist_angle,
-                solid,
-                close_to_axis,
-            ) = if version.r2007_plus() {
-                (
-                    reader.read_bit_double(),
-                    reader.read_bit_double(),
-                    reader.read_bit_double(),
-                    reader.read_bit_double(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                )
-            } else {
-                (
-                    draft_angle,
-                    draft_start_distance,
-                    draft_end_distance,
-                    twist_angle,
-                    solid,
-                    close_to_axis,
-                )
-            };
-            let revolve_entity = if version.r2007_pre() {
-                read_surface_embedded_entity(reader, version, dxf_version)
-            } else {
-                None
-            };
+            let revolve_entity = read_surface_embedded_entity(reader, version, dxf_version);
             SurfaceData::Revolved {
                 revolve_entity,
-                class_version,
-                entity_id,
+                class_version: 0,
+                entity_id: 0,
                 axis_point,
                 axis_vector,
                 revolve_angle,
@@ -5756,23 +5679,9 @@ pub fn read_surface(
             }
         }
         SurfaceKind::Swept => {
-            let class_version = if version.r2007_plus() {
-                reader.read_bit_long()
-            } else {
-                0
-            };
-            let (sweep_transform, path_transform, early_options) = if version.r2007_pre() {
-                let options = read_surface_sweep_options(reader);
-                let sweep_transform = read_surface_matrix(reader);
-                let path_transform = read_surface_matrix(reader);
-                (sweep_transform, path_transform, Some(options))
-            } else {
-                (
-                    crate::entities::surface::identity_matrix(),
-                    crate::entities::surface::identity_matrix(),
-                    None,
-                )
-            };
+            let options = read_surface_sweep_options(reader);
+            let sweep_transform = read_surface_matrix(reader);
+            let path_transform = read_surface_matrix(reader);
             let sweep_entity_id = reader.read_bit_long();
             let sweep_size = safe_count(reader.read_bit_long()) as usize;
             let sweep_entity = crate::io::dwg::embedded_entity::read_embedded_entity_bits(
@@ -5791,9 +5700,8 @@ pub fn read_surface(
                 version,
                 dxf_version,
             );
-            let options = early_options.unwrap_or_else(|| read_surface_sweep_options(reader));
             SurfaceData::Swept {
-                class_version,
+                class_version: 0,
                 sweep_entity,
                 path_entity,
                 sweep_transform,

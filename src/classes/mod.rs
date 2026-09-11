@@ -214,8 +214,8 @@ impl DxfClassCollection {
     /// Retain the class table understood by pre-R2013 DWG writers.
     ///
     /// Modern proxy classes use layouts that the AC15 CLASSES stream cannot
-    /// encode. Their presence can make a reader reject the complete drawing,
-    /// including otherwise valid primitive entities.
+    /// encode. Their presence makes strict readers reject the complete
+    /// drawing, including otherwise valid primitive entities.
     pub fn retain_legacy_dwg_classes(&mut self) {
         const LEGACY: &[&str] = &[
             "ACDBDICTIONARYWDFLT",
@@ -321,6 +321,7 @@ fn default_classes() -> Vec<DxfClass> {
         ("DWFUNDERLAY", "AcDbDwfReference", 1, "ObjectDBX Classes", true),
         ("DGNUNDERLAY", "AcDbDgnReference", 1, "ObjectDBX Classes", true),
         ("HELIX", "AcDbHelix", 0, "ObjectDBX Classes", true),
+        ("LIGHT", "AcDbLight", 1153, "SCENEOE", true),
         ("MULTILEADER", "AcDbMLeader", 1025, "ACDB_MLEADER_CLASS", true),
         ("OLE2FRAME", "AcDbOle2Frame", 1, "ObjectDBX Classes", true),
         ("MLINE", "AcDbMline", 1, "ObjectDBX Classes", true),
@@ -489,10 +490,11 @@ fn default_classes() -> Vec<DxfClass> {
         ("ACDBASSOC2DCONSTRAINTGROUP", "AcDbAssoc2dConstraintGroup", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCVARIABLE", "AcDbAssocVariable", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCPERSSUBENTMANAGER", "AcDbAssocPersSubentManager", 0, "ObjectDBX Classes", false),
-        ("ACDBASSOCACTIONPARAM", "AcDbAssocActionParam", 0, "ObjectDBX Classes", false),
+        // Abstract action-parameter bases have no persistent instances.
+        // Registering them in a fresh file makes strict readers reject the
+        // database, even at zero instances. Imported tables are preserved.
         ("ACDBASSOCCOMPOUNDACTIONPARAM", "AcDbAssocCompoundActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCOSNAPPOINTREFACTIONPARAM", "AcDbAssocOsnapPointRefActionParam", 0, "ObjectDBX Classes", false),
-        ("ACDBASSOCPOINTREFACTIONPARAM", "AcDbAssocPointRefActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCOBJECTACTIONPARAM", "AcDbAssocObjectActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCPATHACTIONPARAM", "AcDbAssocPathActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCEDGEACTIONPARAM", "AcDbAssocEdgeActionParam", 0, "ObjectDBX Classes", false),
@@ -775,6 +777,21 @@ mod tests {
         assert!(coll.contains("MESH"));
         assert!(coll.contains("LAYOUT"));
         assert!(coll.contains("MLEADERSTYLE"));
+        assert!(!coll.contains("ACDBASSOCACTIONPARAM"));
+        assert!(!coll.contains("ACDBASSOCPOINTREFACTIONPARAM"));
+        assert!(coll.contains("ACDBASSOCCOMPOUNDACTIONPARAM"));
+        assert!(coll.contains("ACDBASSOCOSNAPPOINTREFACTIONPARAM"));
+    }
+
+    #[test]
+    fn imported_abstract_class_declarations_are_not_discarded() {
+        let mut coll = DxfClassCollection::new();
+        coll.push_preserving(DxfClass::new(
+            "ACDBASSOCACTIONPARAM",
+            "AcDbAssocActionParam",
+        ));
+        coll.update_defaults();
+        assert!(coll.contains("ACDBASSOCACTIONPARAM"));
     }
 
     #[test]

@@ -2376,6 +2376,18 @@ impl DwgDocumentBuilder {
         }
 
         let eed_started = web_time::Instant::now();
+        let legacy_viewports: std::collections::HashMap<Handle, (i16, bool)> = document
+            .vx_control_entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, handle)| {
+                document
+                    .vx_table
+                    .iter()
+                    .find(|record| record.handle == *handle)
+                    .map(|record| (record.viewport, (index as i16, record.is_on)))
+            })
+            .collect();
         // ── Decode entity EED blobs into structured records ──────────────────
         // The object reader keeps every EED block as verbatim `raw_dwg_eed`
         // bytes (preserved for a byte-exact re-save). Additionally decode each
@@ -2424,6 +2436,21 @@ impl DwgDocumentBuilder {
                         let xd = &mut std::sync::Arc::make_mut(entity).common_mut().extended_data;
                         for record in records {
                             xd.add_record(record);
+                        }
+                    }
+                    if self.obj_reader.version().r13_14_only() {
+                        if let EntityType::Viewport(viewport) = std::sync::Arc::make_mut(entity) {
+                            crate::io::dwg::legacy_viewport::restore(viewport, |name| {
+                                layer_name_by_handle
+                                    .iter()
+                                    .find(|(_, layer)| layer.eq_ignore_ascii_case(name))
+                                    .map(|(handle, _)| Handle::new(*handle))
+                            });
+                            if let Some((id, is_on)) = legacy_viewports.get(&viewport.common.handle)
+                            {
+                                viewport.id = *id;
+                                viewport.status.is_on = *is_on;
+                            }
                         }
                     }
                 });
@@ -3239,7 +3266,11 @@ impl DwgDocumentBuilder {
                     e.dwg_unknown_handle =
                         (data.unknown_handle != 0).then(|| Handle::from(data.unknown_handle));
                     e.dwg_unknown_long1 = data.unknown_long1;
-                    e.dwg_unknown_long2 = data.unknown_long2;
+                    if self.obj_reader.dxf_version() == crate::types::DxfVersion::AC1024 {
+                        e.dwg_r2010_unknown_bit = Some(data.unknown_long2 != 0);
+                    } else {
+                        e.dwg_unknown_long2 = data.unknown_long2;
+                    }
                     e.dwg_unknown_short = data.unknown_short;
                     e.override_flag = data.legacy_style_override.is_some();
                     e.override_border_color = data.legacy_border_colors.is_some();
@@ -3581,21 +3612,27 @@ impl DwgDocumentBuilder {
                     // Clip-boundary handle (H 340): first entity-specific handle
                     // after the frozen layers. Non-NULL => the viewport is
                     // clipped by a boundary entity.
-                    let clip = reader.read_handle();
-                    if clip != 0 {
-                        e.clip_boundary_handle = Handle::new(clip);
-                    }
-                    // R2000 carries an obsolete viewport-entity-header handle.
-                    if self.obj_reader.version() == crate::io::dwg::dwg_version::DwgVersion::AC15 {
-                        let _ = reader.read_handle();
-                    }
-                    let ucs = reader.read_handle();
-                    if ucs != 0 {
-                        e.ucs_handle = Handle::new(ucs);
-                    }
-                    let base_ucs = reader.read_handle();
-                    if base_ucs != 0 {
-                        e.base_ucs_handle = Handle::new(base_ucs);
+                    if self.obj_reader.version().r13_14_only() {
+                        let _viewport_header = reader.read_handle();
+                    } else {
+                        let clip = reader.read_handle();
+                        if clip != 0 {
+                            e.clip_boundary_handle = Handle::new(clip);
+                        }
+                        // R2000 carries an obsolete viewport-entity-header handle.
+                        if self.obj_reader.version()
+                            == crate::io::dwg::dwg_version::DwgVersion::AC15
+                        {
+                            let _ = reader.read_handle();
+                        }
+                        let ucs = reader.read_handle();
+                        if ucs != 0 {
+                            e.ucs_handle = Handle::new(ucs);
+                        }
+                        let base_ucs = reader.read_handle();
+                        if base_ucs != 0 {
+                            e.base_ucs_handle = Handle::new(base_ucs);
+                        }
                     }
                     if self.obj_reader.version().r2007_plus() {
                         let background = reader.read_handle();

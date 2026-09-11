@@ -12,7 +12,7 @@
 
 use crate::io::dwg::dwg_reference_type::DwgReferenceType;
 use crate::objects::*;
-use crate::types::{DxfVersion, Handle};
+use crate::types::{Color, DxfVersion, Handle};
 
 use super::common;
 use super::DwgObjectWriter;
@@ -1049,15 +1049,19 @@ impl<'a> DwgObjectWriter<'a> {
                 value.modern_cell_style_handle.value(),
             );
             if let Some(style) = &value.modern_style {
-                self.write_named_table_cell_style(style);
+                self.write_table_style_named_cell_style(style);
             } else {
                 self.write_default_modern_table_cell_style(value);
             }
-            self.writer
-                .write_bit_long(value.modern_overrides.len().min(i32::MAX as usize) as i32);
-            for (key, style) in value.modern_overrides.iter().take(i32::MAX as usize) {
-                self.writer.write_bit_long(*key);
-                self.write_named_table_cell_style(style);
+            if value.modern_overrides.is_empty() {
+                self.write_default_modern_table_row_styles(value);
+            } else {
+                self.writer
+                    .write_bit_long(value.modern_overrides.len().min(i32::MAX as usize) as i32);
+                for (key, style) in value.modern_overrides.iter().take(i32::MAX as usize) {
+                    self.writer.write_bit_long(*key);
+                    self.write_table_style_named_cell_style(style);
+                }
             }
         }
 
@@ -1160,6 +1164,18 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_variable_text(&value.name);
     }
 
+    fn write_table_style_named_cell_style(&mut self, value: &NamedTableCellStyle) {
+        let resolved = self.resolve_table_text_style(value.cell_style.content_format.text_style);
+        if resolved == value.cell_style.content_format.text_style {
+            self.write_named_table_cell_style(value);
+            return;
+        }
+
+        let mut value = value.clone();
+        value.cell_style.content_format.text_style = resolved;
+        self.write_named_table_cell_style(&value);
+    }
+
     fn write_default_modern_table_cell_style(&mut self, value: &TableStyle) {
         let row = &value.data_row_style;
         let cell_style = TableCellStyleData {
@@ -1174,7 +1190,7 @@ impl<'a> DwgObjectWriter<'a> {
                 block_scale: 1.0,
                 cell_alignment: row.alignment as i32,
                 content_color: row.text_color,
-                text_style: row.text_style_handle.unwrap_or(Handle::NULL),
+                text_style: self.resolve_table_row_text_style(row),
                 text_height: row.text_height,
                 ..TableContentFormat::default()
             },
@@ -1208,6 +1224,116 @@ impl<'a> DwgObjectWriter<'a> {
             style_type: 2,
             name: "Table".to_string(),
         });
+    }
+
+    fn write_default_modern_table_row_styles(&mut self, value: &TableStyle) {
+        let rows = [
+            (1, &value.title_row_style, 1, 1, "_TITLE", 0x8000),
+            (2, &value.header_row_style, 2, 1, "_HEADER", 0),
+            (3, &value.data_row_style, 3, 2, "_DATA", 0),
+        ];
+
+        self.writer.write_bit_long(rows.len() as i32);
+        for (key, row, id, style_type, name, merge_flags) in rows {
+            self.writer.write_bit_long(key);
+            self.write_default_modern_table_row_style(row, id, style_type, name, merge_flags);
+        }
+    }
+
+    fn write_default_modern_table_row_style(
+        &mut self,
+        row: &RowCellStyle,
+        id: i32,
+        style_type: i32,
+        name: &str,
+        merge_flags: i32,
+    ) {
+        let borders = [
+            (1, &row.top_border),
+            (2, &row.right_border),
+            (4, &row.bottom_border),
+            (8, &row.left_border),
+            (16, &row.horizontal_inside_border),
+            (32, &row.vertical_inside_border),
+        ]
+        .into_iter()
+        .map(|(index_mask, border)| TableGridFormat {
+            index_mask,
+            border: border.clone(),
+            line_type: Handle::NULL,
+        })
+        .collect();
+
+        self.write_named_table_cell_style(&NamedTableCellStyle {
+            cell_style: TableCellStyleData {
+                style_type: 5,
+                data_flags: 1,
+                merge_flags,
+                background_color: if row.fill_enabled {
+                    row.fill_color
+                } else {
+                    Color::None
+                },
+                content_layout: 1,
+                content_format: TableContentFormat {
+                    value_data_type: 4,
+                    value_unit_type: row.unit_type,
+                    value_format_string: row.format_string.clone(),
+                    block_scale: 1.0,
+                    cell_alignment: row.alignment as i32,
+                    content_color: row.text_color,
+                    text_style: self.resolve_table_row_text_style(row),
+                    text_height: row.text_height,
+                    ..TableContentFormat::default()
+                },
+                borders,
+                ..TableCellStyleData::default()
+            },
+            id,
+            style_type,
+            name: name.to_string(),
+        });
+    }
+
+    fn resolve_table_row_text_style(&self, row: &RowCellStyle) -> Handle {
+        row.text_style_handle
+            .filter(|handle| self.is_text_style_handle(*handle))
+            .or_else(|| {
+                self.document
+                    .text_styles
+                    .get(&row.text_style_name)
+                    .map(|style| style.handle)
+            })
+            .unwrap_or_else(|| self.resolve_table_text_style(Handle::NULL))
+    }
+
+    fn resolve_table_text_style(&self, handle: Handle) -> Handle {
+        if self.is_text_style_handle(handle) {
+            return handle;
+        }
+
+        self.document
+            .text_styles
+            .get("Standard")
+            .map(|style| style.handle)
+            .filter(|handle| !handle.is_null())
+            .or_else(|| {
+                self.document
+                    .text_styles
+                    .iter()
+                    .map(|style| style.handle)
+                    .find(|handle| !handle.is_null())
+            })
+            .unwrap_or(Handle::NULL)
+    }
+
+    fn is_text_style_handle(&self, handle: Handle) -> bool {
+        !handle.is_null()
+            && self
+                .document
+                .text_styles
+                .iter()
+                .any(|style| style.handle == handle)
     }
 
     // ── Helpers ──────────────────────────────────────────────────────
@@ -1982,7 +2108,13 @@ impl<'a> DwgObjectWriter<'a> {
             UnderlayType::Pdf => common::OBJ_PDFDEFINITION,
         };
         let type_code = self.class_type_code(def.entity_name(), fallback);
-        self.write_common_non_entity_data(type_code, def.handle, def.owner_handle, &[], &None);
+        self.write_common_non_entity_data(
+            type_code,
+            def.handle,
+            def.owner_handle,
+            &def.reactors,
+            &None,
+        );
 
         self.writer.write_variable_text(&def.file_path);
         self.writer.write_variable_text(&def.page_name);

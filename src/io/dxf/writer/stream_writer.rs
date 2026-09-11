@@ -6,6 +6,11 @@ use crate::types::{Color, Handle, Vector2, Vector3};
 
 /// Trait for writing DXF code/value pairs
 pub trait DxfStreamWriter {
+    /// Binary strings do not use the ASCII DXF caret escape convention.
+    fn is_binary(&self) -> bool {
+        false
+    }
+
     /// Write a code/value pair with a string value
     fn write_string(&mut self, code: i32, value: &str) -> Result<()>;
 

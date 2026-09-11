@@ -1326,7 +1326,7 @@ impl<'a> SectionReader<'a> {
                             .join("\n");
                         let encoded = record.i16("AcDbModelerGeometry", 70, 0) == 1;
                         let sat = if encoded && !sat.is_empty() {
-                            AcisData::decode_sat(&sat)
+                            AcisData::decode_sat_binary(&sat)
                         } else {
                             sat
                         };

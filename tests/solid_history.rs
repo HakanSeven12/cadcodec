@@ -32,7 +32,9 @@ fn appended_history_is_returned_root_to_active() {
         .add_entity(EntityType::Solid3D(Solid3D::new()))
         .unwrap();
     document.create_solid_history(entity, box_step(1)).unwrap();
-    document.append_solid_history(entity, fillet_step()).unwrap();
+    document
+        .append_solid_history(entity, fillet_step())
+        .unwrap();
 
     let operations = document.solid_history_operations(entity).unwrap();
     assert_eq!(operations.len(), 2);
@@ -49,7 +51,9 @@ fn updating_a_step_preserves_its_graph_identity() {
         .add_entity(EntityType::Solid3D(Solid3D::new()))
         .unwrap();
     document.create_solid_history(entity, box_step(1)).unwrap();
-    document.append_solid_history(entity, fillet_step()).unwrap();
+    document
+        .append_solid_history(entity, fillet_step())
+        .unwrap();
 
     let mut replacement = document.solid_history_operations(entity).unwrap()[0].clone();
     let base = replacement.base_mut().unwrap();

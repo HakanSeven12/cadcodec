@@ -269,6 +269,8 @@ const ASM_END_MARKER: &[u8] = b"\x0E\x03End\x0E\x02of\x0E\x03ASM\x0D\x04data";
 /// reader must recognise it to round-trip natively-built solids (primitives and
 /// the exact planar/NURBS export), not just ASM bodies read from other apps.
 const ACIS_END_MARKER: &[u8] = b"End-of-ACIS-data";
+/// Native ACIS may split the terminator into tagged identifier components.
+const ACIS_TAGGED_END_MARKER: &[u8] = b"\x0e\x03End\x0e\x02of\x0e\x04ACIS\x0d\x04data";
 
 /// First end-marker (ASM or classic ACIS) in `buf[from..to]`, with its length so
 /// the caller can advance past the whole terminator.
@@ -282,13 +284,10 @@ const ACIS_END_MARKER: &[u8] = b"End-of-ACIS-data";
 /// one. (#203)
 fn find_acds_end(buf: &[u8], from: usize, to: usize) -> Option<(usize, usize)> {
     let hay = &buf[..to.min(buf.len())];
-    let asm = find_subsequence(hay, ASM_END_MARKER, from).map(|e| (e, ASM_END_MARKER.len()));
-    let acis = find_subsequence(hay, ACIS_END_MARKER, from).map(|e| (e, ACIS_END_MARKER.len()));
-    match (asm, acis) {
-        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
-        (a, None) => a,
-        (None, b) => b,
-    }
+    [ASM_END_MARKER, ACIS_END_MARKER, ACIS_TAGGED_END_MARKER]
+        .into_iter()
+        .filter_map(|marker| find_subsequence(hay, marker, from).map(|e| (e, marker.len())))
+        .min_by_key(|(offset, _)| *offset)
 }
 
 /// Each AcDs SAB blob paired with its owning entity handle, read from the
@@ -344,15 +343,16 @@ fn extract_acds_record_blobs(buf: &[u8], modeler_handles: &HashSet<u64>) -> Vec<
             recs.push((handle as u64, off as usize));
             p += 20;
         }
-        // A genuine record table is a run of consecutive 20-byte entries. A
-        // single entry is a different layout — e.g. `SabWriter`'s own segment
-        // interleaves a 36-byte record header before each blob, so the walk
-        // stops after one; skip it (the caller then falls back to order-based
-        // attachment, which round-trips those files).
+        // A single entry can also be the interleaved layout emitted by older
+        // acadrust versions. Use the order-based fallback for those files.
         if recs.len() < 2 {
             continue;
         }
-        let base = seg + 48 + recs.len() * 20; // blob data follows the table
+        let table_end = seg + 48 + recs.len() * 20;
+        let aligned = rd(seg + 36)
+            .and_then(|units| seg.checked_add(units as usize * 16))
+            .filter(|base| *base >= table_end && *base < seg_end);
+        let base = aligned.unwrap_or(table_end);
         for k in 0..recs.len() {
             let (handle, off) = recs[k];
             let region_start = base + off;
@@ -381,7 +381,7 @@ fn extract_acds_record_blobs(buf: &[u8], modeler_handles: &HashSet<u64>) -> Vec<
             // `seg_end`, is what makes this linear: a big datastore is often ONE
             // segment (seg_end ≈ buf.len()), so a per-record scan to seg_end for
             // the absent marker family is still O(records × buf). (#203)
-            let end_bound = (region_end + ASM_END_MARKER.len()).min(seg_end);
+            let end_bound = (region_end + ACIS_TAGGED_END_MARKER.len()).min(seg_end);
             if let Some((end, marker_len)) = find_acds_end(buf, start, end_bound) {
                 out.push((handle, buf[start..end + marker_len].to_vec()));
             }
@@ -2179,7 +2179,8 @@ impl<R: Read + Seek> DwgReader<R> {
         let total_size = section.compressed_size as usize;
         let mut result = Vec::with_capacity(total_size);
 
-        // encoding=1 (stored): data is stored raw — no RS encoding, no LZ77.
+        // encoding=1 (stored): contiguous data followed by non-interleaved RS
+        // parity. Reading only the payload deliberately skips that parity.
         // encoding=4 (compressed): data is LZ77-compressed then RS-encoded with RS(255,251).
         // System pages (page map, section map) use RS(255,239) per §5.3,
         // but those are decoded separately in read_page_map_ac21 / read_section_map_ac21.

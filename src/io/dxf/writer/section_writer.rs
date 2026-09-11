@@ -307,7 +307,24 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     /// Set the target DXF version
     pub fn set_version(&mut self, version: DxfVersion) {
-        self.dxf_version = version;
+        self.dxf_version = Self::writable_version(version);
+    }
+
+    /// The version this writer actually emits for a requested target.
+    ///
+    /// R12 (AC1009) predates the handle-based object model: its table records
+    /// carry no handles, no `330` owner pointers and no `100` subclass markers,
+    /// and it has no OBJECTS section. This writer always emits those R13+
+    /// constructs, so declaring `AC1009` in `$ACADVER` would describe the file
+    /// as something it is not - consumers applying R12 parsing rules then fail
+    /// to read the table records at all (issue #68). R12 input is therefore
+    /// preserved through read (`document.version` stays `AC1009`) but written
+    /// as R13, the oldest version whose structure matches what is emitted.
+    pub(crate) fn writable_version(version: DxfVersion) -> DxfVersion {
+        match version {
+            DxfVersion::AC1009 => DxfVersion::AC1012,
+            other => other,
+        }
     }
 
     /// Returns true if the target version requires SAB binary format (AC1027+)
@@ -327,10 +344,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         let hdr = &document.header;
 
         // === Version & maintenance ===
+        // `self.dxf_version` (not `document.version`) so the declared version
+        // always matches the structure actually emitted - see
+        // `writable_version` for the R12 case.
+        let declared_version = self.dxf_version;
         self.write_header_variable("$ACADVER", |w| {
-            w.write_string(1, document.version.to_dxf_string())
+            w.write_string(1, declared_version.to_dxf_string())
         })?;
-        self.write_header_variable("$ACADMAINTVER", |w| w.write_i32(90, 0))?;
+        if self.dxf_version >= DxfVersion::AC1032 {
+            self.write_header_variable("$ACADMAINTVER", |w| w.write_i32(90, 0))?;
+        } else if self.dxf_version >= DxfVersion::AC1015 {
+            self.write_header_variable("$ACADMAINTVER", |w| w.write_i16(70, 0))?;
+        }
         self.write_header_variable("$DWGCODEPAGE", |w| w.write_string(3, &hdr.code_page))?;
 
         let handle_seed = self.handle_seed;
@@ -389,12 +414,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$TRACEWID", |w| w.write_double(40, hdr.trace_width))?;
         self.write_header_variable("$SKETCHINC", |w| w.write_double(40, hdr.sketch_increment))?;
         self.write_header_variable("$SKPOLY", |w| w.write_i16(70, hdr.sketch_type.clamp(0, 2)))?;
-        let sketch_tolerance = if hdr.sketch_tolerance.is_finite() {
-            hdr.sketch_tolerance.clamp(0.0, 1.0)
-        } else {
-            0.5
-        };
-        self.write_header_variable("$SKTOLERANCE", |w| w.write_double(40, sketch_tolerance))?;
+        // SKTOLERANCE is application state, not a portable DXF header variable.
         self.write_header_variable("$TEXTSTYLE", |w| {
             w.write_string(7, &hdr.current_text_style_name)
         })?;
@@ -612,12 +632,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$SPLFRAME", |w| {
             w.write_i16(70, if hdr.spline_frame { 1 } else { 0 })
         })?;
-        self.write_header_variable("$SOLIDHIST", |w| {
-            w.write_i16(70, if hdr.record_solid_history { 1 } else { 0 })
-        })?;
-        self.write_header_variable("$SHOWHIST", |w| {
-            w.write_i16(70, hdr.show_solid_history.clamp(0, 2))
-        })?;
+        if self.dxf_version >= DxfVersion::AC1021 {
+            self.write_header_variable("$SOLIDHIST", |w| {
+                w.write_byte(280, u8::from(hdr.record_solid_history))
+            })?;
+            self.write_header_variable("$SHOWHIST", |w| {
+                w.write_byte(280, hdr.show_solid_history.clamp(0, 2) as u8)
+            })?;
+        }
         self.write_header_variable("$SPLINETYPE", |w| w.write_i16(70, hdr.spline_type))?;
         self.write_header_variable("$SPLINESEGS", |w| w.write_i16(70, hdr.spline_segments))?;
         self.write_header_variable("$SURFTAB1", |w| w.write_i16(70, hdr.surface_tab1))?;
@@ -698,7 +720,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_string(2, &class.cpp_class_name)?;
             self.writer.write_string(3, &class.application_name)?;
             self.writer.write_i32(90, class.proxy_flags.0 as i32)?;
-            self.writer.write_i32(91, class.instance_count)?;
+            if self.dxf_version >= DxfVersion::AC1018 {
+                self.writer.write_i32(91, class.instance_count)?;
+            }
             self.writer
                 .write_byte(280, if class.was_zombie { 1 } else { 0 })?;
             self.writer
@@ -1143,7 +1167,16 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_common_table_data(style.handle(), owner, document)?;
         self.writer.write_subclass("AcDbSymbolTableRecord")?;
         self.writer.write_subclass("AcDbTextStyleTableRecord")?;
-        self.writer.write_string(2, style.name())?;
+        // Shape files have an empty DXF STYLE name; SHAPE resolves group 2
+        // by searching the shape files, not a text-style name.
+        self.writer.write_string(
+            2,
+            if style.is_shape_file {
+                ""
+            } else {
+                style.name()
+            },
+        )?;
         let mut flags: i16 = 0;
         if style.is_shape_file {
             flags |= 0x01;
@@ -1407,9 +1440,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             table_handle,
             document,
         )?;
-        self.writer.write_subclass("AcDbDimStyleTable")?;
-        self.writer
-            .write_i16(71, document.dim_styles.len() as i16)?;
+        if self.dxf_version >= DxfVersion::AC1015 {
+            self.writer.write_subclass("AcDbDimStyleTable")?;
+            self.writer
+                .write_i16(71, document.dim_styles.len() as i16)?;
+        }
 
         for dimstyle in document.dim_styles.iter() {
             self.write_dimstyle_entry(dimstyle, table_handle, document)?;
@@ -2042,8 +2077,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_double(44, data.offset_from_arc)?;
                 self.writer.write_double(45, data.right_offset)?;
                 self.writer.write_double(46, data.left_offset)?;
-                self.writer.write_double(50, data.start_angle)?;
-                self.writer.write_double(51, data.end_angle)?;
+                self.writer
+                    .write_double(50, data.start_angle.to_degrees())?;
+                self.writer.write_double(51, data.end_angle.to_degrees())?;
                 self.writer.write_i16(70, data.reverse as i16)?;
                 self.writer.write_i16(71, data.text_direction)?;
                 self.writer.write_i16(72, data.alignment)?;
@@ -4038,7 +4074,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
 
         self.writer.write_subclass("AcDbDimension")?;
-        self.writer.write_string(2, &base.block_name)?;
+        // Omit an absent geometry cache so the CAD host can regenerate it.
+        // An explicit empty group 2 is an invalid block-table reference.
+        if !base.block_name.is_empty() {
+            self.writer.write_string(2, &base.block_name)?;
+        }
         self.writer.write_point3d(10, definition_point)?;
         self.writer.write_point3d(11, base.text_middle_point)?;
         // Bit 0x80 marks text positioned at a user-defined location.
@@ -4566,14 +4606,17 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // XDATA precedes the child ATTRIB/SEQEND records.
         self.write_xdata(&insert.common.extended_data)?;
 
-        // XDATA precedes the child ATTRIB/SEQEND records.
-        self.write_xdata(&insert.common.extended_data)?;
-
         // Write child ATTRIB entities + SEQEND when attributes are present
         if insert.has_attributes() {
             let insert_handle = insert.handle();
             for att in &insert.attributes {
-                self.write_attrib(att, insert_handle)?;
+                if att.common.handle.is_null() {
+                    let mut child = att.clone();
+                    child.common.handle = self.allocate_handle();
+                    self.write_attrib(&child, insert_handle)?;
+                } else {
+                    self.write_attrib(att, insert_handle)?;
+                }
             }
             // SEQEND terminates the attribute sequence
             let seqend_handle = self.allocate_handle();
@@ -4700,7 +4743,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_double(41, viewport.height)?;
 
         // Viewport ID
-        self.writer.write_i16(68, viewport.id)?;
+        self.writer.write_i16(69, viewport.id)?;
 
         // Status
         self.writer.write_i32(90, viewport.status.to_bits())?;
@@ -6883,6 +6926,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     ) -> Result<()> {
         self.writer.write_string(0, def.entity_name())?;
         self.writer.write_handle(5, def.handle)?;
+        if !def.reactors.is_empty() {
+            self.writer.write_string(102, "{ACAD_REACTORS")?;
+            for reactor in &def.reactors {
+                self.writer.write_handle(330, *reactor)?;
+            }
+            self.writer.write_string(102, "}")?;
+        }
         self.writer.write_handle(330, def.owner_handle)?;
         self.writer.write_subclass("AcDbUnderlayDefinition")?;
         self.writer.write_string(1, &def.file_path)?;
@@ -8547,6 +8597,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_handle(330, owner)?;
         self.writer.write_string(102, "}")?;
         self.writer.write_handle(330, owner)?;
+        if self.dxf_version < DxfVersion::AC1015 && type_name == "ACDBPLACEHOLDER" {
+            self.writer.write_subclass("AcDbPlaceHolder")?;
+        }
         Ok(())
     }
 
@@ -8823,7 +8876,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_common_entity_data(&mleader.common, owner)?;
         self.writer.write_subclass("AcDbMLeader")?;
 
-        self.writer.write_i16(270, mleader.dwg_version)?;
+        if self.dxf_version >= DxfVersion::AC1024 {
+            self.writer.write_i16(270, mleader.dwg_version)?;
+        }
 
         // Context data - write the annotation context
         let ctx = &mleader.context;
@@ -9329,11 +9384,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.write_acis_data(&solid.acis_data)?;
         }
 
-        self.writer.write_subclass("AcDb3dSolid")?;
-
-        // History handle (always written, 0 = no history)
-        let h = solid.history_handle.unwrap_or(Handle::NULL);
-        self.writer.write_handle(350, h)?;
+        if self.dxf_version >= DxfVersion::AC1021 {
+            self.writer.write_subclass("AcDb3dSolid")?;
+            let h = solid.history_handle.unwrap_or(Handle::NULL);
+            self.writer.write_handle(350, h)?;
+        }
 
         Ok(())
     }
@@ -9382,7 +9437,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_subclass("AcDbLight")?;
         self.writer.write_i32(90, light.class_version)?;
         self.writer.write_string(1, &light.name)?;
-        self.writer.write_i32(70, light.light_type)?;
+        self.writer.write_i16(70, light.light_type as i16)?;
         self.writer.write_bool(290, light.status)?;
         self.writer.write_color(63, light.light_color)?;
         if let Color::Rgb { r, g, b } = light.light_color {
@@ -9393,7 +9448,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_double(40, light.intensity)?;
         self.writer.write_point3d(10, light.position)?;
         self.writer.write_point3d(11, light.target)?;
-        self.writer.write_i32(72, light.attenuation_type)?;
+        self.writer.write_i16(72, light.attenuation_type as i16)?;
         self.writer.write_bool(292, light.use_attenuation_limits)?;
         self.writer
             .write_double(41, light.attenuation_start_limit)?;
@@ -9401,8 +9456,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_double(50, light.hotspot_angle)?;
         self.writer.write_double(51, light.falloff_angle)?;
         self.writer.write_bool(293, light.cast_shadows)?;
-        self.writer.write_i32(73, light.shadow_type)?;
-        self.writer.write_i16(91, light.shadow_map_size)?;
+        self.writer.write_i16(73, light.shadow_type as i16)?;
+        self.writer.write_i32(91, light.shadow_map_size as i32)?;
         self.writer
             .write_i16(280, light.shadow_map_softness as i16)?;
         if light.photometric_mode {
@@ -9454,10 +9509,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         match &surface.surface_data {
             SurfaceData::Generic => {}
-            SurfaceData::Plane { class_version } => {
-                self.writer.write_subclass("AcDbPlaneSurface")?;
-                self.writer.write_i32(90, *class_version)?;
-            }
+            SurfaceData::Plane { .. } => {}
             SurfaceData::Extruded {
                 sweep_entity,
                 options,
@@ -9757,7 +9809,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             }
         } else if !acis.sat_data.is_empty() {
             // Keep the original token stream. Re-serializing expands compact
-            // ACIS booleans and can make legacy readers reject freeform
+            // ACIS booleans and makes legacy DXF modelers reject freeform
             // spline and p-curve payloads.
             &acis.sat_data
         } else {
@@ -9778,7 +9830,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         let use_version1_cipher = acis.version == AcisVersion::Version1
             || (acis.sat_data.is_empty() && !acis.sab_data.is_empty());
         let encoded = if use_version1_cipher {
-            AcisData::encode_sat(&full)
+            if self.writer.is_binary() {
+                AcisData::encode_sat_binary(&full)
+            } else {
+                AcisData::encode_sat(&full)
+            }
         } else {
             full
         };
@@ -10669,7 +10725,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     fn write_wipeout(&mut self, wipeout: &Wipeout, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("WIPEOUT")?;
         self.write_common_entity_data(&wipeout.common, owner)?;
-        self.writer.write_subclass("AcDbRasterImage")?;
+        self.writer.write_subclass("AcDbWipeout")?;
 
         // Class version
         self.writer.write_i32(90, wipeout.class_version)?;
@@ -10818,10 +10874,6 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // Fade
         self.writer.write_byte(282, underlay.fade)?;
-
-        // Clip boundary vertices count
-        self.writer
-            .write_i32(91, underlay.clip_boundary_vertices.len() as i32)?;
 
         // Clip boundary vertices
         for v in &underlay.clip_boundary_vertices {

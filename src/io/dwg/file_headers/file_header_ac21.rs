@@ -71,6 +71,9 @@ const RS_DATA_IN_HEADER: usize = FILE_HEADER_PAGE_SIZE - CHECK_DATA_SIZE;
 /// Factor for file header RS encoding (3 sub-streams).
 const FILE_HEADER_RS_FACTOR: usize = 3;
 
+/// Shared by the header and implicit RS padding; fixed for deterministic output.
+const FILE_RANDOM_SEED: u64 = 0;
+
 // ════════════════════════════════════════════════════════════════════════════
 //  CRC Random Encoder (spec §5.11)
 // ════════════════════════════════════════════════════════════════════════════
@@ -309,7 +312,7 @@ fn encode_data_page(data: &[u8], encoding: u64, skip_lz77: bool) -> EncodedDataP
     let checksum = dwg_ac21_page_checksum(0, data) as u64;
     if encoding == 1 {
         return EncodedDataPage {
-            bytes: data.to_vec(),
+            bytes: rs_encode_data_page_non_interleaved(data, FILE_RANDOM_SEED),
             uncompressed_size: data.len() as u64,
             compressed_size: data.len() as u64,
             checksum,
@@ -384,19 +387,27 @@ fn encode_value(value: u64, control: u64) -> u64 {
 //  RS encoding helpers for data pages (non-interleaved)
 // ════════════════════════════════════════════════════════════════════════════
 
-/// RS-encode data page content with interleaving, matching the reader's decode.
-///
-/// The RS parameters depend on section encoding type:
-/// - encoding=1 → RS(255, 251) with RS_DATA_PRIM_POLY
-/// - encoding=4 → RS(255, 239) with RS_SYSTEM_PRIM_POLY
-///
-/// The factor is computed to match the reader's `get_page_buffer_at`:
-/// ```text
-/// total_size = (data.len() + 7) & ~7   // CRC block alignment
-/// factor = ceil(total_size / block_size)
-/// ```
-///
-/// Returns the RS-encoded interleaved data (factor × 255 bytes).
+/// Encoding 1 stores the 8-byte-aligned data followed by each block's parity.
+/// The final block's implicit padding comes from the file's random seed
+/// (format sections 5.4 and 5.13.1); those bytes are not stored before parity.
+fn rs_encode_data_page_non_interleaved(data: &[u8], random_seed: u64) -> Vec<u8> {
+    let aligned_size = (data.len() + CRC_BLOCK_SIZE - 1) & !(CRC_BLOCK_SIZE - 1);
+    let factor = (aligned_size + RS_DATA_K - 1) / RS_DATA_K;
+    let mut padded = vec![0u8; factor * RS_DATA_K];
+    padded[..data.len()].copy_from_slice(data);
+    CrcRandomEncoder::new(random_seed).fill_random(&mut padded[aligned_size..]);
+    let mut encoded = vec![0u8; factor * RS_N];
+    reed_solomon_encode(&padded, &mut encoded, factor, RS_DATA_K, RS_DATA_PRIM_POLY);
+    let mut output = padded[..aligned_size].to_vec();
+    for block in 0..factor {
+        for symbol in RS_DATA_K..RS_N {
+            output.push(encoded[symbol * factor + block]);
+        }
+    }
+    output
+}
+
+/// Encoding 4 interleaves complete RS(255, 251) codewords, including padding.
 fn rs_encode_data_page_interleaved(data: &[u8], _encoding: u64) -> Vec<u8> {
     // All data section pages use RS(255, 251) per spec §5.4 / §5.13.
     // System pages (page map, section map) use RS(255, 239) per §5.3,
@@ -501,7 +512,12 @@ impl DwgFileHeaderWriterAC21 {
         // store encryption=0 in the section map.  AutoCAD will read the
         // data without attempting to decrypt, which is correct.
         let encryption: u64 = 0;
-        let max_page_size = ac21_section_info::page_size(name).unwrap_or(0xF800); // Default for variable-size sections
+        let mut max_page_size = ac21_section_info::page_size(name).unwrap_or(0xF800);
+        if name == names::PREVIEW {
+            // Preview image offsets address contiguous bytes in the file.
+            // Splitting it would insert RS parity in the middle of the image.
+            max_page_size = max_page_size.max(align32(data.len()) as u64);
+        }
 
         let mut section = AC21SectionInfo {
             name: name.to_string(),
@@ -643,7 +659,7 @@ impl DwgFileHeaderWriterAC21 {
         // CRC/random fields (spec §5.2.1.1 — order is critical for RNG state)
         // §5.2.1.1.1: RandomSeed IS the CRC encoder's seed (input, not output)
         // Using a fixed value (we can use any value; AutoCAD verifies consistency)
-        let random_seed: u64 = 0;
+        let random_seed = FILE_RANDOM_SEED;
         metadata.random_seed = random_seed;
         metadata.crc_seed = self.crc_seed; // always 0 per §5.2.1.1.2
         let mut rng = CrcRandomEncoder::new(random_seed);
@@ -882,8 +898,12 @@ impl DwgFileHeaderWriterAC21 {
 
         // RS-encode with RS(255, 239)
         let mut padded_data = vec![0u8; factor * RS_SYSTEM_K];
-        let copy_len = page_data.len().min(padded_data.len());
-        padded_data[..copy_len].copy_from_slice(&page_data[..copy_len]);
+        // The correction factor advertises repeated copies, not zero padding.
+        if aligned_comp != 0 {
+            for copy in padded_data[..total_size].chunks_mut(aligned_comp) {
+                copy[..page_data.len()].copy_from_slice(page_data);
+            }
+        }
 
         let mut encoded = vec![0u8; factor * RS_N];
         reed_solomon_encode(
@@ -1762,14 +1782,108 @@ mod tests {
     // ─── RS data page encoding test ─────────────────────────────────
 
     #[test]
+    fn non_interleaved_parity_matches_r2007_fixture() {
+        // SummaryInfo from a reference R2007 file, with its file RandomSeed.
+        // Parity was read directly from the file, not generated by this encoder.
+        let data = [
+            0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00,
+            0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x09, 0x00, 0x41, 0x00, 0x75, 0x00, 0x74, 0x00,
+            0x6F, 0x00, 0x64, 0x00, 0x65, 0x00, 0x73, 0x00, 0x6B, 0x00, 0x00, 0x00, 0x01, 0x00,
+            0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xD2, 0x8E, 0x0B, 0x00,
+            0xAF, 0x65, 0x25, 0x00, 0x7D, 0xB7, 0xD9, 0x03, 0x0F, 0x71, 0x25, 0x00, 0xF8, 0x06,
+            0x62, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let encoded = rs_encode_data_page_non_interleaved(&data, 15_793_935_738_994_308_941);
+        assert_eq!(encoded.len(), 92);
+        assert_eq!(&encoded[..82], &data);
+        assert_eq!(&encoded[82..88], &[0; 6]);
+        assert_eq!(&encoded[88..], &[0x05, 0xEF, 0x99, 0xA4]);
+    }
+
+    #[test]
+    fn stored_pages_have_valid_rs_codewords_at_block_boundaries() {
+        fn multiply(mut a: u8, mut b: u8) -> u8 {
+            let mut product = 0;
+            while b != 0 {
+                if b & 1 != 0 {
+                    product ^= a;
+                }
+                a = (a << 1) ^ if a & 0x80 != 0 { 0x1D } else { 0 };
+                b >>= 1;
+            }
+            product
+        }
+
+        for size in [
+            0, 1, 7, 8, 248, 249, 250, 251, 252, 500, 502, 503, 768, 4097,
+        ] {
+            let data: Vec<u8> = (0..size).map(|i| (i * 73 + 11) as u8).collect();
+            let page = encode_data_page(&data, 1, false);
+            let aligned = (size + 7) & !7;
+            let blocks = (aligned + RS_DATA_K - 1) / RS_DATA_K;
+            assert_eq!(page.bytes.len(), aligned + blocks * 4, "size={size}");
+            assert_eq!(&page.bytes[..size], &data);
+            assert!(page.bytes[size..aligned].iter().all(|&b| b == 0));
+            assert_eq!(page.compressed_size, size as u64);
+            assert_eq!(page.uncompressed_size, size as u64);
+            assert_eq!(page.crc, dwg_ac21_mirrored_crc64(0, size as u32, &data));
+            let mut padded = page.bytes[..aligned].to_vec();
+            padded.resize(blocks * RS_DATA_K, 0);
+            CrcRandomEncoder::new(FILE_RANDOM_SEED).fill_random(&mut padded[aligned..]);
+            for block in 0..blocks {
+                let mut codeword = padded[block * RS_DATA_K..(block + 1) * RS_DATA_K].to_vec();
+                codeword
+                    .extend_from_slice(&page.bytes[aligned + block * 4..aligned + (block + 1) * 4]);
+                for exponent in 251..255 {
+                    let root = (0..exponent).fold(1, |value, _| multiply(value, 2));
+                    let syndrome = codeword
+                        .iter()
+                        .fold(0, |value, &symbol| multiply(value, root) ^ symbol);
+                    assert_eq!(syndrome, 0, "size={size}, block={block}, root={exponent}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn system_pages_store_every_advertised_copy() {
+        use crate::io::dwg::reed_solomon::reed_solomon_decode;
+
+        let mut output = Cursor::new(Vec::new());
+        let writer = DwgFileHeaderWriterAC21::new(DxfVersion::AC1021, &mut output).unwrap();
+        for size in [64, 2048, 8192] {
+            let data: Vec<u8> = (0..size).map(|i| (i * 73 + i / 17) as u8).collect();
+            let page_size = get_system_page_size(size as u64) as usize;
+            let (encoded, compressed_size, _, compressed_crc, _, repeats) =
+                writer.encode_system_page(&data, page_size);
+            let blocks = encoded.len() / RS_N;
+            let mut decoded = vec![0; blocks * RS_SYSTEM_K];
+            reed_solomon_decode(&encoded, &mut decoded, blocks, RS_SYSTEM_K);
+            let stride = (compressed_size as usize + 7) & !7;
+            assert!(repeats >= 2);
+            let first = &decoded[..stride];
+            assert_eq!(
+                dwg_ac21_mirrored_crc64(
+                    0,
+                    compressed_size as u32,
+                    &first[..compressed_size as usize]
+                ),
+                compressed_crc
+            );
+            for copy in decoded[..stride * repeats as usize].chunks_exact(stride) {
+                assert_eq!(copy, first);
+            }
+        }
+    }
+
+    #[test]
     fn test_rs_encode_data_page_encoding1_size() {
-        // encoding=1 → RS(255, 251), block_size=251
+        // Stored data stays contiguous, followed by four parity bytes per block.
         let data = vec![0xAB; 500];
-        let encoded = rs_encode_data_page_interleaved(&data, 1);
+        let encoded = encode_data_page(&data, 1, false).bytes;
 
         // total_size = (500+7)&~7 = 504, factor = ceil(504/251) = 3
-        // encoded = 3 × 255 = 765
-        assert_eq!(encoded.len(), 3 * 255);
+        assert_eq!(encoded.len(), 504 + 3 * 4);
     }
 
     #[test]
@@ -1787,11 +1901,10 @@ mod tests {
     fn test_rs_encode_data_page_single_block() {
         // encoding=1 → RS(255, 251), single block
         let data = vec![0xCD; 100];
-        let encoded = rs_encode_data_page_interleaved(&data, 1);
+        let encoded = encode_data_page(&data, 1, false).bytes;
 
         // total_size = (100+7)&~7 = 104, factor = ceil(104/251) = 1
-        // encoded = 1 × 255 = 255
-        assert_eq!(encoded.len(), 255);
+        assert_eq!(encoded.len(), 104 + 4);
     }
 
     #[test]
@@ -1828,19 +1941,17 @@ mod tests {
 
     #[test]
     fn test_rs_encode_data_page_roundtrip_encoding1() {
-        // Verify that encoding → decoding recovers the original data (encoding=1)
-        use crate::io::dwg::reed_solomon::reed_solomon_decode;
+        use crate::io::dwg::reed_solomon::reed_solomon_decode_compact;
 
         let original = vec![0x77u8; 200];
-        let encoded = rs_encode_data_page_interleaved(&original, 1);
+        let encoded = encode_data_page(&original, 1, false).bytes;
 
         // Reader's decode parameters for encoding=1:
         let total_size = (200 + 7) & !7; // 200 (already aligned)
         let factor = (total_size + 251 - 1) / 251; // ceil(200/251) = 1
-        assert_eq!(encoded.len(), factor * 255);
+        assert_eq!(encoded.len(), total_size + factor * 4);
 
-        let mut decoded = vec![0u8; total_size];
-        reed_solomon_decode(&encoded, &mut decoded, factor, 251);
+        let decoded = reed_solomon_decode_compact(&encoded, original.len());
 
         // First 200 bytes should match original
         assert_eq!(&decoded[..200], &original[..]);

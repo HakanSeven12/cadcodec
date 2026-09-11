@@ -226,7 +226,7 @@ impl DwgFileHeaderWriterAC15 {
             .map_or(0i32, |(r, _)| r.seeker as i32);
         buf.write_i32::<LittleEndian>(preview_seeker)?;
 
-        // 0x11: application/version bytes. The AC15 reader and known-good
+        // 0x11: application/version bytes. The AC15 reader and the known-good
         // R2000 fixtures use this fixed pair for the whole R13-R2000 family.
         buf.extend_from_slice(&[0x1B, 0x19]);
 

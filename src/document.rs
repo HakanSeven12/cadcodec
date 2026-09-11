@@ -2168,15 +2168,13 @@ impl CadDocument {
                 _ => None,
             })
             .find(|operation| {
-                operation
-                    .base()
-                    .is_some_and(|base| {
-                        if base.eval.node_id > 0 {
-                            base.eval.node_id == history_node_id
-                        } else {
-                            base.step_id == history_node_id
-                        }
-                    })
+                operation.base().is_some_and(|base| {
+                    if base.eval.node_id > 0 {
+                        base.eval.node_id == history_node_id
+                    } else {
+                        base.step_id == history_node_id
+                    }
+                })
             })
             .or_else(|| {
                 graph
@@ -2196,10 +2194,7 @@ impl CadDocument {
     ///
     /// Parent evaluation ids, rather than step ordering, determine the chain.
     /// Missing, cyclic, or ambiguous links make the graph unusable.
-    pub fn solid_history_operations(
-        &self,
-        entity: Handle,
-    ) -> Option<Vec<SolidHistoryOperation>> {
+    pub fn solid_history_operations(&self, entity: Handle) -> Option<Vec<SolidHistoryOperation>> {
         let graph = self.solid_history_graph(entity)?;
         let active_step = match self.objects.get(&graph.root)? {
             ObjectType::DynamicBlock(value) => match &value.data {
@@ -2220,15 +2215,13 @@ impl CadDocument {
             })
             .collect::<Vec<_>>();
         let mut active_matches = operations.iter().copied().filter(|operation| {
-            operation
-                .base()
-                .is_some_and(|base| {
-                    if base.eval.node_id > 0 {
-                        base.eval.node_id == active_step
-                    } else {
-                        base.step_id == active_step
-                    }
-                })
+            operation.base().is_some_and(|base| {
+                if base.eval.node_id > 0 {
+                    base.eval.node_id == active_step
+                } else {
+                    base.step_id == active_step
+                }
+            })
         });
         let mut current = active_matches.next()?;
         if active_matches.next().is_some() {
@@ -2254,16 +2247,14 @@ impl CadDocument {
                 break;
             }
             let mut parent_matches = operations.iter().copied().filter(|operation| {
-                operation
-                    .base()
-                    .is_some_and(|candidate| {
-                        let node_id = if candidate.eval.node_id > 0 {
-                            candidate.eval.node_id
-                        } else {
-                            candidate.step_id
-                        };
-                        node_id == parent_id
-                    })
+                operation.base().is_some_and(|candidate| {
+                    let node_id = if candidate.eval.node_id > 0 {
+                        candidate.eval.node_id
+                    } else {
+                        candidate.step_id
+                    };
+                    node_id == parent_id
+                })
             });
             current = parent_matches.next()?;
             if parent_matches.next().is_some() {
@@ -2366,16 +2357,13 @@ impl CadDocument {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let mut parent_matches = bases
-            .iter()
-            .copied()
-            .filter(|base| {
-                if base.eval.node_id > 0 {
-                    base.eval.node_id == active_step
-                } else {
-                    base.step_id == active_step
-                }
-            });
+        let mut parent_matches = bases.iter().copied().filter(|base| {
+            if base.eval.node_id > 0 {
+                base.eval.node_id == active_step
+            } else {
+                base.step_id == active_step
+            }
+        });
         let parent = parent_matches.next()?;
         if parent_matches.next().is_some() {
             return None;
@@ -2439,15 +2427,15 @@ impl CadDocument {
             .copied()
             .find(|handle| match self.objects.get(handle) {
                 Some(ObjectType::DynamicBlock(value)) => match &value.data {
-                    DynamicBlockData::SolidHistoryNode(current) => current
-                        .base()
-                        .is_some_and(|base| {
+                    DynamicBlockData::SolidHistoryNode(current) => {
+                        current.base().is_some_and(|base| {
                             if base.eval.node_id > 0 {
                                 base.eval.node_id == current_id
                             } else {
                                 base.step_id == current_id
                             }
-                        }),
+                        })
+                    }
                     _ => false,
                 },
                 _ => false,

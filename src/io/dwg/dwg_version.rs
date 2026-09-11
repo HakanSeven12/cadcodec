@@ -44,6 +44,9 @@ impl DwgVersion {
             DxfVersion::AC1018 => Ok(DwgVersion::AC18),
             DxfVersion::AC1021 => Ok(DwgVersion::AC21),
             DxfVersion::AC1024 | DxfVersion::AC1027 | DxfVersion::AC1032 => Ok(DwgVersion::AC24),
+            // R12 predates the handle-based DWG object model this writer is
+            // built on; it is a DXF-only version here.
+            DxfVersion::AC1009 => Err(DxfError::UnsupportedVersion("AC1009".to_string())),
             DxfVersion::Unknown => Err(DxfError::UnsupportedVersion("Unknown".to_string())),
         }
     }

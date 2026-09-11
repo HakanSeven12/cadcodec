@@ -8,7 +8,10 @@
 use std::io::Cursor;
 
 use acadrust::entities::{EntityType, Table, TableCell};
-use acadrust::types::{DxfVersion, Vector3};
+use acadrust::objects::{
+    CellStyleMap, DataObject, DataObjectData, NamedTableCellStyle, ObjectType, TableCellStyleData,
+};
+use acadrust::types::{DxfVersion, Handle, Vector3};
 use acadrust::{CadDocument, DwgReader, DwgWriter};
 
 fn sample_table() -> Table {
@@ -69,4 +72,117 @@ fn table_dwg_roundtrip_content_r2018() {
     // AC1032 = R2018 → R2010+ inline table content.
     let t = roundtrip(DxfVersion::AC1032);
     assert_table(&t, "R2018");
+}
+
+#[test]
+fn table_r2010_header_defaults_are_distinct_from_r2013() {
+    let r2010 = roundtrip(DxfVersion::AC1024);
+    assert_table(&r2010, "R2010");
+    assert_eq!(r2010.dwg_r2010_unknown_bit, Some(true));
+    let r2013 = roundtrip(DxfVersion::AC1027);
+    assert_table(&r2013, "R2013");
+    assert_eq!(r2013.dwg_unknown_long2, 0);
+    assert_eq!(r2013.dwg_r2010_unknown_bit, None);
+}
+
+#[test]
+fn table_r2010_explicit_header_bit_is_preserved() {
+    for bit in [false, true] {
+        let mut doc = CadDocument::with_version(DxfVersion::AC1024);
+        let mut table = sample_table();
+        table.dwg_r2010_unknown_bit = Some(bit);
+        let handle = doc.add_entity(EntityType::Table(table)).unwrap();
+        let bytes = DwgWriter::write_to_vec(&doc).unwrap();
+        let loaded = DwgReader::from_stream(Cursor::new(bytes)).read().unwrap();
+        let Some(EntityType::Table(table)) = loaded.get_entity(handle) else {
+            panic!()
+        };
+        assert_eq!(table.dwg_r2010_unknown_bit, Some(bit));
+    }
+}
+
+#[test]
+fn r2018_standard_table_style_has_valid_legacy_row_text_styles() {
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    let standard_text_style = doc.text_styles.get("Standard").unwrap().handle;
+
+    let standard_table_style = doc
+        .objects
+        .values_mut()
+        .find_map(|object| match object {
+            ObjectType::TableStyle(style) if style.name == "Standard" => Some(style),
+            _ => None,
+        })
+        .expect("Standard table style");
+    standard_table_style.set_all_text_styles("Standard", None);
+
+    let bytes = DwgWriter::write_to_vec(&doc).expect("DWG write");
+    let rt = DwgReader::from_stream(Cursor::new(bytes))
+        .read()
+        .expect("DWG read");
+    let standard_table_style = rt
+        .objects
+        .values()
+        .find_map(|object| match object {
+            ObjectType::TableStyle(style) if style.name == "Standard" => Some(style),
+            _ => None,
+        })
+        .expect("round-tripped Standard table style");
+
+    let expected = [
+        (1, 1, 1, "_TITLE"),
+        (2, 2, 1, "_HEADER"),
+        (3, 3, 2, "_DATA"),
+    ];
+    assert_eq!(standard_table_style.modern_overrides.len(), expected.len());
+    for ((key, style), (expected_key, expected_id, expected_type, expected_name)) in
+        standard_table_style.modern_overrides.iter().zip(expected)
+    {
+        assert_eq!(*key, expected_key);
+        assert_eq!(style.id, expected_id);
+        assert_eq!(style.style_type, expected_type);
+        assert_eq!(style.name, expected_name);
+        assert_eq!(
+            style.cell_style.content_format.text_style,
+            standard_text_style
+        );
+    }
+}
+
+#[test]
+fn r2018_cell_style_map_preserves_inherited_text_style() {
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    let mut object = DataObject::new(DataObjectData::CellStyleMap(CellStyleMap {
+        cells: vec![NamedTableCellStyle {
+            cell_style: TableCellStyleData {
+                style_type: 5,
+                data_flags: 1,
+                ..TableCellStyleData::default()
+            },
+            id: 1,
+            style_type: 1,
+            name: "Inherited".to_string(),
+        }],
+    }));
+    object.handle = doc.allocate_handle();
+    doc.objects
+        .insert(object.handle, ObjectType::DataObject(object));
+
+    let bytes = DwgWriter::write_to_vec(&doc).expect("DWG write");
+    let rt = DwgReader::from_stream(Cursor::new(bytes))
+        .read()
+        .expect("DWG read");
+    let cell = rt
+        .objects
+        .values()
+        .find_map(|object| match object {
+            ObjectType::DataObject(DataObject {
+                data: DataObjectData::CellStyleMap(style_map),
+                ..
+            }) => style_map.cells.first(),
+            _ => None,
+        })
+        .expect("round-tripped cell style map");
+
+    assert_eq!(cell.cell_style.content_format.text_style, Handle::NULL);
 }
