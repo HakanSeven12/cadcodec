@@ -58,7 +58,7 @@ fn report_read_error(
     push_read_diagnostic(diagnostics, diagnostic);
 }
 
-fn parse_template(data: &[u8]) -> Result<i16, DxfError> {
+fn parse_template(data: &[u8], version: crate::types::DxfVersion) -> Result<i16, DxfError> {
     let length_bytes = data
         .get(..2)
         .ok_or_else(|| DxfError::InvalidFormat("Truncated Template length".into()))?;
@@ -69,8 +69,16 @@ fn parse_template(data: &[u8]) -> Result<i16, DxfError> {
         ));
     }
 
+    let character_width = if version >= crate::types::DxfVersion::AC1021 {
+        2
+    } else {
+        1
+    };
+    let description_bytes = (description_len as usize)
+        .checked_mul(character_width)
+        .ok_or_else(|| DxfError::InvalidFormat("Invalid Template length".into()))?;
     let measurement_offset = 2usize
-        .checked_add(description_len as usize)
+        .checked_add(description_bytes)
         .ok_or_else(|| DxfError::InvalidFormat("Invalid Template length".into()))?;
     let measurement_bytes = data
         .get(measurement_offset..measurement_offset + 2)
@@ -87,14 +95,22 @@ fn parse_template(data: &[u8]) -> Result<i16, DxfError> {
 #[cfg(test)]
 mod template_tests {
     use super::parse_template;
+    use crate::types::DxfVersion;
 
     #[test]
     fn parses_nonempty_description_and_rejects_malformed_payloads() {
-        assert_eq!(parse_template(&[3, 0, b'a', b'b', b'c', 1, 0]).unwrap(), 1);
-        assert!(parse_template(&[]).is_err());
-        assert!(parse_template(&[0xFF, 0xFF, 0, 0]).is_err());
-        assert!(parse_template(&[3, 0, b'a', b'b', b'c']).is_err());
-        assert!(parse_template(&[0, 0, 2, 0]).is_err());
+        assert_eq!(
+            parse_template(&[3, 0, b'a', b'b', b'c', 1, 0], DxfVersion::AC1018).unwrap(),
+            1
+        );
+        assert_eq!(
+            parse_template(&[1, 0, 0, 0, 1, 0], DxfVersion::AC1032).unwrap(),
+            1
+        );
+        assert!(parse_template(&[], DxfVersion::AC1032).is_err());
+        assert!(parse_template(&[0xFF, 0xFF, 0, 0], DxfVersion::AC1032).is_err());
+        assert!(parse_template(&[3, 0, b'a', b'b', b'c'], DxfVersion::AC1018).is_err());
+        assert!(parse_template(&[0, 0, 2, 0], DxfVersion::AC1032).is_err());
     }
 }
 
@@ -968,7 +984,7 @@ impl<R: Read + Seek> DwgReader<R> {
         // MEASUREMENT is stored in the optional Template section, independently
         // of insertion units. Older files may omit the section entirely.
         if let Ok(template_buf) = self.get_section_buffer("AcDb:Template", &info) {
-            match parse_template(&template_buf) {
+            match parse_template(&template_buf, dxf_version) {
                 Ok(measurement) => document.header.measurement = measurement,
                 Err(error) if failsafe => report_read_error(
                     &mut self.notifications,
