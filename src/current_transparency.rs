@@ -66,3 +66,20 @@ impl CadDocument {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_transparency_roundtrips_and_rejects_unsupported_values() {
+        let mut document = CadDocument::new();
+        assert_eq!(document.current_entity_transparency(), Transparency::ByLayer);
+        assert!(document.set_current_entity_transparency(Transparency::T_30));
+        assert_eq!(document.current_entity_transparency(), Transparency::T_30);
+        let object_count = document.objects.len();
+        assert!(!document.set_current_entity_transparency(Transparency::Explicit(231)));
+        assert_eq!(document.current_entity_transparency(), Transparency::T_30);
+        assert_eq!(document.objects.len(), object_count);
+    }
+}

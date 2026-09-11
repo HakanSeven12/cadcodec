@@ -150,7 +150,10 @@ mod tests {
     fn explicit_amounts() {
         let transparency = Transparency::new(128);
         assert_eq!(transparency.explicit_alpha(), Some(128));
-        assert_eq!(Transparency::from_percent(0.5).alpha(), 127);
+        assert_eq!(Transparency::from_percent(0.13).alpha(), 34);
+        assert_eq!(Transparency::from_percent(0.30).alpha(), 77);
+        assert_eq!(Transparency::from_percent(0.33).alpha(), 85);
+        assert_eq!(Transparency::from_percent(0.5).alpha(), 128);
         assert!(Transparency::OPAQUE.is_opaque());
         assert!(Transparency::TRANSPARENT.is_transparent());
     }
