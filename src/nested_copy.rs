@@ -40,6 +40,27 @@ fn destinations(names: impl Iterator<Item=String>,mode:NestedCopyMode)->HashMap<
 }
 
 impl CadDocument {
+    /// Normalize only source dictionary entries with default, document-independent semantics.
+    /// Null retains the model's implicit default; writers resolve it to host default handles.
+    pub fn normalize_imported_layer_defaults(&self, layer: &mut Layer) {
+        let named = |dictionary: Handle, name: &str, handle: Handle| -> bool {
+            if handle.is_null() { return false; }
+            match self.objects.get(&dictionary) {
+                Some(crate::objects::ObjectType::Dictionary(value)) => value.entries.iter()
+                    .any(|(key, target)| key.eq_ignore_ascii_case(name) && *target == handle),
+                Some(crate::objects::ObjectType::DictionaryWithDefault(value)) => value.entries.iter()
+                    .any(|(key, target)| key.eq_ignore_ascii_case(name) && *target == handle),
+                _ => false,
+            }
+        };
+        if named(self.header.acad_plotstylename_dict_handle, "Normal", layer.plotstyle_handle) {
+            layer.plotstyle_handle = Handle::NULL;
+        }
+        if named(self.header.acad_material_dict_handle, "ByLayer", layer.material) {
+            layer.material = Handle::NULL;
+        }
+    }
+
     pub fn nested_copy_symbol_names(&self,mode:NestedCopyMode)->NestedCopySymbolNames {
         NestedCopySymbolNames {
             layers:destinations(self.layers.iter().map(|layer|layer.name.clone()),mode),
