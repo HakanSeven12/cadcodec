@@ -16390,14 +16390,17 @@ impl<'a> SectionReader<'a> {
                         attrib.width_factor = v;
                     }
                 }
+                // DXF stores both angles in degrees; the entity holds radians
+                // (the writer converts back with to_degrees), as TEXT and
+                // ATTDEF already do on read.
                 50 => {
                     if let Some(v) = pair.as_double() {
-                        attrib.rotation = v;
+                        attrib.rotation = v.to_radians();
                     }
                 }
                 51 => {
                     if let Some(v) = pair.as_double() {
-                        attrib.oblique_angle = v;
+                        attrib.oblique_angle = v.to_radians();
                     }
                 }
                 70 => {
@@ -20506,6 +20509,93 @@ mod tests {
         } else {
             panic!("Expected Text entity");
         }
+    }
+
+    /// ATTRIB angles are degrees in DXF and radians in memory, as for TEXT:
+    /// kept as read, a tag rotated 75° came out at 75 rad (about -23°).
+    #[test]
+    fn test_dxf_read_attrib_angles_in_radians() {
+        let dxf = "\
+  0\r\nSECTION\r\n\
+  2\r\nENTITIES\r\n\
+  0\r\nATTRIB\r\n\
+  5\r\n1\r\n\
+100\r\nAcDbEntity\r\n\
+  8\r\n0\r\n\
+100\r\nAcDbText\r\n\
+ 10\r\n1.0\r\n\
+ 20\r\n2.0\r\n\
+ 30\r\n0.0\r\n\
+ 40\r\n0.5\r\n\
+  1\r\nTAG VALUE\r\n\
+ 50\r\n75.0\r\n\
+ 51\r\n15.0\r\n\
+100\r\nAcDbAttribute\r\n\
+  2\r\nLABEL\r\n\
+ 70\r\n0\r\n\
+  0\r\nENDSEC\r\n\
+  0\r\nEOF\r\n";
+
+        let cursor = std::io::Cursor::new(dxf.as_bytes());
+        let reader = crate::io::dxf::reader::DxfReader::from_reader(cursor).expect("from_reader");
+        let doc = reader.read().expect("read");
+
+        let entities: Vec<_> = doc.entities().collect();
+        assert_eq!(entities.len(), 1);
+        if let EntityType::AttributeEntity(ref a) = entities[0] {
+            assert_eq!(a.value, "TAG VALUE");
+            assert!(
+                (a.rotation - 75.0_f64.to_radians()).abs() < 1e-9,
+                "rotation should be 75 deg in radians, got {}",
+                a.rotation
+            );
+            assert!(
+                (a.oblique_angle - 15.0_f64.to_radians()).abs() < 1e-9,
+                "oblique angle should be 15 deg in radians, got {}",
+                a.oblique_angle
+            );
+        } else {
+            panic!("Expected AttributeEntity");
+        }
+    }
+
+    /// The writer stores ATTRIB angles as degrees; they must read back as the
+    /// same radians, or every save turns a tag's rotation into garbage. The
+    /// attribute rides on an INSERT, as attributes do in DXF.
+    #[test]
+    fn test_dxf_roundtrip_attrib_angles() {
+        let mut doc = CadDocument::new();
+        let mut attrib = AttributeEntity::new(String::new(), String::new());
+        attrib.tag = "LABEL".to_string();
+        attrib.value = "TAG VALUE".to_string();
+        attrib.height = 0.5;
+        attrib.rotation = 75.0_f64.to_radians();
+        attrib.oblique_angle = 15.0_f64.to_radians();
+        let mut insert = Insert::new("*Model_Space", Vector3::new(0.0, 0.0, 0.0));
+        insert.rotation = 75.0_f64.to_radians();
+        insert.attributes.push(attrib);
+        let _ = doc.add_entity(EntityType::Insert(insert));
+
+        let doc2 = roundtrip(doc);
+        let insert = doc2
+            .entities()
+            .find_map(|e| match e {
+                EntityType::Insert(i) => Some(i),
+                _ => None,
+            })
+            .expect("Expected Insert entity");
+        assert_eq!(insert.attributes.len(), 1);
+        let a = &insert.attributes[0];
+        assert!(
+            (a.rotation - 75.0_f64.to_radians()).abs() < 1e-9,
+            "rotation should survive a roundtrip, got {}",
+            a.rotation
+        );
+        assert!(
+            (a.oblique_angle - 15.0_f64.to_radians()).abs() < 1e-9,
+            "oblique angle should survive a roundtrip, got {}",
+            a.oblique_angle
+        );
     }
 
     #[test]
