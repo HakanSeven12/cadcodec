@@ -30,6 +30,9 @@ use crate::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+mod semantic_inventory;
+pub use semantic_inventory::*;
+
 #[cfg(feature = "serde")]
 fn default_sketch_tolerance() -> f64 {
     0.5
