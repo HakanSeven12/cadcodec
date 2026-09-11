@@ -1955,7 +1955,10 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit(record.flags.anonymous);
         // Has attributes
         let has_attributes = record.entity_handles.iter().any(|handle| {
-            matches!(self.document.get_entity(*handle), Some(EntityType::AttributeDefinition(_)))
+            matches!(
+                self.document.get_entity(*handle),
+                Some(EntityType::AttributeDefinition(_))
+            )
         });
         self.writer.write_bit(has_attributes);
         // Is xref

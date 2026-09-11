@@ -2108,7 +2108,13 @@ impl<'a> DwgObjectWriter<'a> {
             UnderlayType::Pdf => common::OBJ_PDFDEFINITION,
         };
         let type_code = self.class_type_code(def.entity_name(), fallback);
-        self.write_common_non_entity_data(type_code, def.handle, def.owner_handle, &def.reactors, &None);
+        self.write_common_non_entity_data(
+            type_code,
+            def.handle,
+            def.owner_handle,
+            &def.reactors,
+            &None,
+        );
 
         self.writer.write_variable_text(&def.file_path);
         self.writer.write_variable_text(&def.page_name);

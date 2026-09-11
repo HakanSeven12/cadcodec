@@ -19747,8 +19747,11 @@ impl<'a> SectionReader<'a> {
                 }
                 330 => {
                     if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
-                        if in_reactors { def.reactors.push(Handle::new(h)); }
-                        else { def.owner_handle = Handle::new(h); }
+                        if in_reactors {
+                            def.reactors.push(Handle::new(h));
+                        } else {
+                            def.owner_handle = Handle::new(h);
+                        }
                     }
                 }
                 1 => def.file_path = pair.value_string.clone(),

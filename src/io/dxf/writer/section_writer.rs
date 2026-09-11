@@ -307,7 +307,24 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     /// Set the target DXF version
     pub fn set_version(&mut self, version: DxfVersion) {
-        self.dxf_version = version;
+        self.dxf_version = Self::writable_version(version);
+    }
+
+    /// The version this writer actually emits for a requested target.
+    ///
+    /// R12 (AC1009) predates the handle-based object model: its table records
+    /// carry no handles, no `330` owner pointers and no `100` subclass markers,
+    /// and it has no OBJECTS section. This writer always emits those R13+
+    /// constructs, so declaring `AC1009` in `$ACADVER` would describe the file
+    /// as something it is not - consumers applying R12 parsing rules then fail
+    /// to read the table records at all (issue #68). R12 input is therefore
+    /// preserved through read (`document.version` stays `AC1009`) but written
+    /// as R13, the oldest version whose structure matches what is emitted.
+    pub(crate) fn writable_version(version: DxfVersion) -> DxfVersion {
+        match version {
+            DxfVersion::AC1009 => DxfVersion::AC1012,
+            other => other,
+        }
     }
 
     /// Returns true if the target version requires SAB binary format (AC1027+)
@@ -327,8 +344,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         let hdr = &document.header;
 
         // === Version & maintenance ===
+        // `self.dxf_version` (not `document.version`) so the declared version
+        // always matches the structure actually emitted - see
+        // `writable_version` for the R12 case.
+        let declared_version = self.dxf_version;
         self.write_header_variable("$ACADVER", |w| {
-            w.write_string(1, document.version.to_dxf_string())
+            w.write_string(1, declared_version.to_dxf_string())
         })?;
         if self.dxf_version >= DxfVersion::AC1032 {
             self.write_header_variable("$ACADMAINTVER", |w| w.write_i32(90, 0))?;
@@ -1148,7 +1169,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_subclass("AcDbTextStyleTableRecord")?;
         // Shape files have an empty DXF STYLE name; SHAPE resolves group 2
         // by searching the shape files (ODA 20.4.37), not a text-style name.
-        self.writer.write_string(2, if style.is_shape_file { "" } else { style.name() })?;
+        self.writer.write_string(
+            2,
+            if style.is_shape_file {
+                ""
+            } else {
+                style.name()
+            },
+        )?;
         let mut flags: i16 = 0;
         if style.is_shape_file {
             flags |= 0x01;
@@ -1414,7 +1442,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         )?;
         if self.dxf_version >= DxfVersion::AC1015 {
             self.writer.write_subclass("AcDbDimStyleTable")?;
-            self.writer.write_i16(71, document.dim_styles.len() as i16)?;
+            self.writer
+                .write_i16(71, document.dim_styles.len() as i16)?;
         }
 
         for dimstyle in document.dim_styles.iter() {
@@ -2048,7 +2077,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_double(44, data.offset_from_arc)?;
                 self.writer.write_double(45, data.right_offset)?;
                 self.writer.write_double(46, data.left_offset)?;
-                self.writer.write_double(50, data.start_angle.to_degrees())?;
+                self.writer
+                    .write_double(50, data.start_angle.to_degrees())?;
                 self.writer.write_double(51, data.end_angle.to_degrees())?;
                 self.writer.write_i16(70, data.reverse as i16)?;
                 self.writer.write_i16(71, data.text_direction)?;
@@ -6896,7 +6926,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_handle(5, def.handle)?;
         if !def.reactors.is_empty() {
             self.writer.write_string(102, "{ACAD_REACTORS")?;
-            for reactor in &def.reactors { self.writer.write_handle(330, *reactor)?; }
+            for reactor in &def.reactors {
+                self.writer.write_handle(330, *reactor)?;
+            }
             self.writer.write_string(102, "}")?;
         }
         self.writer.write_handle(330, def.owner_handle)?;

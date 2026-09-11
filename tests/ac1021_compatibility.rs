@@ -158,9 +158,9 @@ fn autocad_opens_ac1021_without_recovery() {
                     6.,
                     7.,
                 );
-                doc.add_entity(EntityType::Solid3D(
-                    acadrust::entities::Solid3D::from_sat(&sat.to_sat_string()),
-                ))
+                doc.add_entity(EntityType::Solid3D(acadrust::entities::Solid3D::from_sat(
+                    &sat.to_sat_string(),
+                )))
                 .unwrap();
             }
             doc

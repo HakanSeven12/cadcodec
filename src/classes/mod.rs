@@ -786,7 +786,10 @@ mod tests {
     #[test]
     fn imported_abstract_class_declarations_are_not_discarded() {
         let mut coll = DxfClassCollection::new();
-        coll.push_preserving(DxfClass::new("ACDBASSOCACTIONPARAM", "AcDbAssocActionParam"));
+        coll.push_preserving(DxfClass::new(
+            "ACDBASSOCACTIONPARAM",
+            "AcDbAssocActionParam",
+        ));
         coll.update_defaults();
         assert!(coll.contains("ACDBASSOCACTIONPARAM"));
     }

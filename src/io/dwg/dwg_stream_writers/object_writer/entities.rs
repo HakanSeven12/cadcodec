@@ -4134,7 +4134,9 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_cm_color(&e.line_color);
 
         // 341 LeaderLineTypeID (handle) - HardPointer
-        let lt = e.line_type_handle.filter(|handle| !handle.is_null())
+        let lt = e
+            .line_type_handle
+            .filter(|handle| !handle.is_null())
             .unwrap_or(self.document.header.bylayer_linetype_handle);
         self.writer
             .write_handle(DwgReferenceType::HardPointer, lt.value());
@@ -5015,8 +5017,10 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         if self.version.r2007_plus() && !acds {
-            self.writer.write_handle(DwgReferenceType::SoftPointer,
-                e.history_handle.unwrap_or(Handle::NULL).value());
+            self.writer.write_handle(
+                DwgReferenceType::SoftPointer,
+                e.history_handle.unwrap_or(Handle::NULL).value(),
+            );
         }
         self.register_object(e.common.handle);
     }

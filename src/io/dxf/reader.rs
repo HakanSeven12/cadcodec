@@ -356,6 +356,10 @@ impl DxfReader {
         document.synchronize_handle_allocator();
         rehandle_colliding_default_entries(&mut document, &default_entry_handles);
         document.resolve_references();
+        // Must follow `resolve_references`: handle-less legacy table records
+        // (R12 STYLE entries) only receive their handles there, so running this
+        // earlier would resolve every reference to a null handle.
+        rewire_stale_text_style_references(&mut document);
 
         // Pre-R2004 (R2000/R14) down-saved gradient hatches keep their gradient
         // in the ACAD round-trip metadata (GradientColor1/2ACI EED + an
@@ -754,42 +758,68 @@ fn rehandle_colliding_default_entries(
             }
         }
     }
-
-    rewire_stale_dimstyle_text_styles(document);
 }
 
-/// Re-point DIMSTYLE text-style handles that no longer resolve to a text
-/// style.
+/// Re-point text-style handles on default records that no longer resolve to a
+/// text style.
 ///
-/// The default Standard DIMSTYLE wires its `dimtxsty_handle` to the default
-/// Standard TEXT STYLE handle. When the input file replaces that text style
-/// with its own record at a different handle, the surviving default dimstyle
-/// is left pointing at a numeric handle the file has since given to an
-/// unrelated record - e.g. the ByBlock linetype - and the writer emits a
-/// `340` that consumers resolve to the wrong table (issue #64). Re-point
-/// such stale handles at the file's text style of the same name.
-fn rewire_stale_dimstyle_text_styles(document: &mut CadDocument) {
+/// The default Standard DIMSTYLE and Standard MLEADERSTYLE both wire their
+/// text-style reference to the default Standard TEXT STYLE handle. When the
+/// input file replaces that text style with its own record at a different
+/// handle, the surviving default is left pointing at a numeric handle the file
+/// has since given to an unrelated record - e.g. the ByBlock linetype - and the
+/// writer emits a `340`/`342` that consumers resolve to the wrong table
+/// (issues #64 and #68). Re-point such stale handles at the file's text style
+/// of the same name.
+fn rewire_stale_text_style_references(document: &mut CadDocument) {
     let text_style_handles: std::collections::HashSet<u64> = document
         .text_styles
         .iter()
         .map(|style| style.handle.value())
         .collect();
+    let is_stale =
+        |handle: Handle| !handle.is_null() && !text_style_handles.contains(&handle.value());
 
+    // The default wiring is Standard -> Standard, so a stale reference is
+    // re-pointed at the text style carrying the same name as the record that
+    // holds it. When no such text style exists the handle is left alone rather
+    // than guessed at.
+    let resolve = |document: &CadDocument, name: &str| -> Option<Handle> {
+        document.text_styles.get(name).map(|s| s.handle)
+    };
+
+    // ── DIMSTYLE (group 340) ──
     let mut stale_names: Vec<String> = Vec::new();
     for style in document.dim_styles.iter() {
-        let handle = style.dimtxsty_handle;
-        if !handle.is_null() && !text_style_handles.contains(&handle.value()) {
+        if is_stale(style.dimtxsty_handle) {
             stale_names.push(style.name().to_string());
         }
     }
     for name in stale_names {
-        // Re-point at the text style with the same name as the dimstyle
-        // (the default wiring is Standard -> Standard); if no such text
-        // style exists, leave the handle alone rather than guessing.
-        if let Some(new) = document.text_styles.get(&name).map(|s| s.handle) {
+        if let Some(new) = resolve(document, &name) {
             if let Some(style) = document.dim_styles.get_mut(&name) {
                 style.dimtxsty_handle = new;
             }
+        }
+    }
+
+    // ── MLEADERSTYLE (group 342) ──
+    let mut stale_styles: Vec<(Handle, String)> = Vec::new();
+    for (handle, object) in document.objects.iter() {
+        if let crate::objects::ObjectType::MultiLeaderStyle(style) = object {
+            if style.text_style_handle.is_some_and(is_stale) {
+                stale_styles.push((*handle, style.name.clone()));
+            }
+        }
+    }
+    for (handle, name) in stale_styles {
+        let Some(new) = resolve(document, &name) else {
+            continue;
+        };
+        if let Some(crate::objects::ObjectType::MultiLeaderStyle(style)) =
+            document.objects.get_mut(&handle)
+        {
+            style.text_style_handle = Some(new);
         }
     }
 }

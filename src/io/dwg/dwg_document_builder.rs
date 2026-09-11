@@ -2446,7 +2446,8 @@ impl DwgDocumentBuilder {
                                     .find(|(_, layer)| layer.eq_ignore_ascii_case(name))
                                     .map(|(handle, _)| Handle::new(*handle))
                             });
-                            if let Some((id, is_on)) = legacy_viewports.get(&viewport.common.handle) {
+                            if let Some((id, is_on)) = legacy_viewports.get(&viewport.common.handle)
+                            {
                                 viewport.id = *id;
                                 viewport.status.is_on = *is_on;
                             }
@@ -3619,7 +3620,9 @@ impl DwgDocumentBuilder {
                             e.clip_boundary_handle = Handle::new(clip);
                         }
                         // R2000 carries an obsolete viewport-entity-header handle.
-                        if self.obj_reader.version() == crate::io::dwg::dwg_version::DwgVersion::AC15 {
+                        if self.obj_reader.version()
+                            == crate::io::dwg::dwg_version::DwgVersion::AC15
+                        {
                             let _ = reader.read_handle();
                         }
                         let ucs = reader.read_handle();

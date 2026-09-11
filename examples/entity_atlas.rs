@@ -562,7 +562,10 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
     ] {
         let surface = if matches!(
             kind,
-            SurfaceKind::Extruded | SurfaceKind::Lofted | SurfaceKind::Revolved | SurfaceKind::Swept
+            SurfaceKind::Extruded
+                | SurfaceKind::Lofted
+                | SurfaceKind::Revolved
+                | SurfaceKind::Swept
         ) {
             let mut surface = native_surfaces
                 .entities()
@@ -925,7 +928,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .cases
                 .iter()
                 .filter(|item| {
-                    item["name"].as_str().is_some_and(|name| name.starts_with(excluded))
+                    item["name"]
+                        .as_str()
+                        .is_some_and(|name| name.starts_with(excluded))
                 })
                 .filter_map(|item| item["layer"].as_str().map(str::to_owned))
                 .collect();
@@ -938,7 +943,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for handle in removed {
                 s.doc.remove_entity(handle);
             }
-            s.cases.retain(|item| !layers.iter().any(|layer| item["layer"] == *layer));
+            s.cases
+                .retain(|item| !layers.iter().any(|layer| item["layer"] == *layer));
         }
         if let Some(case) = &case {
             let selected: Vec<String> = s
