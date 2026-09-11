@@ -129,6 +129,7 @@ pub mod classes;
 pub mod compound_file;
 pub mod document;
 mod current_transparency;
+pub mod nested_copy;
 pub mod entities;
 pub mod error;
 pub mod fields;
