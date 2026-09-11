@@ -58,6 +58,46 @@ fn report_read_error(
     push_read_diagnostic(diagnostics, diagnostic);
 }
 
+fn parse_template(data: &[u8]) -> Result<i16, DxfError> {
+    let length_bytes = data
+        .get(..2)
+        .ok_or_else(|| DxfError::InvalidFormat("Truncated Template length".into()))?;
+    let description_len = i16::from_le_bytes(length_bytes.try_into().unwrap());
+    if description_len < 0 {
+        return Err(DxfError::InvalidFormat(
+            "Negative Template description length".into(),
+        ));
+    }
+
+    let measurement_offset = 2usize
+        .checked_add(description_len as usize)
+        .ok_or_else(|| DxfError::InvalidFormat("Invalid Template length".into()))?;
+    let measurement_bytes = data
+        .get(measurement_offset..measurement_offset + 2)
+        .ok_or_else(|| DxfError::InvalidFormat("Truncated Template payload".into()))?;
+    let measurement = i16::from_le_bytes(measurement_bytes.try_into().unwrap());
+    if !matches!(measurement, 0 | 1) {
+        return Err(DxfError::InvalidFormat(format!(
+            "Invalid MEASUREMENT value: {measurement}"
+        )));
+    }
+    Ok(measurement)
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::parse_template;
+
+    #[test]
+    fn parses_nonempty_description_and_rejects_malformed_payloads() {
+        assert_eq!(parse_template(&[3, 0, b'a', b'b', b'c', 1, 0]).unwrap(), 1);
+        assert!(parse_template(&[]).is_err());
+        assert!(parse_template(&[0xFF, 0xFF, 0, 0]).is_err());
+        assert!(parse_template(&[3, 0, b'a', b'b', b'c']).is_err());
+        assert!(parse_template(&[0, 0, 2, 0]).is_err());
+    }
+}
+
 /// AC1021 file header offset (data pages start after this)
 const AC21_FILE_HEADER_SIZE: u64 = 0x480;
 
@@ -929,6 +969,23 @@ impl<R: Read + Seek> DwgReader<R> {
         }
         document.header.code_page =
             crate::io::dxf::code_page::dwg_code_page_name(info.code_page).to_string();
+
+        // MEASUREMENT is stored in the optional Template section, independently
+        // of insertion units. Older files may omit the section entirely.
+        if let Ok(template_buf) = self.get_section_buffer("AcDb:Template", &info) {
+            match parse_template(&template_buf) {
+                Ok(measurement) => document.header.measurement = measurement,
+                Err(error) if failsafe => report_read_error(
+                    &mut self.notifications,
+                    &mut diagnostics,
+                    "template-decode-failed",
+                    ReadStage::Header,
+                    Some("AcDb:Template"),
+                    error.to_string(),
+                ),
+                Err(error) => return Err(error),
+            }
+        }
         self.report_progress(40);
 
         // 4. Read Handle Map (AcDb:Handles)

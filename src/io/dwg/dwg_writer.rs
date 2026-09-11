@@ -1019,7 +1019,7 @@ fn write_ac15<W: Write + Seek>(
     fhw.add_section(section_names::OBJ_FREE_SPACE, obj_free_space);
 
     // ── Section: Template ──
-    let template = build_template();
+    let template = build_template(&[], document.header.measurement)?;
     fhw.add_section(section_names::TEMPLATE, template);
 
     // ── Section: AuxHeader (uses corrected HANDSEED) ──
@@ -1230,7 +1230,7 @@ fn write_ac18<W: Write + Seek>(
     )?;
 
     // ── Section: Template ──
-    let template = build_template();
+    let template = build_template(&[], document.header.measurement)?;
     fhw.add_section(output, section_names::TEMPLATE, &template, true, PAGE_SIZE)?;
 
     // ── Section: Handles (last — needs objects data) ──
@@ -1342,7 +1342,7 @@ fn write_ac21_impl<W: Write + Seek>(
     fhw.add_section(output, section_names::OBJ_FREE_SPACE, &obj_free_space)?;
 
     // Template
-    let template = build_template();
+    let template = build_template(&[], document.header.measurement)?;
     fhw.add_section(output, section_names::TEMPLATE, &template)?;
 
     // Handles (needs objects data for offsets)
@@ -1429,14 +1429,22 @@ fn build_obj_free_space(
 
 /// Build Template section data.
 ///
-/// Contains template description length (0 = no template).
-/// AutoCAD reference files only write the 4-byte RL length with no
-/// MEASUREMENT field when the template description is empty.
-fn build_template() -> Vec<u8> {
-    let mut data = Vec::with_capacity(4);
-    // RL (raw long = 4 bytes): template description length (0)
-    data.extend_from_slice(&0i32.to_le_bytes());
-    data
+/// Contains a two-byte description length, the encoded description, and the
+/// two-byte MEASUREMENT value.
+fn build_template(description: &[u8], measurement: i16) -> Result<Vec<u8>> {
+    let description_len = i16::try_from(description.len())
+        .map_err(|_| DxfError::InvalidFormat("Template description is too long".into()))?;
+    if !matches!(measurement, 0 | 1) {
+        return Err(DxfError::InvalidFormat(format!(
+            "Invalid MEASUREMENT value: {measurement}"
+        )));
+    }
+
+    let mut data = Vec::with_capacity(description.len() + 4);
+    data.extend_from_slice(&description_len.to_le_bytes());
+    data.extend_from_slice(description);
+    data.extend_from_slice(&measurement.to_le_bytes());
+    Ok(data)
 }
 
 /// Build SummaryInfo section data (AC18+ only).
@@ -2188,9 +2196,18 @@ mod tests {
 
     #[test]
     fn test_build_template() {
-        let t = build_template();
+        let t = build_template(&[], 1).unwrap();
         assert_eq!(t.len(), 4);
-        assert_eq!(i32::from_le_bytes([t[0], t[1], t[2], t[3]]), 0); // desc length (RL = 4 bytes)
+        assert_eq!(t, [0, 0, 1, 0]);
+    }
+
+    #[test]
+    fn test_build_template_with_description() {
+        let t = build_template(b"metric", 1).unwrap();
+        assert_eq!(&t[..2], &6i16.to_le_bytes());
+        assert_eq!(&t[2..8], b"metric");
+        assert_eq!(&t[8..], &1i16.to_le_bytes());
+        assert!(build_template(&[], 2).is_err());
     }
 
     #[test]
