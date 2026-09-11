@@ -11833,7 +11833,7 @@ impl<'a> SectionReader<'a> {
                             }
                             50 => {
                                 if let Some(v) = vpair.as_double() {
-                                    tangent = v;
+                                    tangent = v.to_radians();
                                 }
                             }
                             62 => {
