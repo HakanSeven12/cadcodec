@@ -21,6 +21,9 @@ impl CadDocument {
     /// Store current entity transparency using the packed dictionary value.
     /// Existing entries are updated in place; conflicting object types are preserved.
     pub fn set_current_entity_transparency(&mut self, value: Transparency) -> bool {
+        if matches!(value, Transparency::Explicit(amount) if amount > 230) {
+            return false;
+        }
         let mut root_handle = self.header.named_objects_dict_handle;
         if root_handle == Handle::NULL {
             root_handle = self.allocate_handle();
