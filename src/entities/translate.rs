@@ -181,6 +181,9 @@ pub(crate) fn translate_hatch(e: &mut Hatch, offset: Vector3) {
     let wcs_to_ocs = ocs_to_wcs.transpose();
     let offset_ocs = wcs_to_ocs * offset;
 
+    let origin = e.pattern_origin();
+    e.set_pattern_origin(crate::types::Vector2::new(origin.x + offset_ocs.x, origin.y + offset_ocs.y));
+
     e.elevation += offset_ocs.z;
 
     for path in &mut e.paths {

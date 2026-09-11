@@ -1778,12 +1778,26 @@ impl<'a> DwgObjectWriter<'a> {
 
     // â”€â”€ Hatch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+    fn hatch_common_for_write(&self, e: &Hatch) -> EntityCommon {
+        let mut common = e.common.clone();
+        if e.stored_pattern_origin().is_some() {
+            if let Some(app) = self.document.app_ids.get("ACAD") {
+                common
+                    .extended_data
+                    .raw_dwg_eed
+                    .retain(|(handle, _)| *handle != app.handle.value());
+            }
+        }
+        common
+    }
+
     fn write_hatch(&mut self, e: &Hatch) {
         if e.is_mpolygon {
             self.write_mpolygon(e);
             return;
         }
-        self.entity_preamble(common::OBJ_HATCH, &e.common);
+        let common = self.hatch_common_for_write(e);
+        self.entity_preamble(common::OBJ_HATCH, &common);
 
         // Gradient color data (R2004+)
         if self.version.r2004_plus() {
@@ -1880,7 +1894,8 @@ impl<'a> DwgObjectWriter<'a> {
 
     fn write_mpolygon(&mut self, e: &Hatch) {
         let type_code = self.class_type_code("MPOLYGON", common::OBJ_MPOLYGON);
-        self.entity_preamble(type_code, &e.common);
+        let common = self.hatch_common_for_write(e);
+        self.entity_preamble(type_code, &common);
         self.writer.write_bit_short(e.style as i16);
 
         if self.version.r2004_plus() {
