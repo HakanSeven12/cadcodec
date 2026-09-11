@@ -76,6 +76,9 @@ pub struct Spline {
     /// Complete R2013+ spline flag word, including flags not otherwise
     /// represented by this API.
     pub dwg_flags1: i32,
+    /// Complete DXF spline flag word; geometry flags are refreshed when written.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dxf_flags: i16,
 }
 
 impl Spline {
@@ -98,6 +101,7 @@ impl Spline {
             knot_parameterization: 0,
             cv_frame_visible: false,
             dwg_flags1: 0,
+            dxf_flags: 0,
         }
     }
 

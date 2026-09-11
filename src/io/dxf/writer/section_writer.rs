@@ -3877,7 +3877,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_normal(spline.normal)?;
 
         // Flags
-        let mut flags: i16 = 0;
+        let mut flags: i16 = spline.dxf_flags & !31;
+        if spline.dwg_flags1 & 1 != 0 { flags |= 32; }
         if spline.flags.closed {
             flags |= 1;
         }

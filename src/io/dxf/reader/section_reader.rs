@@ -12579,6 +12579,8 @@ impl<'a> SectionReader<'a> {
                 }
                 70 => {
                     if let Some(flags_val) = pair.as_i16() {
+                        spline.dxf_flags = flags_val;
+                        if flags_val & 32 != 0 { spline.dwg_flags1 |= 1; }
                         spline.flags.closed = (flags_val & 1) != 0;
                         spline.flags.periodic = (flags_val & 2) != 0;
                         spline.flags.rational = (flags_val & 4) != 0;
@@ -12777,6 +12779,8 @@ impl<'a> SectionReader<'a> {
                 // ── AcDbSpline geometry ──
                 70 => {
                     if let Some(f) = pair.as_i16() {
+                        helix.spline.dxf_flags = f;
+                        if f & 32 != 0 { helix.spline.dwg_flags1 |= 1; }
                         helix.spline.flags.closed = (f & 1) != 0;
                         helix.spline.flags.periodic = (f & 2) != 0;
                         helix.spline.flags.rational = (f & 4) != 0;
