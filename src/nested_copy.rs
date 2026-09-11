@@ -39,9 +39,34 @@ fn destinations(names: impl Iterator<Item=String>,mode:NestedCopyMode)->HashMap<
     result
 }
 
+// A reserved Global name can still carry edited appearance. Only the implicit
+// appearance is portable without copying a material and its dependency graph.
+fn implicit_material(material: &crate::objects::Material, document: &CadDocument) -> bool {
+    let mut value = material.clone();
+    value.handle = Handle::NULL;
+    value.owner = Handle::NULL;
+    value.reactors.clear();
+    value.name.clear();
+    value.advanced_data_present = false;
+    if let Some(dictionary) = value.xdictionary_handle.take() {
+        let Some(crate::objects::ObjectType::Dictionary(dictionary)) = document.objects.get(&dictionary) else { return false; };
+        if dictionary.xdictionary_handle.is_some() || dictionary.entries.iter().any(|(name, _)| {
+            !["BUMPTILE", "DIFFUSETILE", "OPACITYTILE", "REFLECTIONTILE", "REFRACTIONTILE", "SPECULARTILE"]
+                .iter().any(|allowed| name.eq_ignore_ascii_case(allowed))
+        }) { return false; }
+    }
+    for map in [&mut value.diffuse_map, &mut value.specular_map, &mut value.reflection_map,
+        &mut value.opacity_map, &mut value.bump_map, &mut value.refraction_map, &mut value.normal_map] {
+        if map.source != 0 || !map.file_name.is_empty() || map.texture.is_some() { return false; }
+        // Mapping coordinates and their tiling records have no effect without a texture.
+        map.transform = crate::objects::MaterialMap::default().transform;
+    }
+    value == crate::objects::Material::default()
+}
+
 impl CadDocument {
     /// Normalize only source dictionary entries with default, document-independent semantics.
-    /// Null retains the model's implicit default; writers resolve it to host default handles.
+    /// Null retains the model's implicit default without carrying a source-document handle.
     pub fn normalize_imported_layer_defaults(&self, layer: &mut Layer) {
         let named = |dictionary: Handle, name: &str, handle: Handle| -> bool {
             if handle.is_null() { return false; }
@@ -56,7 +81,11 @@ impl CadDocument {
         if named(self.header.acad_plotstylename_dict_handle, "Normal", layer.plotstyle_handle) {
             layer.plotstyle_handle = Handle::NULL;
         }
-        if named(self.header.acad_material_dict_handle, "ByLayer", layer.material) {
+        if named(self.header.acad_material_dict_handle, "ByLayer", layer.material)
+            || (named(self.header.acad_material_dict_handle, "Global", layer.material)
+                && matches!(self.objects.get(&layer.material),
+                    Some(crate::objects::ObjectType::Material(material)) if implicit_material(material, self)))
+        {
             layer.material = Handle::NULL;
         }
     }
@@ -133,7 +162,43 @@ impl CadDocument {
 mod tests {
     use super::*;
     use crate::entities::Line;
+    use crate::objects::{Dictionary, Material, ObjectType};
     use crate::types::Vector3;
+
+    fn install_global_material(
+        document: &mut CadDocument,
+        mut material: Material,
+        extension_entries: &[&str],
+    ) -> Handle {
+        let material_handle = document.allocate_handle();
+        material.handle = material_handle;
+        material.owner = document.header.acad_material_dict_handle;
+        material.name = "Global".into();
+        if !extension_entries.is_empty() {
+            let dictionary_handle = document.allocate_handle();
+            let mut dictionary = Dictionary::new();
+            dictionary.handle = dictionary_handle;
+            dictionary.owner = material_handle;
+            for name in extension_entries {
+                dictionary.add_entry(*name, document.allocate_handle());
+            }
+            document
+                .objects
+                .insert(dictionary_handle, ObjectType::Dictionary(dictionary));
+            material.xdictionary_handle = Some(dictionary_handle);
+        }
+        document
+            .objects
+            .insert(material_handle, ObjectType::Material(material));
+        let Some(ObjectType::Dictionary(dictionary)) = document
+            .objects
+            .get_mut(&document.header.acad_material_dict_handle)
+        else {
+            panic!("material dictionary missing");
+        };
+        dictionary.add_entry("Global", material_handle);
+        material_handle
+    }
 
     #[test]
     fn destination_names_are_stable_and_avoid_bind_collisions() {
@@ -167,5 +232,74 @@ mod tests {
         assert_eq!((common.layer.as_str(), common.linetype.as_str()), ("Detail", "Dash"));
         assert_eq!(common.linetype_handle, document.line_types.get("Dash").map(|line| line.handle));
         assert!(document.layers.get("Detail").is_some());
+    }
+
+    #[test]
+    fn default_global_material_is_an_implicit_layer_default() {
+        let mut document = CadDocument::new();
+        let mut material = Material::default();
+        material.advanced_data_present = true;
+        let handle = install_global_material(&mut document, material, &[]);
+        let mut layer = Layer::new("Imported");
+        layer.material = handle;
+
+        document.normalize_imported_layer_defaults(&mut layer);
+
+        assert_eq!(layer.material, Handle::NULL);
+    }
+
+    #[test]
+    fn inactive_map_transform_and_known_tiling_records_are_implicit() {
+        let mut document = CadDocument::new();
+        let mut material = Material::default();
+        material.diffuse_map.transform[12] = 42.0;
+        let handle = install_global_material(
+            &mut document,
+            material,
+            &["DIFFUSETILE", "OpacityTile"],
+        );
+        let mut layer = Layer::new("Imported");
+        layer.material = handle;
+
+        document.normalize_imported_layer_defaults(&mut layer);
+
+        assert_eq!(layer.material, Handle::NULL);
+    }
+
+    #[test]
+    fn customized_global_material_is_retained() {
+        let mut document = CadDocument::new();
+        let mut material = Material::default();
+        material.opacity_percent = 0.5;
+        let handle = install_global_material(&mut document, material, &[]);
+        let mut layer = Layer::new("Imported");
+        layer.material = handle;
+
+        document.normalize_imported_layer_defaults(&mut layer);
+
+        assert_eq!(layer.material, handle);
+    }
+
+    #[test]
+    fn active_map_or_unknown_extension_dependency_is_retained() {
+        let mut active_document = CadDocument::new();
+        let mut material = Material::default();
+        material.diffuse_map.source = 1;
+        let active = install_global_material(&mut active_document, material, &[]);
+        let mut active_layer = Layer::new("Active");
+        active_layer.material = active;
+        active_document.normalize_imported_layer_defaults(&mut active_layer);
+        assert_eq!(active_layer.material, active);
+
+        let mut extension_document = CadDocument::new();
+        let extension = install_global_material(
+            &mut extension_document,
+            Material::default(),
+            &["CUSTOM"],
+        );
+        let mut extension_layer = Layer::new("Extension");
+        extension_layer.material = extension;
+        extension_document.normalize_imported_layer_defaults(&mut extension_layer);
+        assert_eq!(extension_layer.material, extension);
     }
 }
