@@ -314,10 +314,10 @@ fn extract_acds_record_blobs(buf: &[u8], modeler_handles: &HashSet<u64>) -> Vec<
     };
     let marker = [0xACu8, 0xD5, 0x5F, 0x64, 0x61, 0x74, 0x61, 0x5F]; // "\xAC\xD5_data_"
     let mut out: Vec<(u64, Vec<u8>)> = Vec::new();
-    // Records whose blob is not in the table's own data — handled below from the
-    // pre-table blob pool. Kept in record order.
+    // Records whose blob is not in the table's own data — handled below from
+    // unclaimed blob segments elsewhere in the datastore. Kept in record order.
     let mut orphan_handles: Vec<u64> = Vec::new();
-    let mut first_table = usize::MAX;
+    let mut claimed_starts: HashSet<usize> = HashSet::new();
     // A large datastore splits its records across several `_data_` segments, so
     // process every one whose content is a record table (opens with `col0=0x14`).
     let mut scan = 0;
@@ -327,7 +327,6 @@ fn extract_acds_record_blobs(buf: &[u8], modeler_handles: &HashSet<u64>) -> Vec<
         if rd(seg + 48) != Some(0x14) {
             continue; // e.g. the empty thumbnail `_data_` segment
         }
-        first_table = first_table.min(seg);
         // Segment size (RQ at header offset 16) bounds this segment's blob data,
         // so the last record does not run into the following segment.
         let seg_size = buf
@@ -383,31 +382,21 @@ fn extract_acds_record_blobs(buf: &[u8], modeler_handles: &HashSet<u64>) -> Vec<
             // the absent marker family is still O(records × buf). (#203)
             let end_bound = (region_end + ASM_END_MARKER.len()).min(seg_end);
             if let Some((end, marker_len)) = find_acds_end(buf, start, end_bound) {
+                claimed_starts.insert(start);
                 out.push((handle, buf[start..end + marker_len].to_vec()));
             }
         }
     }
-    // Records whose table entry carries no inline blob take theirs from a blob
-    // pool that sits before the first record table. Those blobs appear there in
-    // record order, so pair them one-for-one with the orphan records — but only
-    // when the counts match exactly, so a stray magic can't shift the pairing.
-    if !orphan_handles.is_empty() && first_table != usize::MAX {
-        let mut pool: Vec<Vec<u8>> = Vec::new();
-        let mut pos = 0;
-        while let Some(start) = find_acds_magic(buf, pos) {
-            if start >= first_table {
-                break;
-            }
-            // Pool blobs sit before the first record table, so bound the end
-            // search there rather than scanning into (or past) the tables.
-            match find_acds_end(buf, start, first_table) {
-                Some((end, marker_len)) => {
-                    pool.push(buf[start..end + marker_len].to_vec());
-                    pos = end + marker_len;
-                }
-                None => break,
-            }
-        }
+    // A record can point to an external blob segment before or after its table.
+    // Tirfor-style stores put a large first logical record in a trailing segment
+    // while the remaining records are inline. Pair only blobs not already claimed
+    // by table offsets, and require an exact count so stray magic cannot shift the
+    // association.
+    if !orphan_handles.is_empty() {
+        let pool: Vec<Vec<u8>> = extract_acds_sab_blob_ranges(buf)
+            .into_iter()
+            .filter_map(|(start, blob)| (!claimed_starts.contains(&start)).then_some(blob))
+            .collect();
         if pool.len() == orphan_handles.len() {
             out.extend(orphan_handles.into_iter().zip(pool));
         }
@@ -422,7 +411,7 @@ fn extract_acds_record_blobs(buf: &[u8], modeler_handles: &HashSet<u64>) -> Vec<
 /// Each blob runs from its header magic — `"ACIS BinaryFile"` (classic ACIS) or
 /// `"ASM BinaryFile"` (Autodesk ShapeManager, AutoCAD 2013+) — through its
 /// end-of-body terminator (`End-of-ASM-data` or `End-of-ACIS-data`).
-fn extract_acds_sab_blobs(buf: &[u8]) -> Vec<Vec<u8>> {
+fn extract_acds_sab_blob_ranges(buf: &[u8]) -> Vec<(usize, Vec<u8>)> {
     let mut blobs = Vec::new();
     let mut pos = 0usize;
     // A single forward walk: each `find_acds_magic` resumes from `pos`, and the
@@ -438,13 +427,20 @@ fn extract_acds_sab_blobs(buf: &[u8]) -> Vec<Vec<u8>> {
         match find_acds_end(buf, start, bound) {
             Some((end, marker_len)) => {
                 let stop = end + marker_len;
-                blobs.push(buf[start..stop].to_vec());
+                blobs.push((start, buf[start..stop].to_vec()));
                 pos = stop;
             }
             None => break,
         }
     }
     blobs
+}
+
+fn extract_acds_sab_blobs(buf: &[u8]) -> Vec<Vec<u8>> {
+    extract_acds_sab_blob_ranges(buf)
+        .into_iter()
+        .map(|(_, blob)| blob)
+        .collect()
 }
 
 /// Remove AcDs `blob01` continuation frames embedded at 1 MiB boundaries.
@@ -2633,8 +2629,9 @@ impl std::fmt::Display for CrcExtractionReport {
 }
 
 #[cfg(test)]
-mod section_name_tests {
-    use super::section_name_from_field;
+mod dwg_reader_tests {
+    use super::{extract_acds_record_blobs, section_name_from_field, ACIS_END_MARKER};
+    use std::collections::HashSet;
 
     fn field(prefix: &[u8]) -> [u8; 64] {
         let mut b = [0u8; 64];
@@ -2664,6 +2661,68 @@ mod section_name_tests {
     #[test]
     fn empty_when_first_byte_null() {
         assert_eq!(section_name_from_field(&[0u8; 64]), "");
+    }
+
+    #[test]
+    fn acds_record_table_recovers_a_trailing_external_blob_segment() {
+        const HEADER_SIZE: usize = 48;
+        const RECORD_SIZE: usize = 20;
+        const RECORDS: usize = 3;
+
+        fn blob(label: u8) -> Vec<u8> {
+            let mut value = b"ASM BinaryFile".to_vec();
+            value.push(label);
+            value.extend_from_slice(ACIS_END_MARKER);
+            value
+        }
+
+        let external = blob(3);
+        let physical = [(0x91u32, blob(1)), (0x92, blob(2))];
+        let mut offsets = vec![(0x89u32, 0usize)];
+        let mut data = vec![0u8; 44];
+        for (handle, value) in &physical {
+            offsets.push((*handle, data.len()));
+            data.extend_from_slice(value);
+        }
+
+        let base = HEADER_SIZE + RECORD_SIZE * RECORDS;
+        let segment_size = base + data.len();
+        let external_segment = segment_size;
+        let external_header_size = 64;
+        let mut buffer = vec![0u8; segment_size + external_header_size + external.len()];
+        buffer[..8].copy_from_slice(b"\xAC\xD5_data_");
+        buffer[16..24].copy_from_slice(&(segment_size as u64).to_le_bytes());
+        buffer[external_segment..external_segment + 8].copy_from_slice(b"\xAC\xD5_data_");
+        buffer[external_segment + 16..external_segment + 24]
+            .copy_from_slice(&((external_header_size + external.len()) as u64).to_le_bytes());
+
+        for (index, handle) in [0x89u32, 0x91, 0x92].into_iter().enumerate() {
+            let entry = HEADER_SIZE + index * RECORD_SIZE;
+            let offset = offsets
+                .iter()
+                .find(|(candidate, _)| *candidate == handle)
+                .unwrap()
+                .1;
+            buffer[entry..entry + 4].copy_from_slice(&0x14u32.to_le_bytes());
+            buffer[entry + 8..entry + 12].copy_from_slice(&handle.to_le_bytes());
+            buffer[entry + 16..entry + 20].copy_from_slice(&(offset as u32).to_le_bytes());
+        }
+        buffer[base..segment_size].copy_from_slice(&data);
+        buffer[external_segment + external_header_size..].copy_from_slice(&external);
+
+        let handles = HashSet::from([0x89u64, 0x91, 0x92]);
+        let extracted = extract_acds_record_blobs(&buffer, &handles);
+        assert_eq!(extracted.len(), RECORDS);
+        for (handle, expected) in physical.into_iter().chain([(0x89, external)]) {
+            assert_eq!(
+                extracted
+                    .iter()
+                    .find(|(candidate, _)| *candidate == handle as u64)
+                    .unwrap()
+                    .1,
+                expected,
+            );
+        }
     }
 }
 
