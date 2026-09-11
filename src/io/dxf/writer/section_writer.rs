@@ -3609,6 +3609,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_double(42, vertex.bulge)?;
             }
             self.writer.write_i16(70, vertex.flags.bits() as i16)?;
+            self.writer.write_double(50, vertex.curve_tangent.to_degrees())?;
         }
 
         // Write SEQEND

@@ -141,7 +141,7 @@ pub struct Vertex2D {
     pub end_width: f64,
     /// Bulge (0 = straight segment, <0 = clockwise arc, >0 = counter-clockwise arc)
     pub bulge: f64,
-    /// Curve fit tangent direction
+    /// Curve fit tangent direction in radians
     pub curve_tangent: f64,
     /// Vertex ID (R2010+)
     pub id: i32,
