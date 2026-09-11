@@ -128,6 +128,7 @@
 pub mod classes;
 pub mod compound_file;
 pub mod document;
+pub mod nested_copy;
 pub mod entities;
 pub mod error;
 pub mod fields;
