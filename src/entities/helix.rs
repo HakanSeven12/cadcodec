@@ -66,7 +66,8 @@ pub struct Helix {
     pub start_point: Vector3,
     /// Axis direction vector (DXF 12).
     pub axis_vector: Vector3,
-    /// Radius of the first turn (DXF 40).
+    /// Radius at the top/end of the helix (DXF 40 and the DWG helix radius field).
+    /// The base radius is defined by the axis base point and start point.
     pub radius: f64,
     /// Number of turns (DXF 41).
     pub turns: f64,
