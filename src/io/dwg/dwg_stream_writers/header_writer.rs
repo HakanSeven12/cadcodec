@@ -27,7 +27,7 @@ use crate::io::dwg::dwg_stream_writers::DwgBitWriter;
 use crate::io::dwg::dwg_stream_writers::DwgMergedWriter;
 use crate::io::dwg::dwg_version::DwgVersion;
 use crate::io::dwg::file_headers::section_definition::{end_sentinels, start_sentinels};
-use crate::types::{Color, DxfVersion, Handle, Vector2, Vector3};
+use crate::types::{Color, DxfVersion, Handle, LineWeight, Vector2, Vector3};
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Writer wrapper — dispatches to DwgBitWriter or DwgMergedWriter
@@ -823,7 +823,7 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
 
     // R2000+ flags bitfield
     if r2000_plus(v) {
-        let mut flags: i32 = (h.current_line_weight as i32) & 0x1F;
+        let mut flags = i32::from(LineWeight::from_value(h.current_line_weight).to_dwg_index());
         flags |= (h.end_caps as i32) << 5;
         flags |= (h.join_style as i32) << 7;
         if !h.lineweight_display {

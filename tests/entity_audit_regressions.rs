@@ -295,7 +295,7 @@ fn sat_origin_bodies_survive_dwg_modeler_encoding() {
 }
 
 #[test]
-fn dxf_sat_cipher_matches_autocad_and_roundtrips_binary_spaces() {
+fn dxf_sat_cipher_matches_reference_and_roundtrips_binary_spaces() {
     assert_eq!(AcisData::encode_sat("700 0 1 0"), "hoo o n o");
     assert_eq!(AcisData::encode_sat("ACIS A B"), "^ \\VL ^  ]");
     let sat =

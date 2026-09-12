@@ -1168,7 +1168,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_subclass("AcDbSymbolTableRecord")?;
         self.writer.write_subclass("AcDbTextStyleTableRecord")?;
         // Shape files have an empty DXF STYLE name; SHAPE resolves group 2
-        // by searching the shape files (ODA 20.4.37), not a text-style name.
+        // by searching the shape files, not a text-style name.
         self.writer.write_string(
             2,
             if style.is_shape_file {
@@ -3645,6 +3645,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_double(42, vertex.bulge)?;
             }
             self.writer.write_i16(70, vertex.flags.bits() as i16)?;
+            self.writer.write_double(50, vertex.curve_tangent.to_degrees())?;
         }
 
         // Write SEQEND
@@ -3912,7 +3913,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_normal(spline.normal)?;
 
         // Flags
-        let mut flags: i16 = 0;
+        let mut flags: i16 = spline.dxf_flags & !31;
+        if spline.dwg_flags1 & 1 != 0 { flags |= 32; }
         if spline.flags.closed {
             flags |= 1;
         }

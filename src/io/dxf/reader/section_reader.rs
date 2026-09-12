@@ -638,19 +638,19 @@ impl ClassDxfFields {
     }
 
     fn i16(&mut self, section: &str, code: i32) -> i16 {
-        self.string(section, code).parse().unwrap_or(0)
+        self.string(section, code).trim().parse().unwrap_or(0)
     }
 
     fn i32(&mut self, section: &str, code: i32) -> i32 {
-        self.string(section, code).parse().unwrap_or(0)
+        self.string(section, code).trim().parse().unwrap_or(0)
     }
 
     fn i64(&mut self, section: &str, code: i32) -> i64 {
-        self.string(section, code).parse().unwrap_or(0)
+        self.string(section, code).trim().parse().unwrap_or(0)
     }
 
     fn f64(&mut self, section: &str, code: i32) -> f64 {
-        self.string(section, code).parse().unwrap_or(0.0)
+        self.string(section, code).trim().parse().unwrap_or(0.0)
     }
 
     fn bool(&mut self, section: &str, code: i32) -> bool {
@@ -11853,7 +11853,7 @@ impl<'a> SectionReader<'a> {
                             }
                             50 => {
                                 if let Some(v) = vpair.as_double() {
-                                    tangent = v;
+                                    tangent = v.to_radians();
                                 }
                             }
                             62 => {
@@ -12599,6 +12599,8 @@ impl<'a> SectionReader<'a> {
                 }
                 70 => {
                     if let Some(flags_val) = pair.as_i16() {
+                        spline.dxf_flags = flags_val;
+                        if flags_val & 32 != 0 { spline.dwg_flags1 |= 1; }
                         spline.flags.closed = (flags_val & 1) != 0;
                         spline.flags.periodic = (flags_val & 2) != 0;
                         spline.flags.rational = (flags_val & 4) != 0;
@@ -12797,6 +12799,8 @@ impl<'a> SectionReader<'a> {
                 // ── AcDbSpline geometry ──
                 70 => {
                     if let Some(f) = pair.as_i16() {
+                        helix.spline.dxf_flags = f;
+                        if f & 32 != 0 { helix.spline.dwg_flags1 |= 1; }
                         helix.spline.flags.closed = (f & 1) != 0;
                         helix.spline.flags.periodic = (f & 2) != 0;
                         helix.spline.flags.rational = (f & 4) != 0;
@@ -16410,14 +16414,17 @@ impl<'a> SectionReader<'a> {
                         attrib.width_factor = v;
                     }
                 }
+                // DXF stores both angles in degrees; the entity holds radians
+                // (the writer converts back with to_degrees), as TEXT and
+                // ATTDEF already do on read.
                 50 => {
                     if let Some(v) = pair.as_double() {
-                        attrib.rotation = v;
+                        attrib.rotation = v.to_radians();
                     }
                 }
                 51 => {
                     if let Some(v) = pair.as_double() {
-                        attrib.oblique_angle = v;
+                        attrib.oblique_angle = v.to_radians();
                     }
                 }
                 70 => {
@@ -20390,7 +20397,7 @@ impl<'a> SectionReader<'a> {
 ///
 /// The string counterpart of [`DxfCodePair::as_i32_bits`], for the sites that
 /// read code 420/421 straight off `value_string`. A true colour carrying
-/// AutoCAD's `0xC2` method byte does not fit an `i32` when written unsigned,
+/// The `0xC2` method byte does not fit an `i32` when written unsigned,
 /// so a plain `parse::<i32>()` drops it and the entity keeps its ACI index.
 fn true_color_bits(raw: &str) -> Option<i32> {
     let value = raw.trim().parse::<i64>().ok()?;
@@ -20402,7 +20409,7 @@ fn true_color_bits(raw: &str) -> Option<i32> {
 
 /// Decode a colour stored as a raw CMC i32 (MULTILEADER 90/91/92/93 codes).
 fn color_from_i32(v: i32) -> Color {
-    // AutoCAD-produced DXF encodes a color in the high "method" byte:
+    // Some DXF producers encode a color in the high "method" byte:
     //   0xC0 ByLayer, 0xC1 ByBlock, 0xC2 true-color RGB, 0xC3 ACI index.
     // MLEADER/MLEADERSTYLE colours use this form; check it before the
     // writer's own plain scheme (0=ByBlock, 256=ByLayer, 1..255=ACI, else RGB).
@@ -20573,6 +20580,93 @@ mod tests {
         } else {
             panic!("Expected Text entity");
         }
+    }
+
+    /// ATTRIB angles are degrees in DXF and radians in memory, as for TEXT:
+    /// kept as read, a tag rotated 75° came out at 75 rad (about -23°).
+    #[test]
+    fn test_dxf_read_attrib_angles_in_radians() {
+        let dxf = "\
+  0\r\nSECTION\r\n\
+  2\r\nENTITIES\r\n\
+  0\r\nATTRIB\r\n\
+  5\r\n1\r\n\
+100\r\nAcDbEntity\r\n\
+  8\r\n0\r\n\
+100\r\nAcDbText\r\n\
+ 10\r\n1.0\r\n\
+ 20\r\n2.0\r\n\
+ 30\r\n0.0\r\n\
+ 40\r\n0.5\r\n\
+  1\r\nTAG VALUE\r\n\
+ 50\r\n75.0\r\n\
+ 51\r\n15.0\r\n\
+100\r\nAcDbAttribute\r\n\
+  2\r\nLABEL\r\n\
+ 70\r\n0\r\n\
+  0\r\nENDSEC\r\n\
+  0\r\nEOF\r\n";
+
+        let cursor = std::io::Cursor::new(dxf.as_bytes());
+        let reader = crate::io::dxf::reader::DxfReader::from_reader(cursor).expect("from_reader");
+        let doc = reader.read().expect("read");
+
+        let entities: Vec<_> = doc.entities().collect();
+        assert_eq!(entities.len(), 1);
+        if let EntityType::AttributeEntity(ref a) = entities[0] {
+            assert_eq!(a.value, "TAG VALUE");
+            assert!(
+                (a.rotation - 75.0_f64.to_radians()).abs() < 1e-9,
+                "rotation should be 75 deg in radians, got {}",
+                a.rotation
+            );
+            assert!(
+                (a.oblique_angle - 15.0_f64.to_radians()).abs() < 1e-9,
+                "oblique angle should be 15 deg in radians, got {}",
+                a.oblique_angle
+            );
+        } else {
+            panic!("Expected AttributeEntity");
+        }
+    }
+
+    /// The writer stores ATTRIB angles as degrees; they must read back as the
+    /// same radians, or every save turns a tag's rotation into garbage. The
+    /// attribute rides on an INSERT, as attributes do in DXF.
+    #[test]
+    fn test_dxf_roundtrip_attrib_angles() {
+        let mut doc = CadDocument::new();
+        let mut attrib = AttributeEntity::new(String::new(), String::new());
+        attrib.tag = "LABEL".to_string();
+        attrib.value = "TAG VALUE".to_string();
+        attrib.height = 0.5;
+        attrib.rotation = 75.0_f64.to_radians();
+        attrib.oblique_angle = 15.0_f64.to_radians();
+        let mut insert = Insert::new("*Model_Space", Vector3::new(0.0, 0.0, 0.0));
+        insert.rotation = 75.0_f64.to_radians();
+        insert.attributes.push(attrib);
+        let _ = doc.add_entity(EntityType::Insert(insert));
+
+        let doc2 = roundtrip(doc);
+        let insert = doc2
+            .entities()
+            .find_map(|e| match e {
+                EntityType::Insert(i) => Some(i),
+                _ => None,
+            })
+            .expect("Expected Insert entity");
+        assert_eq!(insert.attributes.len(), 1);
+        let a = &insert.attributes[0];
+        assert!(
+            (a.rotation - 75.0_f64.to_radians()).abs() < 1e-9,
+            "rotation should survive a roundtrip, got {}",
+            a.rotation
+        );
+        assert!(
+            (a.oblique_angle - 15.0_f64.to_radians()).abs() < 1e-9,
+            "oblique angle should survive a roundtrip, got {}",
+            a.oblique_angle
+        );
     }
 
     #[test]

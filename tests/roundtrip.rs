@@ -849,6 +849,50 @@ fn dxf_roundtrip(doc: CadDocument) -> CadDocument {
 }
 
 #[test]
+fn dxf_roundtrip_preserves_polyline_tangent_radians() {
+    let mut polyline = Polyline2D::new();
+    let mut vertex = Vertex2D::new(Vector3::new(1.0, 2.0, 0.0));
+    vertex.flags = VertexFlags::CURVE_FIT_TANGENT;
+    vertex.curve_tangent = std::f64::consts::FRAC_PI_3;
+    polyline.add_vertex(vertex);
+
+    let mut doc = CadDocument::with_version(DxfVersion::AC1021);
+    doc.add_entity(EntityType::Polyline2D(polyline)).unwrap();
+    let roundtripped = dxf_roundtrip(doc);
+    let EntityType::Polyline2D(polyline) = roundtripped.entities().next().unwrap() else {
+        panic!("expected 2D polyline");
+    };
+
+    assert!((polyline.vertices[0].curve_tangent - std::f64::consts::FRAC_PI_3).abs() < 1e-12);
+}
+
+#[test]
+fn dxf_roundtrip_preserves_spline_extension_and_construction_flags() {
+    let mut spline = Spline::from_control_points(
+        2,
+        vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 1.0, 0.0),
+            Vector3::new(2.0, 0.0, 0.0),
+        ],
+    );
+    spline.flags.planar = true;
+    spline.dxf_flags = 1 << 10;
+    spline.dwg_flags1 = 1;
+
+    let mut doc = CadDocument::with_version(DxfVersion::AC1021);
+    doc.add_entity(EntityType::Spline(spline)).unwrap();
+    let roundtripped = dxf_roundtrip(doc);
+    let EntityType::Spline(spline) = roundtripped.entities().next().unwrap() else {
+        panic!("expected spline");
+    };
+
+    assert_eq!(spline.dxf_flags & (1 << 10), 1 << 10);
+    assert_eq!(spline.dwg_flags1 & 1, 1);
+    assert!(spline.flags.planar);
+}
+
+#[test]
 fn dxf_acis_preserves_tokens_and_splits_at_utf8_boundaries() {
     use acadrust::entities::solid3d::{AcisVersion, Solid3D};
 

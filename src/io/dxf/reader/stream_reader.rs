@@ -127,7 +127,7 @@ impl DxfCodePair {
     /// Get value as a 32-bit *bit pattern*, accepting the unsigned spelling.
     ///
     /// A colour code (420, 421, and the `AcCmColor` values MLEADER carries in
-    /// its 90-series codes) is a packed word, not a quantity: AutoCAD sets a
+    /// its 90-series codes) is a packed word, not a quantity: producers set a
     /// method byte in the high position, `0xC2` for a true colour, so a plain
     /// RGB such as `0xC2FF8800` is written by some producers as the unsigned
     /// `3271526400` and by others as the signed `-1023440896`. Only the second

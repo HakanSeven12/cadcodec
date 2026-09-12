@@ -214,8 +214,8 @@ impl DxfClassCollection {
     /// Retain the class table understood by pre-R2013 DWG writers.
     ///
     /// Modern proxy classes use layouts that the AC15 CLASSES stream cannot
-    /// encode. Their presence makes BricsCAD reject the complete drawing,
-    /// including otherwise valid primitive entities.
+    /// encode. Their presence makes strict readers reject the complete
+    /// drawing, including otherwise valid primitive entities.
     pub fn retain_legacy_dwg_classes(&mut self) {
         const LEGACY: &[&str] = &[
             "ACDBDICTIONARYWDFLT",
@@ -491,7 +491,7 @@ fn default_classes() -> Vec<DxfClass> {
         ("ACDBASSOCVARIABLE", "AcDbAssocVariable", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCPERSSUBENTMANAGER", "AcDbAssocPersSubentManager", 0, "ObjectDBX Classes", false),
         // Abstract action-parameter bases have no persistent instances.
-        // Registering them in a fresh file makes AutoCAD reject the entire
+        // Registering them in a fresh file makes strict readers reject the
         // database, even at zero instances. Imported tables are preserved.
         ("ACDBASSOCCOMPOUNDACTIONPARAM", "AcDbAssocCompoundActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCOSNAPPOINTREFACTIONPARAM", "AcDbAssocOsnapPointRefActionParam", 0, "ObjectDBX Classes", false),

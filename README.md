@@ -69,7 +69,7 @@ acadrust = { version = "0.5.5", features = ["serde", "import"] }
 
 ## File Version Support
 
-| File code | AutoCAD release | DXF | DWG |
+| File code | Release era | DXF | DWG |
 |-----------|-----------------|-----|-----|
 | AC1009 | R12 | R/W | — |
 | AC1012 | R13 | R/W | R/W |
@@ -81,10 +81,7 @@ acadrust = { version = "0.5.5", features = ["serde", "import"] }
 | AC1027 | 2013 | R/W | R/W |
 | AC1032 | 2018+ | R/W | R/W |
 
-`R/W` means read and write support. Entity availability varies by file version;
-see the [per-version compatibility matrix](src/docs/entity_status_matrix.md)
-for results from the 71-case entity atlas. The matrix records tested fixtures
-and CAD-engine audit results, not a guarantee for every possible drawing.
+`R/W` means read and write support. Entity availability varies by file version.
 
 ## Examples
 
@@ -213,8 +210,6 @@ fn main() -> acadrust::Result<()> {
 ## Documentation
 
 - [API documentation](https://docs.rs/acadrust)
-- [Entity compatibility matrix](src/docs/entity_status_matrix.md)
-- [Entity atlas generator](examples/entity_atlas.rs)
 - [Paper-space viewport example](examples/viewport_layouts.rs)
 
 ## Development

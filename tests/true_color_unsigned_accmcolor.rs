@@ -1,7 +1,7 @@
 //! An `AcCmColor` true colour written in its unsigned spelling must survive a
 //! DXF read.
 //!
-//! Group codes 420 and 421 carry a packed word, not a quantity: AutoCAD sets a
+//! Group codes 420 and 421 carry a packed word, not a quantity: producers set a
 //! method byte in the high position, `0xC2` for a true colour. A plain orange
 //! is therefore written `16746496` (0xFF8800) by a producer that omits the
 //! method byte, `-1023440896` by one that writes the full word signed, and

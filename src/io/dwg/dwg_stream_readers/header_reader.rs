@@ -12,7 +12,7 @@ use crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader;
 use crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader;
 use crate::io::dwg::dwg_version::DwgVersion;
 use crate::io::dwg::file_headers::section_definition::start_sentinels;
-use crate::types::{DxfVersion, Handle};
+use crate::types::{DxfVersion, Handle, LineWeight};
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Version-range helpers (same as header_writer)
@@ -744,7 +744,7 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
     // R2000+ flags bitfield
     if r2000_plus(v) {
         let flags = r.read_bit_long();
-        h.current_line_weight = (flags & 0x1F) as i16;
+        h.current_line_weight = LineWeight::from_dwg_index((flags & 0x1F) as u8).value();
         h.end_caps = ((flags >> 5) & 0x03) as i16;
         h.join_style = ((flags >> 7) & 0x03) as i16;
         h.lineweight_display = (flags & 0x200) == 0;

@@ -129,7 +129,7 @@ impl SabWriter {
         buf.extend_from_slice(&(header.num_bodies as u32).to_le_bytes());
 
         // has_history (4 bytes LE)
-        let history = header.history_flags();
+        let history: u32 = if header.has_history { 1 } else { 0 };
         buf.extend_from_slice(&history.to_le_bytes());
 
         // Product info strings
@@ -711,8 +711,7 @@ impl SabReader {
         let version_num = read_u32(data, &mut pos)?;
         let num_records = read_u32(data, &mut pos)? as usize;
         let num_bodies = read_u32(data, &mut pos)? as usize;
-        let history_flags = read_u32(data, &mut pos)?;
-        let has_history = history_flags != 0;
+        let has_history = read_u32(data, &mut pos)? != 0;
 
         let version = SatVersion::from_sat_number(version_num);
 
@@ -740,7 +739,6 @@ impl SabReader {
             num_records,
             num_bodies,
             has_history,
-            raw_history_flags: (history_flags > 1).then_some(history_flags),
             product_id,
             product_version,
             date,
@@ -1407,7 +1405,7 @@ mod tests {
             ["no_rotate", "no_reflect", "no_shear"]
         );
         let text = roundtrip.to_sat_string();
-        assert!(text.starts_with("21200 2 1 26\n"));
+        assert!(text.starts_with("21200 2 1 1\n"));
         assert!(text.contains(" forward double out #\n"));
         assert!(text.contains(" no_rotate no_reflect no_shear #\n"));
     }

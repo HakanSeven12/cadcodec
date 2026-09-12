@@ -161,6 +161,8 @@
 pub mod classes;
 pub mod compound_file;
 pub mod document;
+mod current_transparency;
+pub mod nested_copy;
 pub mod entities;
 pub mod error;
 pub mod fields;
@@ -193,7 +195,11 @@ pub use tables::{
 };
 
 // Re-export document
-pub use document::{CadDocument, Preview, PreviewFormat, SolidHistoryGraph};
+pub use document::{
+    CadDocument, Preview, PreviewFormat, SemanticEntityV1, SemanticInventoryV1, SemanticNodeV1,
+    SemanticObjectV1, SemanticPartV1, SemanticReferenceV1, SemanticRelationshipKindV1,
+    SemanticTableRecordV1, SolidHistoryGraph, SEMANTIC_INVENTORY_VERSION,
+};
 pub use layer_state::{LayerState, LayerStateLayer, LayerStateMask};
 
 // Re-export I/O types
@@ -237,3 +243,7 @@ mod tests {
         assert_eq!(doc2.version, DxfVersion::AC1015);
     }
 }
+
+mod drawing_variables;
+
+mod hatch_origin;

@@ -12,8 +12,8 @@ impl SatWriter {
     pub fn write(doc: &SatDocument) -> String {
         let mut output = String::new();
 
-        // Classic SAT 7.0 uses zero here. Modern ShapeManager SAT exports
-        // carry the actual record count; BricsCAD treats zero as empty data.
+        // Classic SAT 7.0 uses zero here. Modern SAT exports carry the actual
+        // record count; some readers treat zero as empty data.
         let num_records_out = if doc.header.version.major == 7 {
             0
         } else if doc.header.version.major > 7 {
@@ -26,7 +26,7 @@ impl SatWriter {
             doc.header.version.sat_version_number(),
             num_records_out,
             doc.header.num_bodies,
-            doc.header.history_flags()
+            u32::from(doc.header.has_history)
         ));
 
         // Header line 2: product info

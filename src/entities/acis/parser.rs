@@ -59,7 +59,6 @@ impl SatParser {
             num_records: header.num_records,
             num_bodies: header.num_bodies,
             has_history: header.has_history,
-            raw_history_flags: header.raw_history_flags,
             product_id,
             product_version,
             date,
@@ -97,17 +96,17 @@ impl SatParser {
 
         let num_records = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
         let num_bodies = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let history_flags = parts
+        let has_history = parts
             .get(3)
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
+            .unwrap_or(0)
+            != 0;
 
         Ok(HeaderInfo {
             version: SatVersion::from_sat_number(version_num),
             num_records,
             num_bodies,
-            has_history: history_flags != 0,
-            raw_history_flags: (history_flags > 1).then_some(history_flags),
+            has_history,
         })
     }
 
@@ -392,7 +391,6 @@ struct HeaderInfo {
     num_records: usize,
     num_bodies: usize,
     has_history: bool,
-    raw_history_flags: Option<u32>,
 }
 
 // ============================================================================

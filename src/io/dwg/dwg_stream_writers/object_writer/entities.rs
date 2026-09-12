@@ -848,7 +848,7 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer
             .write_handle(DwgReferenceType::HardPointer, style_handle.value());
 
-        // ODA 20.4.46: these fields were introduced in R2000.
+        // These fields were introduced in the R2000 format.
         if self.version.r2000_plus() {
             self.writer.write_bit_short(e.line_spacing_style as i16);
             self.writer.write_bit_double(e.line_spacing_factor);
@@ -1784,12 +1784,26 @@ impl<'a> DwgObjectWriter<'a> {
 
     // â”€â”€ Hatch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+    fn hatch_common_for_write(&self, e: &Hatch) -> EntityCommon {
+        let mut common = e.common.clone();
+        if e.stored_pattern_origin().is_some() {
+            if let Some(app) = self.document.app_ids.get("ACAD") {
+                common
+                    .extended_data
+                    .raw_dwg_eed
+                    .retain(|(handle, _)| *handle != app.handle.value());
+            }
+        }
+        common
+    }
+
     fn write_hatch(&mut self, e: &Hatch) {
         if e.is_mpolygon {
             self.write_mpolygon(e);
             return;
         }
-        self.entity_preamble(common::OBJ_HATCH, &e.common);
+        let common = self.hatch_common_for_write(e);
+        self.entity_preamble(common::OBJ_HATCH, &common);
 
         // Gradient color data (R2004+)
         if self.version.r2004_plus() {
@@ -1886,7 +1900,8 @@ impl<'a> DwgObjectWriter<'a> {
 
     fn write_mpolygon(&mut self, e: &Hatch) {
         let type_code = self.class_type_code("MPOLYGON", common::OBJ_MPOLYGON);
-        self.entity_preamble(type_code, &e.common);
+        let common = self.hatch_common_for_write(e);
+        self.entity_preamble(type_code, &common);
         self.writer.write_bit_short(e.style as i16);
 
         if self.version.r2004_plus() {
@@ -3785,8 +3800,8 @@ impl<'a> DwgObjectWriter<'a> {
             if self.version.r2013_plus(self.dxf_version) {
                 self.writer.write_bit_long(e.dwg_unknown_long2);
             } else {
-                // ODA 20.4.96.2: the R2010 bit defaults to true, unlike
-                // the R2013+ long. False makes AutoCAD reject a new table.
+                // The R2010 bit defaults to true, unlike the R2013+ long.
+                // False makes strict readers reject a new table.
                 self.writer
                     .write_bit(e.dwg_r2010_unknown_bit.unwrap_or(true));
             }
@@ -4207,7 +4222,7 @@ impl<'a> DwgObjectWriter<'a> {
         // 293 Enable Annotation Scale / Is annotative (B)
         self.writer.write_bit(e.enable_annotation_scale);
 
-        // Through R2007 (ODA 20.4.48): count and arrowhead overrides.
+        // Through R2007: count and arrowhead overrides.
         if !self.version.r2010_plus() {
             self.writer
                 .write_bit_long(e.arrowhead_overrides.len() as i32);
@@ -5505,7 +5520,7 @@ impl<'a> DwgObjectWriter<'a> {
                 };
                 let stripped = AcisData::strip_sat_terminator(sat_text);
                 // DWG's length-delimited SAT blocks omit the standalone-file
-                // terminator and use CRLF between records (native AutoCAD).
+                // terminator and use CRLF between records.
                 let full = stripped.replace('\n', "\r\n");
                 let plain = full.as_bytes();
 
@@ -5529,7 +5544,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         let wireframe_present = self.write_acis_wireframe(point, acis, wires, silhouettes);
         if inline || wireframe_present || !self.version.r2013_plus(self.dxf_version) {
-            // ODA 20.4.41: true terminates the modeler payload chain.
+            // True terminates the modeler payload chain.
             self.writer.write_bit(acis.extra_acis_data.is_none());
             self.write_extra_acis_data(acis);
         }
