@@ -441,9 +441,8 @@ impl DwgBitReader {
 
     /// Read a raw double (RD type) — 8 bytes, little-endian IEEE 754.
     pub fn read_raw_double(&mut self) -> f64 {
-        let bytes = self.read_bytes(8);
         let mut arr = [0u8; 8];
-        arr.copy_from_slice(&bytes);
+        self.apply_shift_to_arr(&mut arr);
         f64::from_le_bytes(arr)
     }
 
