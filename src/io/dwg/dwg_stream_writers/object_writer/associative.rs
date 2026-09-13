@@ -59,14 +59,14 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit(value.is_attached_to_object);
         self.writer.write_bit(value.is_delegating_to_owning_action);
         self.writer.write_bit_long(value.order);
-        self.write_assoc_handle(DwgReferenceType::HardOwnership, value.dependent_on);
+        self.write_assoc_handle(DwgReferenceType::SoftPointer, value.dependent_on);
         self.writer.write_bit(value.name.is_some());
         if let Some(name) = &value.name {
             self.writer.write_variable_text(name);
         }
         self.write_assoc_handle(DwgReferenceType::SoftPointer, value.read_dependency);
-        self.write_assoc_handle(DwgReferenceType::HardOwnership, value.node);
-        self.write_assoc_handle(DwgReferenceType::SoftPointer, value.dependency_body);
+        self.write_assoc_handle(DwgReferenceType::SoftPointer, value.node);
+        self.write_assoc_handle(DwgReferenceType::HardOwnership, value.dependency_body);
         self.writer.write_bit_long(value.dependency_body_id);
     }
 
@@ -399,8 +399,8 @@ impl<'a> DwgObjectWriter<'a> {
         dimension_dependency: Handle,
     ) {
         self.write_geometrical_constraint(owner_id, is_implied, is_active);
-        self.write_assoc_handle(DwgReferenceType::HardOwnership, value_dependency);
-        self.write_assoc_handle(DwgReferenceType::HardOwnership, dimension_dependency);
+        self.write_assoc_handle(DwgReferenceType::HardPointer, value_dependency);
+        self.write_assoc_handle(DwgReferenceType::HardPointer, dimension_dependency);
     }
 
     fn write_constraint_node_data(&mut self, data: &AssocConstraintNodeData) {
@@ -713,20 +713,20 @@ impl<'a> DwgObjectWriter<'a> {
                 self.write_assoc_handle(DwgReferenceType::HardOwnership, value.dependency);
                 self.writer.write_bit_long(value.actions.len() as i32);
                 self.write_assoc_handles(DwgReferenceType::HardOwnership, &value.actions);
-                self.writer.write_bit_long(value.nodes.len() as i32);
                 if let Some(first) = value.nodes.first() {
-                    self.writer.write_bit_long(first.node_id);
-                    self.writer.write_bit_long(first.connections.len() as i32);
-                    for connection in &first.connections {
-                        self.writer.write_bit_long(*connection);
-                    }
-                    self.writer.write_bit(first.status != 0);
                     let registered: Vec<&AssocConstraintNode> = value
                         .nodes
                         .iter()
                         .skip(1)
                         .filter(|node| !node.class_name.is_empty())
                         .collect();
+                    self.writer.write_bit_long(registered.len() as i32);
+                    self.writer.write_bit_long(first.node_id);
+                    self.writer.write_bit_long(first.connections.len() as i32);
+                    for connection in &first.connections {
+                        self.writer.write_bit_long(*connection);
+                    }
+                    self.writer.write_bit(first.status != 0);
                     let mut class_types: Vec<&str> = Vec::new();
                     for node in &registered {
                         if !class_types
@@ -755,6 +755,8 @@ impl<'a> DwgObjectWriter<'a> {
                         self.write_constraint_node_common(node);
                         self.write_constraint_node_data(&node.data);
                     }
+                } else {
+                    self.writer.write_bit_long(0);
                 }
             }
             AssociativeData::Variable(value) => {

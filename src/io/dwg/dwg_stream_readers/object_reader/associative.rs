@@ -972,7 +972,7 @@ pub fn read_associative_data(
             let count = reader.read_bit_long();
             let actions = read_handles(reader, count);
             let node_count = safe_count(reader.read_bit_long());
-            let mut nodes = Vec::with_capacity(node_count as usize);
+            let mut nodes = Vec::with_capacity(node_count.saturating_add(1) as usize);
             if node_count > 0 {
                 let root_id = reader.read_bit_long();
                 let connection_count = safe_count(reader.read_bit_long());
@@ -993,8 +993,7 @@ pub fn read_associative_data(
                 for _ in 0..class_type_count {
                     class_types.push(reader.read_variable_text());
                 }
-                let registered_count =
-                    safe_count(reader.read_bit_long()).min(node_count.saturating_sub(1));
+                let registered_count = safe_count(reader.read_bit_long()).min(node_count);
                 let mut registry = Vec::with_capacity(registered_count as usize);
                 for _ in 0..registered_count {
                     let registry_flag = reader.read_bit();
