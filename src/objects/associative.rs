@@ -178,6 +178,22 @@ impl AssociativeData {
                         | AssocConstraintNodeData::Arc {
                             geometry_dependency,
                             ..
+                        }
+                        | AssocConstraintNodeData::Ellipse {
+                            geometry_dependency,
+                            ..
+                        }
+                        | AssocConstraintNodeData::BoundedEllipse {
+                            geometry_dependency,
+                            ..
+                        }
+                        | AssocConstraintNodeData::RigidSet {
+                            geometry_dependency,
+                            ..
+                        }
+                        | AssocConstraintNodeData::Spline {
+                            geometry_dependency,
+                            ..
                         } => *geometry_dependency == target,
                         _ => false,
                     })
@@ -328,6 +344,22 @@ impl AssociativeData {
                             ..
                         }
                         | AssocConstraintNodeData::Arc {
+                            geometry_dependency,
+                            ..
+                        }
+                        | AssocConstraintNodeData::Ellipse {
+                            geometry_dependency,
+                            ..
+                        }
+                        | AssocConstraintNodeData::BoundedEllipse {
+                            geometry_dependency,
+                            ..
+                        }
+                        | AssocConstraintNodeData::RigidSet {
+                            geometry_dependency,
+                            ..
+                        }
+                        | AssocConstraintNodeData::Spline {
                             geometry_dependency,
                             ..
                         } => visit(geometry_dependency),
@@ -890,6 +922,16 @@ pub enum AssocConstraintNodeData {
         is_implied: bool,
         is_active: bool,
     },
+    Composite {
+        owner_id: i32,
+        is_implied: bool,
+        is_active: bool,
+        owned_constraint_ids: Vec<i32>,
+    },
+    HelpParameter {
+        value: f64,
+        reserved: bool,
+    },
     Angle {
         owner_id: i32,
         is_implied: bool,
@@ -995,6 +1037,24 @@ pub enum AssocConstraintNodeData {
         axis_ratio: f64,
         start_point: Vector3,
         end_point: Vector3,
+    },
+    Spline {
+        geometry_dependency: Handle,
+        geometry_node_id: i32,
+        rational: bool,
+        periodic: bool,
+        degree: i32,
+        knot_tolerance: f64,
+        knot_physical_length: i32,
+        knot_grow_length: i32,
+        knots: Vec<f64>,
+        weight_physical_length: i32,
+        weight_grow_length: i32,
+        weights: Vec<f64>,
+        control_point_physical_length: i32,
+        control_point_grow_length: i32,
+        control_points: Vec<Vector3>,
+        implicit_point_ids: Vec<i32>,
     },
 }
 
