@@ -633,7 +633,6 @@ fn is_plain_geometrical_constraint(class_name: &str) -> bool {
             | "ACEQUALLENGTHCONSTRAINT"
             | "ACEQUALRADIUSCONSTRAINT"
             | "ACFIXEDCONSTRAINT"
-            | "ACHORIZONTALCONSTRAINT"
             | "ACMIDPOINTCONSTRAINT"
             | "ACNORMALCONSTRAINT"
             | "ACPERPENDICULARCONSTRAINT"
@@ -641,7 +640,6 @@ fn is_plain_geometrical_constraint(class_name: &str) -> bool {
             | "ACPOINTCURVECONSTRAINT"
             | "ACSYMMETRICCONSTRAINT"
             | "ACTANGENTCONSTRAINT"
-            | "ACVERTICALCONSTRAINT"
     )
 }
 
@@ -708,6 +706,27 @@ fn read_constraint_node_data(
                 point: (!geometry_dependency.is_null()).then(|| reader.read_3bit_double()),
             }
         }
+        "ACCONSTRAINEDRIGIDSET" => {
+            let geometry_dependency = handle(reader);
+            let geometry_node_id = reader.read_bit_long();
+            let reserved = reader.read_bit();
+            let mut transform = [0.0; 16];
+            for value in &mut transform {
+                *value = reader.read_bit_double();
+            }
+            let count = safe_count(reader.read_bit_long());
+            let mut geometry_ids = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                geometry_ids.push(reader.read_bit_long());
+            }
+            AssocConstraintNodeData::RigidSet {
+                geometry_dependency,
+                geometry_node_id,
+                reserved,
+                transform,
+                geometry_ids,
+            }
+        }
         "ACCONSTRAINEDLINE"
         | "ACCONSTRAINEDCONSTRUCTIONLINE"
         | "ACCONSTRAINED2POINTSCONSTRUCTIONLINE"
@@ -738,13 +757,14 @@ fn read_constraint_node_data(
                 sector_type: reader.read_byte(),
             }
         }
-        "ACPARALLELCONSTRAINT" => {
+        "ACPARALLELCONSTRAINT" | "ACHORIZONTALCONSTRAINT" | "ACVERTICALCONSTRAINT" => {
             let (owner_id, is_implied, is_active) = read_geometrical_constraint(reader);
             AssocConstraintNodeData::Parallel {
                 owner_id,
                 is_implied,
                 is_active,
-                datum_line_index: None,
+                datum_line_index: (!class_name.eq_ignore_ascii_case("AcParallelConstraint"))
+                    .then(|| reader.read_bit_long()),
             }
         }
         "ACDISTANCECONSTRAINT" => {

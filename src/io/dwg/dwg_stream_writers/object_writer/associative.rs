@@ -508,6 +508,24 @@ impl<'a> DwgObjectWriter<'a> {
                         .write_3bit_double(point.unwrap_or(crate::types::Vector3::ZERO));
                 }
             }
+            AssocConstraintNodeData::RigidSet {
+                geometry_dependency,
+                geometry_node_id,
+                reserved,
+                transform,
+                geometry_ids,
+            } => {
+                self.write_assoc_handle(DwgReferenceType::SoftPointer, *geometry_dependency);
+                self.writer.write_bit_long(*geometry_node_id);
+                self.writer.write_bit(*reserved);
+                for value in transform {
+                    self.writer.write_bit_double(*value);
+                }
+                self.writer.write_bit_long(geometry_ids.len() as i32);
+                for geometry_id in geometry_ids {
+                    self.writer.write_bit_long(*geometry_id);
+                }
+            }
             AssocConstraintNodeData::Line {
                 geometry_dependency,
                 geometry_node_id,
