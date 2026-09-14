@@ -126,6 +126,18 @@ fn document_with_axis_and_rigid_set() -> CadDocument {
                         },
                         ..Default::default()
                     },
+                    AssocConstraintNode {
+                        node_id: 4,
+                        class_name: "AcConstrainedEllipse".to_string(),
+                        data: AssocConstraintNodeData::Ellipse {
+                            geometry_dependency: Default::default(),
+                            geometry_node_id: 4,
+                            center: Vector3::new(1.0, 2.0, 0.0),
+                            major_axis: Vector3::new(4.0, 0.0, 0.0),
+                            axis_ratio: 0.5,
+                        },
+                        ..Default::default()
+                    },
                 ],
                 ..Default::default()
             }),
@@ -163,6 +175,15 @@ fn assert_axis_and_rigid_set(document: &CadDocument) {
         } if transform[0] == 0.5
             && transform[3] == 10.25
             && geometry_ids == &[4, 5, 6]
+    ));
+    assert!(matches!(
+        group.nodes[4].data,
+        AssocConstraintNodeData::Ellipse {
+            geometry_node_id: 4,
+            major_axis,
+            axis_ratio: 0.5,
+            ..
+        } if major_axis == Vector3::new(4.0, 0.0, 0.0)
     ));
 }
 

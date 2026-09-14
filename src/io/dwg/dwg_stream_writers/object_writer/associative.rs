@@ -601,31 +601,31 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_3bit_double(*end_point);
             }
             AssocConstraintNodeData::Ellipse {
-                owner_id,
-                is_implied,
-                is_active,
+                geometry_dependency,
+                geometry_node_id,
                 center,
-                short_axis,
+                major_axis,
                 axis_ratio,
             } => {
-                self.write_geometrical_constraint(*owner_id, *is_implied, *is_active);
+                self.write_assoc_handle(DwgReferenceType::SoftPointer, *geometry_dependency);
+                self.writer.write_bit_long(*geometry_node_id);
                 self.writer.write_3bit_double(*center);
-                self.writer.write_3bit_double(*short_axis);
+                self.writer.write_3bit_double(*major_axis);
                 self.writer.write_bit_double(*axis_ratio);
             }
             AssocConstraintNodeData::BoundedEllipse {
-                owner_id,
-                is_implied,
-                is_active,
+                geometry_dependency,
+                geometry_node_id,
                 center,
-                short_axis,
+                major_axis,
                 axis_ratio,
                 start_point,
                 end_point,
             } => {
-                self.write_geometrical_constraint(*owner_id, *is_implied, *is_active);
+                self.write_assoc_handle(DwgReferenceType::SoftPointer, *geometry_dependency);
+                self.writer.write_bit_long(*geometry_node_id);
                 self.writer.write_3bit_double(*center);
-                self.writer.write_3bit_double(*short_axis);
+                self.writer.write_3bit_double(*major_axis);
                 self.writer.write_bit_double(*axis_ratio);
                 self.writer.write_3bit_double(*start_point);
                 self.writer.write_3bit_double(*end_point);

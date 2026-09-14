@@ -793,30 +793,22 @@ fn read_constraint_node_data(
                 mode: reader.read_byte(),
             }
         }
-        "ACCONSTRAINEDELLIPSE" => {
-            let (owner_id, is_implied, is_active) = read_geometrical_constraint(reader);
-            AssocConstraintNodeData::Ellipse {
-                owner_id,
-                is_implied,
-                is_active,
-                center: reader.read_3bit_double(),
-                short_axis: reader.read_3bit_double(),
-                axis_ratio: reader.read_bit_double(),
-            }
-        }
-        "ACCONSTRAINEDBOUNDEDELLIPSE" => {
-            let (owner_id, is_implied, is_active) = read_geometrical_constraint(reader);
-            AssocConstraintNodeData::BoundedEllipse {
-                owner_id,
-                is_implied,
-                is_active,
-                center: reader.read_3bit_double(),
-                short_axis: reader.read_3bit_double(),
-                axis_ratio: reader.read_bit_double(),
-                start_point: reader.read_3bit_double(),
-                end_point: reader.read_3bit_double(),
-            }
-        }
+        "ACCONSTRAINEDELLIPSE" => AssocConstraintNodeData::Ellipse {
+            geometry_dependency: handle(reader),
+            geometry_node_id: reader.read_bit_long(),
+            center: reader.read_3bit_double(),
+            major_axis: reader.read_3bit_double(),
+            axis_ratio: reader.read_bit_double(),
+        },
+        "ACCONSTRAINEDBOUNDEDELLIPSE" => AssocConstraintNodeData::BoundedEllipse {
+            geometry_dependency: handle(reader),
+            geometry_node_id: reader.read_bit_long(),
+            center: reader.read_3bit_double(),
+            major_axis: reader.read_3bit_double(),
+            axis_ratio: reader.read_bit_double(),
+            start_point: reader.read_3bit_double(),
+            end_point: reader.read_3bit_double(),
+        },
         _ if is_plain_geometrical_constraint(class_name) => {
             let (owner_id, is_implied, is_active) = read_geometrical_constraint(reader);
             AssocConstraintNodeData::Geometrical {
