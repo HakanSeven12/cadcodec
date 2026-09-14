@@ -934,6 +934,13 @@ pub enum AssocConstraintNodeData {
         geometry_node_id: i32,
         point: Option<Vector3>,
     },
+    RigidSet {
+        geometry_dependency: Handle,
+        geometry_node_id: i32,
+        reserved: bool,
+        transform: [f64; 16],
+        geometry_ids: Vec<i32>,
+    },
     Line {
         geometry_dependency: Handle,
         geometry_node_id: i32,

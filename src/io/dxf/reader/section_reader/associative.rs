@@ -326,7 +326,6 @@ fn is_dxf_plain_geometrical_constraint(class_name: &str) -> bool {
             | "ACEQUALLENGTHCONSTRAINT"
             | "ACEQUALRADIUSCONSTRAINT"
             | "ACFIXEDCONSTRAINT"
-            | "ACHORIZONTALCONSTRAINT"
             | "ACMIDPOINTCONSTRAINT"
             | "ACNORMALCONSTRAINT"
             | "ACPERPENDICULARCONSTRAINT"
@@ -334,7 +333,6 @@ fn is_dxf_plain_geometrical_constraint(class_name: &str) -> bool {
             | "ACPOINTCURVECONSTRAINT"
             | "ACSYMMETRICCONSTRAINT"
             | "ACTANGENTCONSTRAINT"
-            | "ACVERTICALCONSTRAINT"
     )
 }
 
@@ -395,6 +393,27 @@ fn read_constraint_data(cursor: &mut AssocCursor<'_>, class_name: &str) -> Assoc
                 point,
             }
         }
+        "ACCONSTRAINEDRIGIDSET" => {
+            let geometry_dependency = cursor.handle(330);
+            let geometry_node_id = cursor.i32(90);
+            let reserved = cursor.bool(290);
+            let mut transform = [0.0; 16];
+            for value in &mut transform {
+                *value = cursor.f64(40);
+            }
+            let count = cursor.i32(90).max(0).min(100_000);
+            let mut geometry_ids = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                geometry_ids.push(cursor.i32(90));
+            }
+            AssocConstraintNodeData::RigidSet {
+                geometry_dependency,
+                geometry_node_id,
+                reserved,
+                transform,
+                geometry_ids,
+            }
+        }
         "ACCONSTRAINEDLINE"
         | "ACCONSTRAINEDCONSTRUCTIONLINE"
         | "ACCONSTRAINED2POINTSCONSTRUCTIONLINE"
@@ -425,13 +444,14 @@ fn read_constraint_data(cursor: &mut AssocCursor<'_>, class_name: &str) -> Assoc
                 sector_type: cursor.i32(280) as u8,
             }
         }
-        "ACPARALLELCONSTRAINT" => {
+        "ACPARALLELCONSTRAINT" | "ACHORIZONTALCONSTRAINT" | "ACVERTICALCONSTRAINT" => {
             let (owner_id, is_implied, is_active) = read_constraint_geometry(cursor);
             AssocConstraintNodeData::Parallel {
                 owner_id,
                 is_implied,
                 is_active,
-                datum_line_index: Some(cursor.i32(90)),
+                datum_line_index: (!class_name.eq_ignore_ascii_case("AcParallelConstraint"))
+                    .then(|| cursor.i32(90)),
             }
         }
         "ACDISTANCECONSTRAINT" => {

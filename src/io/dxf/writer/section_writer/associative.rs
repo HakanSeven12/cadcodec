@@ -210,6 +210,24 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                     self.writer.write_point3d(10, *point)?;
                 }
             }
+            AssocConstraintNodeData::RigidSet {
+                geometry_dependency,
+                geometry_node_id,
+                reserved,
+                transform,
+                geometry_ids,
+            } => {
+                self.writer.write_handle(330, *geometry_dependency)?;
+                self.writer.write_i32(90, *geometry_node_id)?;
+                self.writer.write_bool(290, *reserved)?;
+                for value in transform {
+                    self.writer.write_double(40, *value)?;
+                }
+                self.writer.write_i32(90, geometry_ids.len() as i32)?;
+                for geometry_id in geometry_ids {
+                    self.writer.write_i32(90, *geometry_id)?;
+                }
+            }
             AssocConstraintNodeData::Line {
                 geometry_dependency,
                 geometry_node_id,
