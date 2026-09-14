@@ -3353,29 +3353,32 @@ impl CadDocument {
         }
     }
 
+    /// Ensure an extension dictionary exists for `owner`.
+    pub fn ensure_extension_dictionary(&mut self, owner: Handle) -> Handle {
+        if let Some(handle) = self.extension_dictionary_handle(owner) {
+            return handle;
+        }
+        let handle = self.allocate_handle();
+        let mut dictionary = crate::objects::Dictionary::new();
+        dictionary.handle = handle;
+        dictionary.owner = owner;
+        dictionary.hard_owner = true;
+        self.objects
+            .insert(handle, ObjectType::Dictionary(dictionary));
+        if let Some(entity) = self.get_entity_mut(owner) {
+            entity.common_mut().xdictionary_handle = Some(handle);
+        }
+        self.xdic_by_handle.insert(owner, handle);
+        handle
+    }
+
     /// Ensure a named XRecord and its extension dictionary exist.
     ///
     /// The created dictionary owns its records and is attached through both
     /// the entity common data and the non-entity side map so DWG and DXF
     /// writers observe the same graph.
     pub fn ensure_xrecord(&mut self, owner: Handle, key: &str) -> Handle {
-        let dictionary_handle = match self.extension_dictionary_handle(owner) {
-            Some(handle) => handle,
-            None => {
-                let handle = self.allocate_handle();
-                let mut dictionary = crate::objects::Dictionary::new();
-                dictionary.handle = handle;
-                dictionary.owner = owner;
-                dictionary.hard_owner = true;
-                self.objects
-                    .insert(handle, ObjectType::Dictionary(dictionary));
-                if let Some(entity) = self.get_entity_mut(owner) {
-                    entity.common_mut().xdictionary_handle = Some(handle);
-                }
-                self.xdic_by_handle.insert(owner, handle);
-                handle
-            }
-        };
+        let dictionary_handle = self.ensure_extension_dictionary(owner);
 
         if let Some(ObjectType::Dictionary(dictionary)) = self.objects.get(&dictionary_handle) {
             if let Some(handle) = dictionary.get(key) {
