@@ -303,35 +303,31 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_point3d(11, *end_point)?;
             }
             AssocConstraintNodeData::Ellipse {
-                owner_id,
-                is_implied,
-                is_active,
+                geometry_dependency,
+                geometry_node_id,
                 center,
-                short_axis,
+                major_axis,
                 axis_ratio,
             } => {
-                self.writer.write_i32(90, *owner_id)?;
-                self.writer.write_bool(290, *is_implied)?;
-                self.writer.write_bool(290, *is_active)?;
+                self.writer.write_handle(330, *geometry_dependency)?;
+                self.writer.write_i32(90, *geometry_node_id)?;
                 self.writer.write_point3d(10, *center)?;
-                self.writer.write_point3d(11, *short_axis)?;
+                self.writer.write_point3d(11, *major_axis)?;
                 self.writer.write_double(40, *axis_ratio)?;
             }
             AssocConstraintNodeData::BoundedEllipse {
-                owner_id,
-                is_implied,
-                is_active,
+                geometry_dependency,
+                geometry_node_id,
                 center,
-                short_axis,
+                major_axis,
                 axis_ratio,
                 start_point,
                 end_point,
             } => {
-                self.writer.write_i32(90, *owner_id)?;
-                self.writer.write_bool(290, *is_implied)?;
-                self.writer.write_bool(290, *is_active)?;
+                self.writer.write_handle(330, *geometry_dependency)?;
+                self.writer.write_i32(90, *geometry_node_id)?;
                 self.writer.write_point3d(10, *center)?;
-                self.writer.write_point3d(11, *short_axis)?;
+                self.writer.write_point3d(11, *major_axis)?;
                 self.writer.write_double(40, *axis_ratio)?;
                 self.writer.write_point3d(10, *start_point)?;
                 self.writer.write_point3d(11, *end_point)?;

@@ -480,30 +480,22 @@ fn read_constraint_data(cursor: &mut AssocCursor<'_>, class_name: &str) -> Assoc
                 mode: cursor.i32(280) as u8,
             }
         }
-        "ACCONSTRAINEDELLIPSE" => {
-            let (owner_id, is_implied, is_active) = read_constraint_geometry(cursor);
-            AssocConstraintNodeData::Ellipse {
-                owner_id,
-                is_implied,
-                is_active,
-                center: cursor.point3(10),
-                short_axis: cursor.point3(11),
-                axis_ratio: cursor.f64(40),
-            }
-        }
-        "ACCONSTRAINEDBOUNDEDELLIPSE" => {
-            let (owner_id, is_implied, is_active) = read_constraint_geometry(cursor);
-            AssocConstraintNodeData::BoundedEllipse {
-                owner_id,
-                is_implied,
-                is_active,
-                center: cursor.point3(10),
-                short_axis: cursor.point3(11),
-                axis_ratio: cursor.f64(40),
-                start_point: cursor.point3(10),
-                end_point: cursor.point3(11),
-            }
-        }
+        "ACCONSTRAINEDELLIPSE" => AssocConstraintNodeData::Ellipse {
+            geometry_dependency: cursor.handle(330),
+            geometry_node_id: cursor.i32(90),
+            center: cursor.point3(10),
+            major_axis: cursor.point3(11),
+            axis_ratio: cursor.f64(40),
+        },
+        "ACCONSTRAINEDBOUNDEDELLIPSE" => AssocConstraintNodeData::BoundedEllipse {
+            geometry_dependency: cursor.handle(330),
+            geometry_node_id: cursor.i32(90),
+            center: cursor.point3(10),
+            major_axis: cursor.point3(11),
+            axis_ratio: cursor.f64(40),
+            start_point: cursor.point3(10),
+            end_point: cursor.point3(11),
+        },
         _ if is_dxf_plain_geometrical_constraint(class_name) => {
             let (owner_id, is_implied, is_active) = read_constraint_geometry(cursor);
             AssocConstraintNodeData::Geometrical {
