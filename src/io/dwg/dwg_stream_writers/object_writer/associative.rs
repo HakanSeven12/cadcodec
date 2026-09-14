@@ -411,6 +411,23 @@ impl<'a> DwgObjectWriter<'a> {
                 is_implied,
                 is_active,
             } => self.write_geometrical_constraint(*owner_id, *is_implied, *is_active),
+            AssocConstraintNodeData::Composite {
+                owner_id,
+                is_implied,
+                is_active,
+                owned_constraint_ids,
+            } => {
+                self.write_geometrical_constraint(*owner_id, *is_implied, *is_active);
+                self.writer
+                    .write_bit_long(owned_constraint_ids.len() as i32);
+                for constraint_id in owned_constraint_ids {
+                    self.writer.write_bit_long(*constraint_id);
+                }
+            }
+            AssocConstraintNodeData::HelpParameter { value, reserved } => {
+                self.writer.write_bit_double(*value);
+                self.writer.write_bit(*reserved);
+            }
             AssocConstraintNodeData::Angle {
                 owner_id,
                 is_implied,
@@ -629,6 +646,53 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_bit_double(*axis_ratio);
                 self.writer.write_3bit_double(*start_point);
                 self.writer.write_3bit_double(*end_point);
+            }
+            AssocConstraintNodeData::Spline {
+                geometry_dependency,
+                geometry_node_id,
+                rational,
+                periodic,
+                degree,
+                knot_tolerance,
+                knot_physical_length,
+                knot_grow_length,
+                knots,
+                weight_physical_length,
+                weight_grow_length,
+                weights,
+                control_point_physical_length,
+                control_point_grow_length,
+                control_points,
+                implicit_point_ids,
+            } => {
+                self.write_assoc_handle(DwgReferenceType::SoftPointer, *geometry_dependency);
+                self.writer.write_bit_long(*geometry_node_id);
+                self.writer.write_bit(*rational);
+                self.writer.write_bit(*periodic);
+                self.writer.write_bit_long(*degree);
+                self.writer.write_bit_double(*knot_tolerance);
+                self.writer.write_bit_long(knots.len() as i32);
+                self.writer.write_bit_long(*knot_physical_length);
+                self.writer.write_bit_long(*knot_grow_length);
+                for knot in knots {
+                    self.writer.write_bit_double(*knot);
+                }
+                self.writer.write_bit_long(weights.len() as i32);
+                self.writer.write_bit_long(*weight_physical_length);
+                self.writer.write_bit_long(*weight_grow_length);
+                for weight in weights {
+                    self.writer.write_bit_double(*weight);
+                }
+                self.writer.write_bit_long(control_points.len() as i32);
+                self.writer.write_bit_long(*control_point_physical_length);
+                self.writer.write_bit_long(*control_point_grow_length);
+                for point in control_points {
+                    self.writer.write_3bit_double(*point);
+                }
+                self.writer.write_bit_long(implicit_point_ids.len() as i32);
+                for point_id in implicit_point_ids {
+                    self.writer.write_bit_long(*point_id);
+                }
             }
         }
     }

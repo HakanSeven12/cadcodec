@@ -338,6 +338,24 @@ fn is_dxf_plain_geometrical_constraint(class_name: &str) -> bool {
 
 fn read_constraint_data(cursor: &mut AssocCursor<'_>, class_name: &str) -> AssocConstraintNodeData {
     match class_name.to_ascii_uppercase().as_str() {
+        "ACG2SMOOTHCONSTRAINT" => {
+            let (owner_id, is_implied, is_active) = read_constraint_geometry(cursor);
+            let count = cursor.i32(90).max(0).min(100_000);
+            let mut owned_constraint_ids = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                owned_constraint_ids.push(cursor.i32(90));
+            }
+            AssocConstraintNodeData::Composite {
+                owner_id,
+                is_implied,
+                is_active,
+                owned_constraint_ids,
+            }
+        }
+        "ACHELPPARAMETER" => AssocConstraintNodeData::HelpParameter {
+            value: cursor.f64(40),
+            reserved: cursor.bool(290),
+        },
         "ACCONSTRAINEDCIRCLE" => AssocConstraintNodeData::Circle {
             geometry_dependency: cursor.handle(330),
             geometry_node_id: cursor.i32(90),
@@ -496,6 +514,58 @@ fn read_constraint_data(cursor: &mut AssocCursor<'_>, class_name: &str) -> Assoc
             start_point: cursor.point3(10),
             end_point: cursor.point3(11),
         },
+        "ACCONSTRAINEDSPLINE" => {
+            let geometry_dependency = cursor.handle(330);
+            let geometry_node_id = cursor.i32(90);
+            let rational = cursor.bool(70);
+            let periodic = cursor.bool(70);
+            let degree = cursor.i32(90);
+            let knot_tolerance = cursor.f64(40);
+            let knot_count = cursor.i32(90).max(0).min(100_000);
+            let knot_physical_length = cursor.i32(90);
+            let knot_grow_length = cursor.i32(90);
+            let mut knots = Vec::with_capacity(knot_count as usize);
+            for _ in 0..knot_count {
+                knots.push(cursor.f64(40));
+            }
+            let weight_count = cursor.i32(90).max(0).min(100_000);
+            let weight_physical_length = cursor.i32(90);
+            let weight_grow_length = cursor.i32(90);
+            let mut weights = Vec::with_capacity(weight_count as usize);
+            for _ in 0..weight_count {
+                weights.push(cursor.f64(40));
+            }
+            let control_point_count = cursor.i32(90).max(0).min(100_000);
+            let control_point_physical_length = cursor.i32(90);
+            let control_point_grow_length = cursor.i32(90);
+            let mut control_points = Vec::with_capacity(control_point_count as usize);
+            for _ in 0..control_point_count {
+                control_points.push(cursor.point3(10));
+            }
+            let implicit_point_count = cursor.i32(90).max(0).min(100_000);
+            let mut implicit_point_ids = Vec::with_capacity(implicit_point_count as usize);
+            for _ in 0..implicit_point_count {
+                implicit_point_ids.push(cursor.i32(90));
+            }
+            AssocConstraintNodeData::Spline {
+                geometry_dependency,
+                geometry_node_id,
+                rational,
+                periodic,
+                degree,
+                knot_tolerance,
+                knot_physical_length,
+                knot_grow_length,
+                knots,
+                weight_physical_length,
+                weight_grow_length,
+                weights,
+                control_point_physical_length,
+                control_point_grow_length,
+                control_points,
+                implicit_point_ids,
+            }
+        }
         _ if is_dxf_plain_geometrical_constraint(class_name) => {
             let (owner_id, is_implied, is_active) = read_constraint_geometry(cursor);
             AssocConstraintNodeData::Geometrical {

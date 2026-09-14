@@ -663,6 +663,24 @@ fn read_constraint_node_data(
     class_name: &str,
 ) -> AssocConstraintNodeData {
     match class_name.to_ascii_uppercase().as_str() {
+        "ACG2SMOOTHCONSTRAINT" => {
+            let (owner_id, is_implied, is_active) = read_geometrical_constraint(reader);
+            let count = safe_count(reader.read_bit_long());
+            let mut owned_constraint_ids = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                owned_constraint_ids.push(reader.read_bit_long());
+            }
+            AssocConstraintNodeData::Composite {
+                owner_id,
+                is_implied,
+                is_active,
+                owned_constraint_ids,
+            }
+        }
+        "ACHELPPARAMETER" => AssocConstraintNodeData::HelpParameter {
+            value: reader.read_bit_double(),
+            reserved: reader.read_bit(),
+        },
         "ACCONSTRAINEDCIRCLE" => AssocConstraintNodeData::Circle {
             geometry_dependency: handle(reader),
             geometry_node_id: reader.read_bit_long(),
@@ -809,6 +827,58 @@ fn read_constraint_node_data(
             start_point: reader.read_3bit_double(),
             end_point: reader.read_3bit_double(),
         },
+        "ACCONSTRAINEDSPLINE" => {
+            let geometry_dependency = handle(reader);
+            let geometry_node_id = reader.read_bit_long();
+            let rational = reader.read_bit();
+            let periodic = reader.read_bit();
+            let degree = reader.read_bit_long();
+            let knot_tolerance = reader.read_bit_double();
+            let knot_count = safe_count(reader.read_bit_long());
+            let knot_physical_length = reader.read_bit_long();
+            let knot_grow_length = reader.read_bit_long();
+            let mut knots = Vec::with_capacity(knot_count as usize);
+            for _ in 0..knot_count {
+                knots.push(reader.read_bit_double());
+            }
+            let weight_count = safe_count(reader.read_bit_long());
+            let weight_physical_length = reader.read_bit_long();
+            let weight_grow_length = reader.read_bit_long();
+            let mut weights = Vec::with_capacity(weight_count as usize);
+            for _ in 0..weight_count {
+                weights.push(reader.read_bit_double());
+            }
+            let control_point_count = safe_count(reader.read_bit_long());
+            let control_point_physical_length = reader.read_bit_long();
+            let control_point_grow_length = reader.read_bit_long();
+            let mut control_points = Vec::with_capacity(control_point_count as usize);
+            for _ in 0..control_point_count {
+                control_points.push(reader.read_3bit_double());
+            }
+            let implicit_point_count = safe_count(reader.read_bit_long());
+            let mut implicit_point_ids = Vec::with_capacity(implicit_point_count as usize);
+            for _ in 0..implicit_point_count {
+                implicit_point_ids.push(reader.read_bit_long());
+            }
+            AssocConstraintNodeData::Spline {
+                geometry_dependency,
+                geometry_node_id,
+                rational,
+                periodic,
+                degree,
+                knot_tolerance,
+                knot_physical_length,
+                knot_grow_length,
+                knots,
+                weight_physical_length,
+                weight_grow_length,
+                weights,
+                control_point_physical_length,
+                control_point_grow_length,
+                control_points,
+                implicit_point_ids,
+            }
+        }
         _ if is_plain_geometrical_constraint(class_name) => {
             let (owner_id, is_implied, is_active) = read_geometrical_constraint(reader);
             AssocConstraintNodeData::Geometrical {

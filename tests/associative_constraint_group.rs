@@ -138,6 +138,53 @@ fn document_with_axis_and_rigid_set() -> CadDocument {
                         },
                         ..Default::default()
                     },
+                    AssocConstraintNode {
+                        node_id: 5,
+                        class_name: "AcConstrainedSpline".to_string(),
+                        data: AssocConstraintNodeData::Spline {
+                            geometry_dependency: Default::default(),
+                            geometry_node_id: 5,
+                            rational: false,
+                            periodic: false,
+                            degree: 2,
+                            knot_tolerance: 1.0e-10,
+                            knot_physical_length: 6,
+                            knot_grow_length: 8,
+                            knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                            weight_physical_length: 0,
+                            weight_grow_length: 8,
+                            weights: Vec::new(),
+                            control_point_physical_length: 3,
+                            control_point_grow_length: 8,
+                            control_points: vec![
+                                Vector3::ZERO,
+                                Vector3::new(1.0, 2.0, 0.0),
+                                Vector3::new(3.0, 0.0, 0.0),
+                            ],
+                            implicit_point_ids: vec![10, 11, 12],
+                        },
+                        ..Default::default()
+                    },
+                    AssocConstraintNode {
+                        node_id: 6,
+                        class_name: "AcHelpParameter".to_string(),
+                        data: AssocConstraintNodeData::HelpParameter {
+                            value: 0.25,
+                            reserved: true,
+                        },
+                        ..Default::default()
+                    },
+                    AssocConstraintNode {
+                        node_id: 7,
+                        class_name: "AcG2SmoothConstraint".to_string(),
+                        data: AssocConstraintNodeData::Composite {
+                            owner_id: 5,
+                            is_implied: false,
+                            is_active: true,
+                            owned_constraint_ids: vec![8, 9],
+                        },
+                        ..Default::default()
+                    },
                 ],
                 ..Default::default()
             }),
@@ -184,6 +231,35 @@ fn assert_axis_and_rigid_set(document: &CadDocument) {
             axis_ratio: 0.5,
             ..
         } if major_axis == Vector3::new(4.0, 0.0, 0.0)
+    ));
+    assert!(matches!(
+        &group.nodes[5].data,
+        AssocConstraintNodeData::Spline {
+            geometry_node_id: 5,
+            rational: false,
+            degree: 2,
+            knots,
+            control_points,
+            implicit_point_ids,
+            ..
+        } if knots.len() == 6
+            && control_points[1] == Vector3::new(1.0, 2.0, 0.0)
+            && implicit_point_ids == &[10, 11, 12]
+    ));
+    assert!(matches!(
+        group.nodes[6].data,
+        AssocConstraintNodeData::HelpParameter {
+            value: 0.25,
+            reserved: true,
+        }
+    ));
+    assert!(matches!(
+        &group.nodes[7].data,
+        AssocConstraintNodeData::Composite {
+            owner_id: 5,
+            owned_constraint_ids,
+            ..
+        } if owned_constraint_ids == &[8, 9]
     ));
 }
 
