@@ -211,6 +211,12 @@ impl SabWriter {
         let tokens = if base_entity_type(&record.entity_type) == "face" {
             contextual = Self::encode_face_boolean_roles(&record.tokens);
             &contextual
+        } else if matches!(
+            record.entity_type.as_str(),
+            "intcurve-curve" | "spline-surface" | "pcurve"
+        ) {
+            contextual = Self::encode_spline_numeric_roles(&record.entity_type, &record.tokens);
+            &contextual
         } else {
             &record.tokens
         };
@@ -480,6 +486,140 @@ impl SabWriter {
         buf.push(tags::ENTITY_TYPE);
         buf.push(name.len() as u8);
         buf.extend_from_slice(name.as_bytes());
+    }
+
+    // SAT has no numeric type tags: a double such as 1.0 is commonly written
+    // as "1". Recover the roles of explicit NURBS fields before emitting SAB.
+    fn encode_spline_numeric_roles(entity_type: &str, tokens: &[SatToken]) -> Vec<SatToken> {
+        let mut result = tokens.to_vec();
+        let mut doubles = Vec::new();
+        let mut enums = Vec::new();
+        let mut subtypes = Vec::new();
+        for (index, token) in tokens.iter().enumerate() {
+            match token.as_ident() {
+                Some("{") => subtypes.push(tokens.get(index + 1).and_then(SatToken::as_ident)),
+                Some("}") => {
+                    subtypes.pop();
+                }
+                _ => {}
+            }
+            if matches!(token.as_ident(), Some("nurbs" | "nubs")) {
+                let previous = index.checked_sub(1).and_then(|i| tokens[i].as_ident());
+                let parent = index.checked_sub(2).and_then(|i| tokens[i].as_ident());
+                let dimensions = match (parent, previous) {
+                    (Some("exactcur"), Some("full")) => Some((3, false)),
+                    (Some("exactsur"), Some("full")) => Some((3, true)),
+                    (_, Some("exppc")) => Some((2, false)),
+                    _ => None,
+                };
+                if let Some((dimensions, surface)) = dimensions {
+                    if let Some(fields) =
+                        Self::nurbs_double_fields(tokens, index, dimensions, surface)
+                    {
+                        doubles.extend(fields);
+                        if previous == Some("full") {
+                            enums.push(index - 1);
+                        }
+                        if surface {
+                            let closure =
+                                index + 3 + usize::from(token.as_ident() == Some("nurbs"));
+                            enums.extend(closure..closure + 4);
+                        } else {
+                            enums.push(index + 2);
+                        }
+                    }
+                }
+            }
+            if (token.as_ident() == Some("F") || matches!(token, SatToken::False))
+                && index + 1 < tokens.len()
+                && matches!(
+                    subtypes.last(),
+                    None | Some(Some("exactcur" | "exactsur" | "exppc"))
+                )
+            {
+                doubles.push(index + 1);
+            }
+            // An explicit pcurve ends with an inline analytic support surface.
+            // All numbers in that geometry (including bounded intervals) are doubles.
+            if entity_type == "pcurve"
+                && subtypes.last() == Some(&Some("exppc"))
+                && matches!(
+                    token.as_ident(),
+                    Some("plane" | "cone" | "sphere" | "torus")
+                )
+            {
+                doubles.extend(
+                    (index + 1..tokens.len()).take_while(|&i| tokens[i].as_ident() != Some("}")),
+                );
+            }
+        }
+        if entity_type == "pcurve" && tokens.len() >= 2 {
+            doubles.extend(tokens.len() - 2..tokens.len());
+        }
+        for index in doubles {
+            if let SatToken::Integer(value) = result[index] {
+                result[index] = SatToken::Float(value as f64);
+            }
+        }
+        for index in enums {
+            if let SatToken::Ident(name) = &result[index] {
+                if matches!(
+                    name.as_str(),
+                    "full" | "open" | "closed" | "periodic" | "none"
+                ) {
+                    result[index] = SatToken::Enum(name.clone());
+                }
+            }
+        }
+        result
+    }
+
+    fn nurbs_double_fields(
+        tokens: &[SatToken],
+        start: usize,
+        dimensions: usize,
+        surface: bool,
+    ) -> Option<Vec<usize>> {
+        let integer = |index: usize| usize::try_from(tokens.get(index)?.as_integer()?).ok();
+        let rational = tokens.get(start)?.as_ident()? == "nurbs";
+        let degree_u = integer(start + 1)?;
+        let (degrees, counts, mut position) = if surface {
+            let degree_v = integer(start + 2)?;
+            let count_index = start + 7 + usize::from(rational);
+            (
+                vec![degree_u, degree_v],
+                vec![integer(count_index)?, integer(count_index + 1)?],
+                count_index + 2,
+            )
+        } else {
+            (vec![degree_u], vec![integer(start + 3)?], start + 4)
+        };
+        let mut doubles = Vec::new();
+        let mut controls = 1usize;
+        for (degree, count) in degrees.into_iter().zip(counts) {
+            if count < 2 || count > tokens.len().saturating_sub(position) / 2 {
+                return None;
+            }
+            let mut multiplicities = 0usize;
+            for _ in 0..count {
+                tokens.get(position)?.as_float()?;
+                doubles.push(position);
+                multiplicities = multiplicities.checked_add(integer(position + 1)?)?;
+                position += 2;
+            }
+            // ACIS omits one repetition at each clamped endpoint.
+            let axis_controls = multiplicities.checked_add(1)?.checked_sub(degree)?;
+            controls = controls.checked_mul(axis_controls)?;
+        }
+        let values = controls
+            .checked_mul(dimensions + usize::from(rational))?
+            .checked_add(1)?;
+        let end = position.checked_add(values)?;
+        for (offset, token) in tokens.get(position..end)?.iter().enumerate() {
+            token.as_float()?;
+            doubles.push(position + offset);
+        }
+        Some(doubles)
     }
 
     /// Determine whether direct geometry integer literals are scalar doubles.
@@ -1543,14 +1683,124 @@ mod tests {
             0.0,
         );
 
-        // The SAT parser represents exact integral coordinates as integer
-        // tokens; SAB retains their integer tags even though they remain valid
-        // numeric spline coordinates.
+        // A permissive reader accepts integer coordinates, but ACIS requires
+        // DOUBLE tags. Compare against the binary output of the typed builder.
         let parsed_text = SatDocument::parse(&doc.to_sat_string()).unwrap();
+        assert_eq!(SabWriter::write(&parsed_text), SabWriter::write(&doc));
         let roundtrip = SabReader::read(&SabWriter::write(&parsed_text)).unwrap();
         let curve = SatIntCurve::from_record(roundtrip.records_of_type("intcurve-curve")[0])
             .expect("NURBS curve record");
         let (_, _, controls) = curve.bspline().expect("decoded NURBS curve");
         assert_eq!(controls[1], [1.0, 1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn explicit_pcurve_sense_survives_sat_and_sab() {
+        for sense in [Sense::Forward, Sense::Reversed] {
+            let mut doc = SatDocument::new_body();
+            let plane = doc.add_plane_surface([0.; 3], [0., 0., 1.], [1., 0., 0.]);
+            let index = doc.add_pcurve(
+                false,
+                1,
+                false,
+                &[(0., 2), (1., 2)],
+                &[[0., 0.], [1., 0.]],
+                None,
+                1e-9,
+                plane,
+                (0., 0.),
+            );
+            doc.records[index as usize].tokens[2] = SatToken::Ident(
+                if sense == Sense::Reversed {
+                    "reversed"
+                } else {
+                    "forward"
+                }
+                .into(),
+            );
+            for read in [
+                SatDocument::parse(&doc.to_sat_string()).unwrap(),
+                SabReader::read(&SabWriter::write(&doc)).unwrap(),
+            ] {
+                let curve = SatPCurve::from_record(&read.records[index as usize]).unwrap();
+                assert_eq!(curve.sense(), sense);
+            }
+        }
+    }
+
+    #[test]
+    fn sat_nurbs_fields_retain_binary_roles() {
+        for rational in [false, true] {
+            let mut doc = SatDocument::new_body();
+            doc.add_spline_curve(
+                rational,
+                1,
+                false,
+                &[(0., 2), (1., 2)],
+                &[[0., 0., 0.], [1., 1., 0.]],
+                Some(&[1., 1.]),
+                0.,
+            );
+            let spline = doc.add_spline_surface(
+                false,
+                rational,
+                1,
+                1,
+                false,
+                false,
+                &[(0., 2), (1., 2)],
+                &[(0., 2), (1., 2)],
+                &[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.], [1., 1., 0.]],
+                Some(&[1.; 4]),
+                0.,
+            );
+            let plane = doc.add_plane_surface([0.; 3], [0., 0., 1.], [1., 0., 0.]);
+            let cone = doc.add_cone_surface([0.; 3], [0., 0., 1.], [2., 0., 0.], 1., 1., 0.);
+            let sphere = doc.add_sphere_surface([0.; 3], 2., [1., 0., 0.], [0., 0., 1.]);
+            let torus = doc.add_torus_surface([0.; 3], [0., 0., 1.], 3., 1., [1., 0., 0.]);
+            for support in [spline, plane, cone, sphere, torus] {
+                doc.add_pcurve(
+                    rational,
+                    1,
+                    false,
+                    &[(0., 2), (1., 2)],
+                    &[[0., 0.], [1., 1.]],
+                    Some(&[1., 1.]),
+                    0.,
+                    support,
+                    (1., 0.),
+                );
+            }
+            let parsed = SatDocument::parse(&doc.to_sat_string()).unwrap();
+            let expected = SabWriter::write(&doc);
+            assert_eq!(SabWriter::write(&parsed), expected, "rational={rational}");
+            let raw = SabReader::read(&expected).unwrap();
+            assert_eq!(
+                SabWriter::write(&raw),
+                expected,
+                "raw SAB must remain unchanged"
+            );
+            for version in [
+                crate::DxfVersion::AC1018,
+                crate::DxfVersion::AC1021,
+                crate::DxfVersion::AC1024,
+                crate::DxfVersion::AC1027,
+                crate::DxfVersion::AC1032,
+            ] {
+                let mut drawing = crate::CadDocument::with_version(version);
+                let solid = crate::entities::Solid3D::from_sat(&doc.to_sat_string());
+                drawing
+                    .add_entity(crate::EntityType::Solid3D(solid))
+                    .unwrap();
+                let bytes = crate::DwgWriter::write_to_vec(&drawing).unwrap();
+                let read = crate::DwgReader::from_stream(std::io::Cursor::new(bytes))
+                    .read()
+                    .unwrap();
+                let crate::EntityType::Solid3D(solid) = read.entities().next().unwrap() else {
+                    panic!("missing solid");
+                };
+                assert_eq!(solid.acis_data.sab_data, expected, "DWG {version:?}");
+            }
+        }
     }
 }

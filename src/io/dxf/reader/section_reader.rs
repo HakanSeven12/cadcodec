@@ -3125,6 +3125,7 @@ impl<'a> SectionReader<'a> {
                         if let Some(block_record) = document.block_records.get_mut(&block_name) {
                             block_record.entity_handles = entity_handles;
                             block_record.xref_path = block.xref_path.clone();
+                            block_record.base_point = block.base_point;
                             // Block-type flags come from the BLOCK entity's
                             // code 70 (the BLOCK_RECORD's code 70 is units).
                             block_record.flags.anonymous = (block_flags & 1) != 0;

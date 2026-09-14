@@ -1804,9 +1804,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_subclass("AcDbBlockBegin")?;
         self.writer.write_string(2, block_record.name())?;
         self.writer.write_i16(70, flags)?;
-        self.writer.write_double(10, 0.0)?;
-        self.writer.write_double(20, 0.0)?;
-        self.writer.write_double(30, 0.0)?;
+        self.writer.write_double(10, block_record.base_point.x)?;
+        self.writer.write_double(20, block_record.base_point.y)?;
+        self.writer.write_double(30, block_record.base_point.z)?;
         self.writer.write_string(3, block_record.name())?;
         // Group code 1 is XRef path (empty for normal blocks)
         self.writer.write_string(1, &block_record.xref_path)?;

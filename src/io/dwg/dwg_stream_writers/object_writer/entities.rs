@@ -5334,20 +5334,25 @@ impl<'a> DwgObjectWriter<'a> {
     /// native COMMON_3DSOLID wireframe cache still remains in the entity.
     fn write_acis_empty(
         &mut self,
-        _point: Vector3,
-        _acis: &AcisData,
-        _wires: &[Wire],
-        _silhouettes: &[Silhouette],
+        point: Vector3,
+        acis: &AcisData,
+        wires: &[Wire],
+        silhouettes: &[Silhouette],
     ) {
         // R2013+ AcDs-backed records no longer carry the legacy leading
         // `acis_empty` bit.  Their first modeler-geometry bit is the
         // wireframe-presence flag.
         //
-        // Producer-specific wire/silhouette caches are optional and several
-        // valid drawings use incompatible cache tails. Geometry itself is the
-        // SAB blob in AcDs. Emit no cache here, matching ODA's canonical
-        // round-trip, instead of reconstructing a subtly malformed object.
-        self.writer.write_bit(false);
+        // A derived reference point alone is not a display cache. Only emit
+        // this section when the caller supplies actual wire/silhouette data.
+        if wires.is_empty() && silhouettes.is_empty() {
+            self.writer.write_bit(false);
+        } else if self.write_acis_wireframe(point, acis, wires, silhouettes) {
+            // COMMON_3DSOLID has an extra-modeler-data gate only when the
+            // AcDs-backed entity contains a wireframe section.
+            self.writer.write_bit(acis.extra_acis_data.is_none());
+            self.write_extra_acis_data(acis);
+        }
     }
 
     /// Write the R2013+ modeler-geometry revision block (`COMMON_3DSOLID`).
@@ -5580,7 +5585,7 @@ impl<'a> DwgObjectWriter<'a> {
             // Wireframe anchor: the entity's stored reference point (bbox
             // centre in AutoCAD-authored files), falling back to the first
             // wire vertex.
-            let anchor = if point != Vector3::ZERO {
+            let anchor = if acis.wireframe_point_present || point != Vector3::ZERO {
                 point
             } else {
                 wires
