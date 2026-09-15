@@ -3463,7 +3463,12 @@ impl<'a> SectionReader<'a> {
             // Entities start with code 0
             if pair.code == 0 {
                 let entity_type = pair.value_string.clone();
-                let before = document.entities().count();
+                // The entity list length stands in for the filtered
+                // `entities()` count: the ENTITIES section never adds the
+                // BLOCK / ENDBLK markers that the filter excludes, so the
+                // two agree, and the length does not walk the whole list
+                // for every record.
+                let before = document.entities.len();
 
                 match entity_type.as_str() {
                     "POINT" => {
@@ -3733,7 +3738,7 @@ impl<'a> SectionReader<'a> {
                 }
                 self.decoded_records = self
                     .decoded_records
-                    .saturating_add(document.entities().count().saturating_sub(before));
+                    .saturating_add(document.entities.len().saturating_sub(before));
             }
         }
 
