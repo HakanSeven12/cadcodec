@@ -567,14 +567,17 @@ fn handle_less_records_receive_handles_on_read() {
     let lines: Vec<&str> = output.split("\r\n").collect();
     let mut invalid = Vec::new();
     let mut current_record = String::new();
-    for i in 0..lines.len().saturating_sub(1) {
-        if lines[i] == "  0" {
-            current_record = lines.get(i + 1).copied().unwrap_or("?").to_string();
-        }
+    // In steps of two: a DXF is a stream of code/value pairs and a value line
+    // read as a code is a false positive waiting to happen. A table header
+    // carrying `70 / 5` -- five entries -- followed by the `0 / APPID` of the
+    // next record reads, line by line, exactly like a handle of zero.
+    for i in (0..lines.len().saturating_sub(1)).step_by(2) {
         let code = lines[i].trim();
-        if matches!(code, "5" | "105" | "340" | "350" | "360")
-            && lines.get(i + 1).map(|v| v.trim()) == Some("0")
-        {
+        let value = lines[i + 1].trim();
+        if code == "0" {
+            current_record = value.to_string();
+        }
+        if matches!(code, "5" | "105" | "340" | "350" | "360") && value == "0" {
             invalid.push(format!("{} in {}", code, current_record));
         }
     }

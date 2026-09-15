@@ -84,6 +84,10 @@ impl<'a> DxfWriter<'a> {
         // entities before either writer snapshots handles, otherwise an
         // ACAD_TABLE can emit a null/nonexistent block-record pointer.
         crate::io::dwg::dwg_writer::prepare_database_references(&mut prepared);
+        // An in-place table rename leaves the entry keyed under its old name,
+        // so entity layer/linetype lookups miss and reference a name the
+        // written table no longer defines (issue #80).
+        crate::io::dwg::dwg_writer::prepare_table_keys(&mut prepared);
         self.write_prepared_dxf(writer, prepared.as_ref())
     }
 

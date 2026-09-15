@@ -1691,6 +1691,13 @@ impl CadDocument {
         layer_transparency.set_handle(self.allocate_handle());
         self.app_ids.add(layer_transparency).ok();
 
+        // ... and a layer description as AcAecLayerStandard XDATA/EED. On DWG
+        // an EED block is keyed by the application's handle, so the entry has
+        // to exist before a description can be written at all.
+        let mut layer_description = AppId::new(crate::tables::layer::LAYER_DESCRIPTION_APP);
+        layer_description.set_handle(self.allocate_handle());
+        self.app_ids.add(layer_description).ok();
+
         // Add standard viewport
         let mut active_vport = VPort::active();
         active_vport.set_handle(self.allocate_handle());
@@ -3732,6 +3739,135 @@ impl CadDocument {
             || has_null!(self.ucss)
             || has_null!(self.vx_table)
             || has_null!(self.block_records)
+    }
+
+    /// Re-key symbol-table entries renamed in place through `iter_mut` /
+    /// `get_mut`, so name-based lookups resolve them again.
+    ///
+    /// Tables key entries by the normalized name captured at insertion.
+    /// Assigning `layer.name` directly leaves the entry reachable only under
+    /// its old name, and every later name lookup misses — the DWG writer then
+    /// emits a NULL layer hard pointer for entities on that layer, leaving an
+    /// invalid drawing (issue #80). The DWG and
+    /// DXF writers call this on their output copy; call it directly after an
+    /// in-place rename to repair the live document too.
+    ///
+    /// [`rename_layer`](Self::rename_layer) and [`Table::rename`] keep keys in
+    /// sync on their own, so this is a no-op after either. Returns the number
+    /// of re-keyed entries.
+    ///
+    /// Entities, and the header's current-layer/style names, are updated to the
+    /// new name where the rename is unambiguous, so an in-place rename keeps
+    /// the drawing's appearance rather than dropping entities to layer "0".
+    pub fn resync_table_keys(&mut self) -> usize {
+        let layers = self.layers.resync_keys();
+        let line_types = self.line_types.resync_keys();
+        let text_styles = self.text_styles.resync_keys();
+        let renamed = layers.len()
+            + line_types.len()
+            + text_styles.len()
+            + self.dim_styles.resync_keys().len()
+            + self.app_ids.resync_keys().len()
+            + self.views.resync_keys().len()
+            + self.vports.resync_keys().len()
+            + self.ucss.resync_keys().len()
+            + self.vx_table.resync_keys().len()
+            + self.block_records.resync_keys().len();
+        if renamed == 0 {
+            return 0;
+        }
+        self.apply_table_renames(&layers, &line_types, &text_styles);
+        renamed
+    }
+
+    /// Re-point name-based references at the entries `resync_keys` moved.
+    ///
+    /// A pair is applied only when the old name no longer resolves in its
+    /// table: if some other entry still owns that name, references to it are
+    /// legitimate and must stay put.
+    fn apply_table_renames(
+        &mut self,
+        layers: &[(String, String)],
+        line_types: &[(String, String)],
+        text_styles: &[(String, String)],
+    ) {
+        // The stored key is already normalized; strip any duplicate-name suffix
+        // `add_allow_duplicate` appended so the lookup key is comparable.
+        let resolvable = |pairs: &[(String, String)], exists: &dyn Fn(&str) -> bool| {
+            let map: HashMap<String, String> = pairs
+                .iter()
+                .filter_map(|(old_key, new_name)| {
+                    let old = old_key.split('\u{0}').next().unwrap_or(old_key);
+                    (!exists(old) && normalize_name(new_name) != old)
+                        .then(|| (old.to_string(), new_name.clone()))
+                })
+                .collect();
+            map
+        };
+        let layer_renames = resolvable(layers, &|name| self.layers.contains(name));
+        let linetype_renames = resolvable(line_types, &|name| self.line_types.contains(name));
+        let style_renames = resolvable(text_styles, &|name| self.text_styles.contains(name));
+        if layer_renames.is_empty() && linetype_renames.is_empty() && style_renames.is_empty() {
+            return;
+        }
+
+        if let Some(name) = layer_renames.get(&normalize_name(&self.header.current_layer_name)) {
+            self.header.current_layer_name = name.clone();
+        }
+        if let Some(name) =
+            linetype_renames.get(&normalize_name(&self.header.current_linetype_name))
+        {
+            self.header.current_linetype_name = name.clone();
+        }
+        if let Some(name) = style_renames.get(&normalize_name(&self.header.current_text_style_name))
+        {
+            self.header.current_text_style_name = name.clone();
+        }
+
+        for index in 0..self.entities.len() {
+            let common = self.entities[index].common();
+            let layer = layer_renames.get(&normalize_name(&common.layer));
+            let linetype = linetype_renames.get(&normalize_name(&common.linetype));
+            if layer.is_none() && linetype.is_none() {
+                continue;
+            }
+            let layer = layer.cloned();
+            let linetype = linetype.cloned();
+            let common = Arc::make_mut(&mut self.entities[index]).common_mut();
+            if let Some(name) = layer {
+                common.layer = name;
+            }
+            if let Some(name) = linetype {
+                common.linetype = name;
+            }
+        }
+
+        // A layer's own linetype reference is a name too.
+        for layer in self.layers.iter_mut() {
+            if let Some(name) = linetype_renames.get(&normalize_name(&layer.line_type)) {
+                layer.line_type = name.clone();
+            }
+        }
+    }
+
+    /// Whether any symbol-table entry was renamed in place and is now
+    /// unreachable under its own name. See [`resync_table_keys`](Self::resync_table_keys).
+    pub fn has_stale_table_keys(&self) -> bool {
+        macro_rules! stale {
+            ($table:expr) => {
+                $table.has_stale_keys()
+            };
+        }
+        stale!(self.layers)
+            || stale!(self.line_types)
+            || stale!(self.text_styles)
+            || stale!(self.dim_styles)
+            || stale!(self.app_ids)
+            || stale!(self.views)
+            || stale!(self.vports)
+            || stale!(self.ucss)
+            || stale!(self.vx_table)
+            || stale!(self.block_records)
     }
 
     /// Assigns fresh handles to every symbol-table entry that still carries

@@ -22,6 +22,18 @@ pub fn normalize_name(name: &str) -> String {
     name.to_uppercase()
 }
 
+/// Whether a stored lookup key still describes `name`.
+///
+/// `add_allow_duplicate` keys a second entry sharing a display name as
+/// `NAME\0…`, so that suffixed form counts as matching too.
+fn key_matches(key: &str, name: &str) -> bool {
+    match key.strip_prefix(normalize_name(name).as_str()) {
+        Some("") => true,
+        Some(rest) => rest.starts_with('\u{0}'),
+        None => false,
+    }
+}
+
 pub mod appid;
 pub mod block_record;
 pub mod dimstyle;
@@ -118,7 +130,7 @@ impl<T: TableEntry> Table<T> {
     }
 
     /// Add an entry while preserving existing entries with the same display
-    /// name. This is needed for AutoCAD VPORT tables, where tiled model-space
+    /// name. This is needed for VPORT tables, where tiled model-space
     /// viewports can all be named "*Active".
     pub fn add_allow_duplicate(&mut self, entry: T) {
         let name = normalize_name(entry.name());
@@ -181,6 +193,66 @@ impl<T: TableEntry> Table<T> {
         let replaced = self.entries.shift_insert(index, new_key, entry);
         debug_assert!(replaced.is_none());
         Ok(())
+    }
+
+    /// Whether any entry was renamed in place and so is no longer reachable
+    /// under its own name. See [`resync_keys`](Self::resync_keys).
+    pub fn has_stale_keys(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|(key, entry)| !key_matches(key, entry.name()))
+    }
+
+    /// Re-key any entry whose name was changed in place, e.g. through
+    /// [`iter_mut`](Self::iter_mut) or [`get_mut`](Self::get_mut).
+    ///
+    /// Lookups are keyed by the normalized name captured at insertion, so
+    /// assigning `entry.name` directly leaves the entry reachable only under
+    /// its old name. Every name-based resolution then misses: the DWG/DXF
+    /// writers turn an unresolved entity layer into a NULL hard pointer and
+    /// produce an invalid drawing. A rename colliding with another
+    /// entry keeps the suffixed form `add_allow_duplicate` uses, so no entry is
+    /// ever dropped.
+    ///
+    /// Order is preserved; this is a no-op when every key already agrees.
+    /// Returns one `(old_key, new_name)` pair per re-keyed entry, so a caller
+    /// can update name-based references to the entries that moved.
+    pub fn resync_keys(&mut self) -> Vec<(String, String)> {
+        let stale: Vec<usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, (key, entry))| !key_matches(key, entry.name()))
+            .map(|(index, _)| index)
+            .collect();
+        if stale.is_empty() {
+            return Vec::new();
+        }
+        let mut renames = Vec::with_capacity(stale.len());
+        // Re-insert at the original index so table order — which DWG readers
+        // rely on for the symbol-table record sequence — is untouched.
+        for index in stale.iter().copied() {
+            let (key, _) = self.entries.get_index(index).expect("index in range");
+            let key = key.clone();
+            let (_, _, entry) = self.entries.shift_remove_full(&key).expect("key present");
+            let new_name = entry.name().to_string();
+            let name = normalize_name(&new_name);
+            let target = if self.entries.contains_key(&name) {
+                let handle = entry.handle();
+                let mut candidate = format!("{}\u{0}{:X}", name, handle.value());
+                let mut n = 1usize;
+                while self.entries.contains_key(&candidate) {
+                    candidate = format!("{}\u{0}{:X}-{}", name, handle.value(), n);
+                    n += 1;
+                }
+                candidate
+            } else {
+                name
+            };
+            self.entries.shift_insert(index, target, entry);
+            renames.push((key, new_name));
+        }
+        renames
     }
 
     /// Get the number of entries

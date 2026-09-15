@@ -1041,6 +1041,17 @@ impl DwgDocumentBuilder {
             }
             _ => None,
         });
+        let layer_description_app_handle = parsed_entries.iter().find_map(|entry| match entry {
+            ParsedEntry::AppId(handle, data)
+                if data
+                    .name
+                    .eq_ignore_ascii_case(crate::tables::layer::LAYER_DESCRIPTION_APP) =>
+            {
+                Some(*handle)
+            }
+            _ => None,
+        });
+        let eed_is_wide = self.obj_reader.version().r2007_plus();
         let mut cleared_default_vports = false;
         for entry in &parsed_entries {
             match entry {
@@ -1074,6 +1085,39 @@ impl DwgDocumentBuilder {
                                     i32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
                                 layer.transparency =
                                     crate::types::Transparency::from_alpha_value(raw as u32);
+                            }
+                        }
+                    }
+                    // The description rides in the same EED under its own
+                    // application, as two strings of which the second is the
+                    // text. Decoded rather than read byte by byte: a DWG
+                    // string carries a length and a code page, and from R2007
+                    // it is UTF-16.
+                    if let Some(app_handle) = layer_description_app_handle {
+                        if let Some(bytes) =
+                            document
+                                .eed_by_handle
+                                .get(&Handle::from(*h))
+                                .and_then(|blocks| {
+                                    blocks
+                                        .iter()
+                                        .find(|(handle, _)| *handle == app_handle)
+                                        .map(|(_, bytes)| bytes.as_slice())
+                                })
+                        {
+                            if let Some(values) =
+                                crate::io::dwg::eed_codec::decode_values(bytes, eed_is_wide, |_| {
+                                    None
+                                })
+                            {
+                                let mut strings = values.iter().filter_map(|value| match value {
+                                    crate::xdata::XDataValue::String(text) => Some(text),
+                                    _ => None,
+                                });
+                                strings.next();
+                                if let Some(text) = strings.next() {
+                                    layer.description = text.clone();
+                                }
                             }
                         }
                     }

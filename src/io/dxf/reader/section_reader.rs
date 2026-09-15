@@ -11,6 +11,7 @@ use crate::objects::*;
 use crate::objects::{
     DetailViewStyle as ClassDetailViewStyle, SectionViewStyle as ClassSectionViewStyle,
 };
+use crate::tables::layer::LAYER_DESCRIPTION_APP;
 use crate::tables::linetype::LineTypeElement;
 use crate::tables::*;
 use crate::types::*;
@@ -51,6 +52,20 @@ fn append_hex_bytes(target: &mut Vec<u8>, value: &str) {
         }
         index += 2;
     }
+}
+
+/// The description out of an `AcAecLayerStandard` record's values.
+///
+/// Two strings are written: an empty placeholder and then the text. Readers in
+/// the wild take the second and that is what is honoured here; a record
+/// carrying only one string has only the placeholder and so no description.
+fn layer_description_from(values: &[XDataValue]) -> String {
+    let mut strings = values.iter().filter_map(|value| match value {
+        XDataValue::String(text) => Some(text),
+        _ => None,
+    });
+    strings.next();
+    strings.next().cloned().unwrap_or_default()
 }
 
 fn loft_reference_xdata(data: &ExtendedData) -> Option<(Vec<Handle>, Vec<Handle>, Option<Handle>)> {
@@ -8988,6 +9003,14 @@ impl<'a> SectionReader<'a> {
                     }) {
                         layer.transparency =
                             crate::types::Transparency::from_alpha_value(value as u32);
+                    }
+                    // The description is the *second* string under
+                    // `AcAecLayerStandard`; the first is an empty placeholder.
+                    if let Some(text) = xdata
+                        .get_record(LAYER_DESCRIPTION_APP)
+                        .map(|record| layer_description_from(&record.values))
+                    {
+                        layer.description = text;
                     }
                 }
                 _ => {}

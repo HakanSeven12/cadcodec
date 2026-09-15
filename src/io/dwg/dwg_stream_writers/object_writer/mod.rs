@@ -751,13 +751,49 @@ impl<'a> DwgObjectWriter<'a> {
                 (app.handle.value(), bytes)
             })
         });
+        // A description is stored the same way, under its own application,
+        // as two strings of which the second is the text. Encoded through the
+        // EED codec rather than by hand: a DWG string carries a length and a
+        // code page, and from R2007 it is UTF-16.
+        let description_eed = self
+            .document
+            .app_ids
+            .get(crate::tables::layer::LAYER_DESCRIPTION_APP)
+            .and_then(|app| {
+                (!layer.description.is_empty()).then(|| {
+                    let code_page = crate::io::dxf::code_page::dwg_code_page_index(
+                        &self.document.header.code_page,
+                    );
+                    let encoding = crate::io::dxf::code_page::encoding_from_code_page(
+                        &self.document.header.code_page,
+                    )
+                    .unwrap_or(encoding_rs::WINDOWS_1252);
+                    let values = [
+                        crate::xdata::XDataValue::String(String::new()),
+                        crate::xdata::XDataValue::String(layer.description.clone()),
+                    ];
+                    let bytes = crate::io::dwg::eed_codec::encode_values_with_encoding(
+                        self.version.r2007_plus(),
+                        &values,
+                        encoding,
+                        code_page,
+                        |_| 0,
+                    );
+                    (app.handle.value(), bytes)
+                })
+            });
+
+        let extra_eed: Vec<_> = transparency_eed
+            .into_iter()
+            .chain(description_eed)
+            .collect();
         self.write_common_non_entity_data_eed(
             common::OBJ_LAYER,
             layer.handle,
             self.document.layers.handle(),
             &[],
             &None,
-            transparency_eed,
+            extra_eed,
         );
 
         // Entry name
@@ -863,7 +899,7 @@ impl<'a> DwgObjectWriter<'a> {
             self.document.text_styles.handle(),
             &[],
             &None,
-            anno,
+            anno.into_iter().collect(),
         );
 
         // Entry name
@@ -1424,7 +1460,7 @@ impl<'a> DwgObjectWriter<'a> {
             self.document.dim_styles.handle(),
             &[],
             &None,
-            anno,
+            anno.into_iter().collect(),
         );
 
         // Common: Entry name TV 2

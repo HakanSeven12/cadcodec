@@ -64,6 +64,7 @@ impl DwgWriter {
         let mut prepared = crate::io::loft_parameters::prepared(document);
         prepare_surface_classes(&mut prepared);
         prepare_database_references(&mut prepared);
+        prepare_table_keys(&mut prepared);
         let document = prepared.as_ref();
         let perf = std::env::var_os("PERF").is_some();
         let started = web_time::Instant::now();
@@ -153,6 +154,7 @@ impl DwgWriter {
         let mut prepared = crate::io::loft_parameters::prepared(document);
         prepare_surface_classes(&mut prepared);
         prepare_database_references(&mut prepared);
+        prepare_table_keys(&mut prepared);
         write_ac21_impl(&mut output, prepared.as_ref(), document.version, true)
     }
 
@@ -489,6 +491,25 @@ fn prepare_surface_classes(document: &mut std::borrow::Cow<'_, CadDocument>) {
             .classes
             .add_or_update(crate::classes::DxfClass::new_entity(name, cpp));
     }
+}
+
+/// Re-key symbol-table entries that were renamed in place.
+///
+/// Tables key entries by the name captured at insertion, so a caller that
+/// assigns `layer.name` through `layers.iter_mut()` leaves the entry reachable
+/// only under its old name. The entity writer resolves an entity's layer by
+/// name, so every entity on that layer would be written with a NULL layer hard
+/// pointer — a required reference — and produces an invalid drawing (issue
+/// #80). Repair the output copy only; the caller's document is untouched.
+///
+/// Shared with the DXF writer: the stale key desyncs the same name lookups
+/// there, leaving entities pointing at a layer name the LAYER table no longer
+/// defines.
+pub(crate) fn prepare_table_keys(document: &mut std::borrow::Cow<'_, CadDocument>) {
+    if !document.has_stale_table_keys() {
+        return;
+    }
+    document.to_mut().resync_table_keys();
 }
 
 /// Remove style dictionaries only before the versions introducing their

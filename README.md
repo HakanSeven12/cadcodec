@@ -4,8 +4,6 @@
 [![Documentation](https://docs.rs/acadrust/badge.svg)](https://docs.rs/acadrust)
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL%202.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
 
-[![Buy Me A Coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=hakanak&button_colour=FF5F5F&font_colour=ffffff&font_family=Cookie&outline_colour=000000&coffee_colour=FFDD00)](https://www.buymeacoffee.com/hakanak)
-
 **A pure Rust crate for reading, writing, and inspecting CAD files.**
 
 acadrust handles ASCII and binary DXF plus native binary DWG without requiring
@@ -224,6 +222,15 @@ cargo check --all-targets --all-features
 
 ## Used By
 - [Open CAD Studio](https://github.com/HakanSeven12/OpenCADStudio) An open-source (GPLv3) CAD application that uses acadrust as its core native DWG/DXF engine for read/write operations and 3D modeling.
+
+## Support & Sponsorship
+
+If you find this project useful and want to support ongoing maintenance and new features, consider buying me a coffee or becoming a patron!
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Donate-yellow.svg?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/hakanak)
+[![Patreon](https://img.shields.io/badge/Patreon-Support-orange.svg?style=for-the-badge&logo=patreon)](https://www.patreon.com/hakanaktt)
+
+Every contribution helps keep this project active and well-maintained. Thank you!
 
 ## License
 

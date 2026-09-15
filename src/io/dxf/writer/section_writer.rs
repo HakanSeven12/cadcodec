@@ -1111,6 +1111,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 .write_i32(1071, layer.transparency.to_dxf_value())?;
         }
 
+        // ... and the description as AcAecLayerStandard XDATA, the text being
+        // the second of two strings.
+        if !layer.description.is_empty() {
+            self.writer.write_string(1001, "AcAecLayerStandard")?;
+            self.writer.write_string(1000, "")?;
+            self.writer.write_string(1000, &layer.description)?;
+        }
+
         Ok(())
     }
 
