@@ -2703,7 +2703,6 @@ impl CadDocument {
     /// The entity is stored in both the flat entity map (used by the DXF
     /// writer) and the *Model_Space block record (used by the DWG writer).
     pub fn add_entity(&mut self, mut entity: EntityType) -> Result<Handle> {
-        entity.common_mut().raw_record = None;   // (re)placed in the document: owner/handle may differ from the source bytes
         // Allocate a handle if the entity doesn't have one
         let handle = if entity.common().handle.is_null() {
             let h = self.allocate_handle();
@@ -2853,9 +2852,7 @@ impl CadDocument {
     pub fn get_entity_mut(&mut self, handle: Handle) -> Option<&mut EntityType> {
         let idx = *self.entity_index.get(&handle)?;
         self.record_entity_before(handle, Some(Arc::clone(&self.entities[idx])));
-        let entity = Arc::make_mut(&mut self.entities[idx]);
-        entity.common_mut().raw_record = None;   // may be modified: verbatim bytes no longer trustworthy
-        Some(entity)
+        Some(Arc::make_mut(&mut self.entities[idx]))
     }
 
     /// Replace an existing entity with a shared image, preserving its storage
@@ -3013,7 +3010,6 @@ impl CadDocument {
     /// [`add_paper_space_entity`](Self::add_paper_space_entity), and
     /// [`add_entity_to_layout`](Self::add_entity_to_layout).
     fn add_entity_to_block(&mut self, mut entity: EntityType, block_name: &str) -> Result<Handle> {
-        entity.common_mut().raw_record = None;
         // Allocate a handle if the entity doesn't have one
         let handle = if entity.common().handle.is_null() {
             let h = self.allocate_handle();
@@ -3211,18 +3207,6 @@ impl CadDocument {
     /// it is O(entities) deep only for bulk passes (save prep, handle reassign),
     /// not the single-entity edit path (which uses `get_entity_mut`).
     pub fn entities_mut(&mut self) -> impl Iterator<Item = &mut EntityType> {
-        if let Some(recorder) = self.active_entity_change_recorder() {
-            for entity in &self.entities {
-                recorder.record(entity.common().handle, Some(Arc::clone(entity)));
-            }
-        }
-        self.entities.iter_mut().map(|entity| { let e = Arc::make_mut(entity); e.common_mut().raw_record = None; e })
-    }
-
-    /// Like [`entities_mut`](Self::entities_mut) but keeps `raw_record`: for
-    /// read-time passes that only fill in *derived* fields (names resolved from
-    /// handles, colour-book lookups) and never change what the record encodes.
-    pub(crate) fn entities_mut_keep_raw(&mut self) -> impl Iterator<Item = &mut EntityType> {
         if let Some(recorder) = self.active_entity_change_recorder() {
             for entity in &self.entities {
                 recorder.record(entity.common().handle, Some(Arc::clone(entity)));
@@ -5049,7 +5033,7 @@ impl CadDocument {
             return;
         }
 
-        for entity in self.entities_mut_keep_raw() {   // derived colour names only; record bytes untouched
+        for entity in self.entities_mut() {
             let common = entity.common_mut();
             let resolved = common
                 .color_book_handle
