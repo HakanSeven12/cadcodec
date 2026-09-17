@@ -9414,7 +9414,8 @@ impl<'a> SectionReader<'a> {
 
     /// Read a single DIMSTYLE entry
     fn read_dimstyle_entry(&mut self) -> Result<Option<DimStyle>> {
-        let mut ds = DimStyle::new("Standard");
+        // Omitted groups use the DXF format's built-in defaults.
+        let mut ds = DimStyle::dxf_defaults("Standard");
         let mut seen_table_flags = false;
 
         while let Some(pair) = self.reader.read_pair()? {
