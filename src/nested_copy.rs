@@ -121,6 +121,7 @@ impl CadDocument {
                     let mut line=self.line_types.get(source)?.clone();
                     if line.elements.iter().any(|element|element.complex.is_some()){return None;}
                     line.name=destination.clone();line.handle=Handle::NULL;line.xref_dependent=false;
+                    line.xref_block_record_handle=Handle::NULL;
                     if !output.iter().any(|existing|existing.name.eq_ignore_ascii_case(&destination)){output.push(line);}
                     Some(destination)
                 };

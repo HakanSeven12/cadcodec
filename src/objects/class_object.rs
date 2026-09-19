@@ -179,7 +179,6 @@ impl ClassObjectData {
             | Self::PointCloudDefinitionReactorEx(_)
             | Self::PointCloudColorMap(_)
             | Self::NavisworksModelDefinition(_)
-            | Self::DataTable(_)
             | Self::PersistentSubentityManager(_)
             | Self::GeoMapImage(_)
             | Self::AcMeCommandHistory(_)
@@ -190,6 +189,18 @@ impl ClassObjectData {
             | Self::ViewRepOrientationDefinition
             | Self::ViewRepOrientation(_)
             | Self::ViewRepSectionDefinition(_) => {}
+            Self::DataTable(value) => {
+                for column in &mut value.columns {
+                    if column
+                        .cell_type()
+                        .is_some_and(DataTableCellType::is_object_id)
+                    {
+                        for row in &mut column.rows {
+                            visit(&mut row.handle);
+                        }
+                    }
+                }
+            }
             Self::SpatialIndex(value) => {
                 for handle in &mut value.indexed_objects {
                     visit(handle);
@@ -1046,20 +1057,93 @@ pub struct SunStudy {
     pub text_style: Handle,
 }
 
+/// Native AcDbDataCell types used by DATATABLE columns.
+///
+/// Native codecs currently support Integer, Double, Text, Point, and ObjectId.
+/// Other types read from DWG are preserved as complete opaque records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum DataTableCellType {
+    Integer = 1,
+    Double = 2,
+    Text = 3,
+    Point = 4,
+    ObjectId = 5,
+    HardOwnerId = 6,
+    SoftOwnerId = 7,
+    HardPointerId = 8,
+    SoftPointerId = 9,
+    Bool = 10,
+    Vector = 11,
+}
+
+impl DataTableCellType {
+    pub fn from_code(code: i32) -> Option<Self> {
+        Some(match code {
+            1 => Self::Integer,
+            2 => Self::Double,
+            3 => Self::Text,
+            4 => Self::Point,
+            5 => Self::ObjectId,
+            6 => Self::HardOwnerId,
+            7 => Self::SoftOwnerId,
+            8 => Self::HardPointerId,
+            9 => Self::SoftPointerId,
+            10 => Self::Bool,
+            11 => Self::Vector,
+            _ => return None,
+        })
+    }
+
+    pub fn is_object_id(self) -> bool {
+        matches!(
+            self,
+            Self::ObjectId
+                | Self::HardOwnerId
+                | Self::SoftOwnerId
+                | Self::HardPointerId
+                | Self::SoftPointerId
+        )
+    }
+
+    pub(crate) fn has_native_codec(self) -> bool {
+        matches!(
+            self,
+            Self::Integer | Self::Double | Self::Text | Self::Point | Self::ObjectId
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DataTableValue {
+    /// Column type 1, or type 10 as 0 (false) or 1 (true).
     pub integer: i32,
+    /// Column type 2.
     pub real: f64,
+    /// Column type 3.
     pub text: String,
+    /// Column types 4 (3D point) and 11 (3D vector).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub point: Vector3,
+    /// Column types 5 through 9 (object IDs with different reference semantics).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub handle: Handle,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DataTableColumn {
+    /// Native cell type code; see [`DataTableCellType`].
     pub value_type: i32,
     pub name: String,
     pub rows: Vec<DataTableValue>,
+}
+
+impl DataTableColumn {
+    pub fn cell_type(&self) -> Option<DataTableCellType> {
+        DataTableCellType::from_code(self.value_type)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -1069,6 +1153,37 @@ pub struct DataTable {
     pub name: String,
     pub row_count: i32,
     pub columns: Vec<DataTableColumn>,
+}
+
+impl DataTable {
+    pub(crate) fn validate(&self) -> crate::error::Result<()> {
+        use crate::error::DxfError;
+        if self.row_count < 0 {
+            return Err(DxfError::InvalidFormat(
+                "negative DATATABLE row count".into(),
+            ));
+        }
+        for column in &self.columns {
+            if !column
+                .cell_type()
+                .is_some_and(DataTableCellType::has_native_codec)
+            {
+                return Err(DxfError::NotImplemented(format!(
+                    "DATATABLE cell type {}",
+                    column.value_type
+                )));
+            }
+            if column.rows.len() != self.row_count as usize {
+                return Err(DxfError::InvalidFormat(format!(
+                    "DATATABLE column {:?} has {} rows, expected {}",
+                    column.name,
+                    column.rows.len(),
+                    self.row_count
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

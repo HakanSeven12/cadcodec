@@ -4158,8 +4158,8 @@ pub fn read_ole2frame(reader: &mut DwgMergedReader, version: DwgVersion) -> Ole2
 /// `mtext_type > 1` the stream carries an embedded MTEXT object
 /// (`AcDbMTextObjectEmbedded`) between the type byte and the tag. It must be
 /// consumed in full or the tag / field-length / flags that follow shift.
-/// The only field we keep is the MTEXT `text` — it holds the real multiline
-/// value (`A\PB`) that the plain single-line `text_value` truncates to `A`.
+/// Its text holds the real multiline value (`A\PB`) that the plain single-line
+/// `text_value` truncates to `A`; its style has an independent handle.
 /// The R2018 redundant MTEXT and column tail is part of the embedded object;
 /// the attribute-level annotative payload starts only after this returns.
 pub(crate) fn read_embedded_mtext(
@@ -4167,26 +4167,43 @@ pub(crate) fn read_embedded_mtext(
     _version: DwgVersion,
     _dxf_version: DxfVersion,
 ) -> MTextData {
-    // Reduced common-entity preamble.
+    // R2018 common entity data starts at Entmode (ODA section 20.4.4).
+    // Consume every conditional handle so the MTEXT style stays aligned.
     let entmode = reader.main_mut().read_2bits();
     if entmode == 0 {
         let _owner = reader.read_handle();
     }
-    let _num_reactors = reader.read_bit_long();
-    let _is_xdic_missing = reader.read_bit();
+    let num_reactors = safe_count(reader.read_bit_long());
+    for _ in 0..num_reactors {
+        let _reactor = reader.read_handle();
+    }
+    if !reader.read_bit() {
+        let _xdictionary = reader.read_handle();
+    }
     let _has_ds_data = reader.read_bit();
-    let _color_raw = reader.read_bit_short();
+    let (_, _, has_color_handle) = reader.read_en_color();
+    if has_color_handle {
+        let _color = reader.read_handle();
+    }
     let _ltype_scale = reader.read_bit_double();
-    let _ltype_flags = reader.main_mut().read_2bits();
-    let _plotstyle_flags = reader.main_mut().read_2bits();
-    let _material_flags = reader.main_mut().read_2bits();
+    let _layer = reader.read_handle();
+    if reader.main_mut().read_2bits() == 3 {
+        let _linetype = reader.read_handle();
+    }
+    if reader.main_mut().read_2bits() == 3 {
+        let _material = reader.read_handle();
+    }
     let _shadow_flags = reader.read_byte();
-    let _has_full_visualstyle = reader.read_bit();
-    let _has_face_visualstyle = reader.read_bit();
-    let _has_edge_visualstyle = reader.read_bit();
+    if reader.main_mut().read_2bits() == 3 {
+        let _plotstyle = reader.read_handle();
+    }
+    for _ in 0..3 {
+        if reader.read_bit() {
+            let _visualstyle = reader.read_handle();
+        }
+    }
     let _invisible = reader.read_bit_short();
     let _linewt = reader.read_byte();
-    let _layer = reader.read_handle();
 
     // MTEXT geometry.
     let insertion_point = reader.read_3bit_double();
@@ -4287,6 +4304,8 @@ pub fn read_attribute_definition(
     dxf_version: DxfVersion,
 ) -> AttributeCommonData {
     let mut text_data = read_text_entity_data(reader, version);
+    // Common TEXT includes its style before any embedded MTEXT handles.
+    text_data.style_handle = reader.read_handle();
 
     let att_version = if version.r2010_plus() {
         reader.read_byte()
@@ -4332,9 +4351,6 @@ pub fn read_attribute_definition(
         let _version2 = reader.read_byte();
     }
     let prompt = reader.read_variable_text();
-    // The outer TEXT style is the final ATTDEF handle.  Multiline attributes
-    // place both embedded-MTEXT handles before it in the handle stream.
-    text_data.style_handle = reader.read_handle();
 
     AttributeCommonData {
         text_data,
@@ -4355,6 +4371,8 @@ pub fn read_attribute_entity(
     dxf_version: DxfVersion,
 ) -> AttributeCommonData {
     let mut text_data = read_text_entity_data(reader, version);
+    // ODA section 20.4.4 starts with Common TEXT Entity Data, including STYLE.
+    text_data.style_handle = reader.read_handle();
 
     let att_version = if version.r2010_plus() {
         reader.read_byte()
@@ -4394,8 +4412,6 @@ pub fn read_attribute_entity(
     } else {
         false
     };
-    // The outer TEXT style follows the embedded-MTEXT handles.
-    text_data.style_handle = reader.read_handle();
 
     // An ATTRIB instance carries no prompt in the stream — that lives on the
     // ATTDEF. Keep it empty so the shared struct stays consistent.
@@ -5820,6 +5836,121 @@ mod tests {
         let data = writer.merge();
         let hsb = writer.handle_start_bits();
         DwgMergedReader::new(data, dxf, hsb)
+    }
+
+    #[test]
+    fn multiline_attribute_handles_follow_common_text_and_embedded_entity_order() {
+        use crate::io::dwg::dwg_reference_type::DwgReferenceType::HardPointer;
+        use crate::types::Transparency;
+        for definition in [false, true] {
+            for optional_handles in [false, true] {
+                let v = DwgVersion::AC24;
+                let d = DxfVersion::AC1032;
+                // Encode the documented stream independently of ObjectWriter.
+                // Distinct style handles ensure a shifted stream cannot pass.
+                let mut r = make_reader(v, d, |w| {
+                    w.save_position_for_size();
+                    w.write_byte(0xff); // TEXT defaults except insertion/height
+                    w.write_raw_double(2.0);
+                    w.write_raw_double(3.0);
+                    w.write_bit_extrusion(Vector3::UNIT_Z);
+                    w.write_bit_thickness(0.0);
+                    w.write_raw_double(4.0);
+                    w.write_variable_text("first line");
+                    w.write_handle(HardPointer, 0x6ae0); // outer TEXT style
+                    w.write_byte(0); // attribute version
+                    w.write_byte(if definition { 4 } else { 2 });
+                    w.write_2bits(0); // embedded MTEXT entmode
+                    w.write_handle(HardPointer, 0); // owner
+                    w.write_bit_long(if optional_handles { 2 } else { 0 });
+                    if optional_handles {
+                        w.write_handle(HardPointer, 0x101);
+                        w.write_handle(HardPointer, 0x102);
+                    }
+                    w.write_bit(!optional_handles); // xdict missing
+                    if optional_handles {
+                        w.write_handle(HardPointer, 0x103);
+                    }
+                    w.write_bit(false); // DS data
+                    w.write_en_color_with_book(
+                        &Color::from_rgb(20, 40, 60),
+                        &Transparency::Explicit(80),
+                        optional_handles,
+                    );
+                    if optional_handles {
+                        w.write_handle(HardPointer, 0x104);
+                    }
+                    w.write_bit_double(1.0);
+                    w.write_handle(HardPointer, 0xe); // layer
+                    w.write_2bits(if optional_handles { 3 } else { 0 });
+                    if optional_handles {
+                        w.write_handle(HardPointer, 0x105);
+                    }
+                    w.write_2bits(if optional_handles { 3 } else { 0 });
+                    if optional_handles {
+                        w.write_handle(HardPointer, 0x106);
+                    }
+                    w.write_byte(0); // shadow
+                    w.write_2bits(if optional_handles { 3 } else { 0 });
+                    if optional_handles {
+                        w.write_handle(HardPointer, 0x107);
+                    }
+                    for h in 0x108..=0x10a {
+                        w.write_bit(optional_handles);
+                        if optional_handles {
+                            w.write_handle(HardPointer, h);
+                        }
+                    }
+                    w.write_bit_short(0); // invisible
+                    w.write_byte(0); // line weight
+                    w.write_3bit_double(Vector3::new(2.0, 3.0, 0.0));
+                    w.write_3bit_double(Vector3::UNIT_Z);
+                    w.write_3bit_double(Vector3::UNIT_X);
+                    for n in [20.0, 10.0, 4.0] {
+                        w.write_bit_double(n);
+                    }
+                    w.write_bit_short(1); // attachment
+                    w.write_bit_short(1); // direction
+                    w.write_bit_double(18.0);
+                    w.write_bit_double(8.0);
+                    w.write_variable_text("first line\\Psecond line");
+                    w.write_handle(HardPointer, 0x6ae1); // embedded style
+                    w.write_bit_short(1); // spacing style
+                    w.write_bit_double(1.0);
+                    w.write_bit(false);
+                    w.write_bit_long(0); // background
+                    w.write_bit(false); // no non-annotative MTEXT tail
+                    w.write_bit_short(2); // attribute annotative payload
+                    w.write_byte(0x12);
+                    w.write_byte(0x34);
+                    w.write_handle(HardPointer, 0x20ff); // annotative APPID
+                    w.write_bit_short(0);
+                    w.write_variable_text("TITLE");
+                    w.write_bit_short(0);
+                    w.write_byte(0);
+                    w.write_bit(true); // lock position
+                    if definition {
+                        w.write_byte(0);
+                        w.write_variable_text("Enter title");
+                    }
+                    w.write_handle(HardPointer, 0xbeef); // next handle sentinel
+                });
+                let size = r.read_raw_long();
+                r.setup_text_and_handle(size);
+                let a = if definition {
+                    read_attribute_definition(&mut r, v, d)
+                } else {
+                    read_attribute_entity(&mut r, v, d)
+                };
+                assert_eq!(a.text_data.style_handle, 0x6ae0);
+                assert_eq!(a.embedded_mtext.unwrap().style_handle, 0x6ae1);
+                assert_eq!(a.text_data.value, "first line\\Psecond line");
+                assert_eq!(a.tag, "TITLE");
+                assert!(a.lock_position);
+                assert_eq!(a.prompt, if definition { "Enter title" } else { "" });
+                assert_eq!(r.read_handle(), 0xbeef);
+            }
+        }
     }
 
     #[test]

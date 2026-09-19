@@ -32,6 +32,7 @@ use crate::entities::{EntityCommon, EntityType};
 use crate::io::dwg::dwg_reference_type::DwgReferenceType;
 use crate::io::dwg::dwg_stream_writers::DwgMergedWriter;
 use crate::io::dwg::dwg_version::DwgVersion;
+use crate::objects::{ClassObject, ClassObjectData, ObjectType};
 use crate::tables::{BlockRecord, TableEntry};
 use crate::types::{BoundingBox3D, DxfVersion, Handle};
 
@@ -120,6 +121,9 @@ pub struct DwgObjectWriter<'a> {
     /// from more than one path): a duplicate handle is a hard DWG integrity
     /// error that strict audits reject, so register_* skips repeats.
     pub(super) registered_handles: HashSet<u64>,
+    /// Records selected for serialization by the raw-all exclusion filter.
+    /// Shared with parallel entity writers so their passthrough decisions agree.
+    pub(super) raw_excluded_handles: std::sync::Arc<HashSet<u64>>,
     /// Owner handle overrides for extension dictionaries whose parent entity
     /// was re-allocated (e.g. ATTRIB children of INSERT).
     pub(super) owner_overrides: std::collections::HashMap<Handle, Handle>,
@@ -164,7 +168,14 @@ impl<'a> DwgObjectWriter<'a> {
                 max_h = h;
             }
         }
-        for (handle, _) in &document.objects {
+        for (handle, object) in &document.objects {
+            if let ObjectType::ClassObject(ClassObject {
+                data: ClassObjectData::DataTable(table),
+                ..
+            }) = object
+            {
+                table.validate()?;
+            }
             let h = handle.value() + 1;
             if h > max_h {
                 max_h = h;
@@ -248,6 +259,7 @@ impl<'a> DwgObjectWriter<'a> {
             handle_map: Vec::with_capacity(1024),
             object_queue: VecDeque::new(),
             registered_handles: HashSet::new(),
+            raw_excluded_handles: std::sync::Arc::new(HashSet::new()),
             prev_handle: None,
             next_handle: None,
             next_alloc_handle: max_h,
@@ -352,10 +364,14 @@ impl<'a> DwgObjectWriter<'a> {
         // Compute model space extents for VPort view adjustment
         self.model_space_extents = self.compute_model_space_extents();
 
+
         // R2004+: 0x0DCA marker at the start
         if self.version.r2004_plus() {
             self.output.extend_from_slice(&0x0DCAi32.to_le_bytes());
         }
+
+        // Debug bisection aid (ACADRUST_RAW_ALL): re-emit source records verbatim.
+        self.preregister_raw_records();
 
         // Enqueue root dictionary for later.
         // If the header handle is NULL (e.g., after a DWG read where the
@@ -905,8 +921,8 @@ impl<'a> DwgObjectWriter<'a> {
         // Entry name
         self.writer.write_variable_text(&style.name);
 
-        // Xref-dependant
-        self.write_xref_dependant_bit();
+        // Xref-dependent flag
+        self.write_xref_dependant_bit_value(style.xref_dependent);
 
         // Shape file flag
         self.writer.write_bit(style.is_shape_file);
@@ -919,8 +935,9 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_double(style.width_factor);
         // Oblique angle
         self.writer.write_bit_double(style.oblique_angle);
-        // Generation (mirror flags)
-        self.writer.write_byte(0);
+        // Generation (mirror flags: 2 = backward, 4 = upside down)
+        let generation = (if style.flags.backward { 2u8 } else { 0 }) | (if style.flags.upside_down { 4u8 } else { 0 });
+        self.writer.write_byte(generation);
         // Last height (must be > 0; use effective_last_height)
         self.writer.write_bit_double(style.effective_last_height());
         // Font name
@@ -929,8 +946,10 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_variable_text(&style.big_font_file);
 
         // External reference block handle (hard pointer)
-        // Null for non-xref-dependent styles
-        self.writer.write_handle(DwgReferenceType::HardPointer, 0);
+        self.writer.write_handle(
+            DwgReferenceType::HardPointer,
+            style.xref_block_record_handle.value(),
+        );
 
         self.register_object(style.handle);
     }
@@ -958,8 +977,9 @@ impl<'a> DwgObjectWriter<'a> {
 
         // Entry name
         self.writer.write_variable_text(&ltype.name);
-        // Xref
-        self.write_xref_dependant_bit();
+        // Xref-dependent flag (linetypes that came in through an xref keep it,
+        // otherwise AUDIT renames every "xref|name" record).
+        self.write_xref_dependant_bit_value(ltype.xref_dependent);
         // Description
         self.writer.write_variable_text(&ltype.description);
         // Pattern length
@@ -1054,7 +1074,10 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // External reference block handle
-        self.writer.write_handle(DwgReferenceType::HardPointer, 0);
+        self.writer.write_handle(
+            DwgReferenceType::HardPointer,
+            ltype.xref_block_record_handle.value(),
+        );
 
         // Shape file handles for each segment
         for seg in &ltype.elements {
@@ -1987,6 +2010,7 @@ impl<'a> DwgObjectWriter<'a> {
             pending_type_code: None,
             class_counts_complete: true,
             registered_handles: HashSet::with_capacity(handles.len()),
+            raw_excluded_handles: self.raw_excluded_handles.clone(),
             xdic_owner_index: self.xdic_owner_index.clone(),
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
@@ -2061,9 +2085,9 @@ impl<'a> DwgObjectWriter<'a> {
         // Is xref overlay
         self.writer.write_bit(record.flags.is_xref_overlay);
 
-        // R2000+: loaded bit
+        // R2000+: "loaded" bit, 1 = xref currently unloaded (0 = loaded)
         if self.version.r2000_plus() {
-            self.writer.write_bit(false); // is loaded
+            self.writer.write_bit(record.flags.is_xref_unloaded);
         }
 
         // R2004+: owned object count (non-xref)
@@ -2310,6 +2334,109 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     // ── Object queue draining ───────────────────────────────────────
+
+    /// Debug bisection aid. When `ACADRUST_RAW_ALL` is set, every record the
+    /// reader captured from the source file (see `CadDocument::raw_records`)
+    /// is registered verbatim up front, so the normal serialisers are only
+    /// used for record types listed in `ACADRUST_RAW_EXCLUDE` (comma-separated
+    /// numeric DWG type codes or class DXF names, case-insensitive). The
+    /// duplicate-handle guards in `register_object` / `register_raw_object`
+    /// and the early return in `write_entity` keep the normal path from
+    /// emitting a second copy. Compound parents and children are excluded
+    /// together because their serializers also write their child records.
+    /// Only meaningful for an unmodified document written back to its own version.
+    fn preregister_raw_records(&mut self) {
+        if std::env::var_os("ACADRUST_RAW_ALL").is_none() || self.document.raw_records.is_empty() {
+            return;
+        }
+        let exclude: Vec<String> = std::env::var("ACADRUST_RAW_EXCLUDE")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_ascii_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut handles: Vec<u64> = self.document.raw_records.keys().copied().collect();
+        handles.sort_unstable();
+        let mut excluded_handles = HashSet::new();
+        for &h in &handles {
+            let (type_code, raw) = &self.document.raw_records[&h];
+            if raw.version != self.dxf_version {
+                continue;
+            }
+            let class_name = if *type_code >= 500 {
+                self.document
+                    .classes
+                    .iter()
+                    .find(|c| c.class_number == *type_code)
+                    .map(|c| c.dxf_name.to_ascii_uppercase())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let code_str = type_code.to_string();
+            // Category tokens: TABLES (symbol tables + controls + block headers),
+            // ENTITIES, OBJECTS (everything else).
+            let is_table =
+                crate::io::dwg::dwg_stream_readers::object_reader::common::is_table_type(*type_code);
+            let is_entity = if *type_code >= 500 {
+                self.document
+                    .classes
+                    .iter()
+                    .find(|c| c.class_number == *type_code)
+                    .map(|c| c.is_an_entity)
+                    .unwrap_or(false)
+            } else {
+                crate::io::dwg::dwg_stream_readers::object_reader::common::is_entity_type(*type_code)
+            };
+            let category = if is_table {
+                "TABLES"
+            } else if is_entity {
+                "ENTITIES"
+            } else {
+                "OBJECTS"
+            };
+            if exclude.iter().any(|e| {
+                *e == code_str || *e == category || (!class_name.is_empty() && *e == class_name)
+            }) {
+                excluded_handles.insert(h);
+            }
+        }
+
+        // Child records are folded into their parent on read. Selecting any
+        // member must run the parent writer and replace the whole child set.
+        for (&child, &owner) in &self.document.raw_record_owners {
+            if excluded_handles.contains(&child) {
+                excluded_handles.insert(owner);
+            }
+        }
+        for (&child, &owner) in &self.document.raw_record_owners {
+            if excluded_handles.contains(&owner) {
+                excluded_handles.insert(child);
+            }
+        }
+        self.raw_excluded_handles = std::sync::Arc::new(excluded_handles);
+
+        let (mut registered, mut excluded, mut skipped) = (0usize, 0usize, 0usize);
+        for h in handles {
+            let (_, raw) = &self.document.raw_records[&h];
+            if raw.version != self.dxf_version {
+                skipped += 1;
+                continue;
+            }
+            if self.raw_excluded_handles.contains(&h) {
+                excluded += 1;
+                continue;
+            }
+            self.register_raw_object(Handle::from(h), &raw.data, raw.handle_bits);
+            if let Some(entity) = self.document.get_entity(Handle::from(h)) {
+                self.queue_raw_entity_sab(entity);
+            }
+            registered += 1;
+        }
+        eprintln!(
+            "[acadrust raw-all] registered={registered} excluded={excluded} version-skipped={skipped} exclude={exclude:?}"
+        );
+    }
 
     /// Drain the object queue, writing each non-graphical object.
     fn write_objects(&mut self) {

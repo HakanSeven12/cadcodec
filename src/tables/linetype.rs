@@ -72,6 +72,8 @@ pub struct LineType {
     pub alignment: char,
     /// Whether this linetype is externally dependent on an xref
     pub xref_dependent: bool,
+    /// Block record of the xref this linetype came from (NULL when local).
+    pub xref_block_record_handle: Handle,
 }
 
 impl LineType {
@@ -85,6 +87,7 @@ impl LineType {
             pattern_length: 0.0,
             alignment: 'A',
             xref_dependent: false,
+            xref_block_record_handle: Handle::NULL,
         }
     }
 
@@ -98,6 +101,7 @@ impl LineType {
             pattern_length: 0.0,
             alignment: 'A',
             xref_dependent: false,
+            xref_block_record_handle: Handle::NULL,
         }
     }
 
@@ -111,6 +115,7 @@ impl LineType {
             pattern_length: 0.0,
             alignment: 'A',
             xref_dependent: false,
+            xref_block_record_handle: Handle::NULL,
         }
     }
 
@@ -124,6 +129,7 @@ impl LineType {
             pattern_length: 0.0,
             alignment: 'A',
             xref_dependent: false,
+            xref_block_record_handle: Handle::NULL,
         }
     }
 

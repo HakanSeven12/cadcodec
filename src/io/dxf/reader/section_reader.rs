@@ -40,6 +40,13 @@ fn parse_dxf_handle(value: &str) -> Handle {
         .unwrap_or(Handle::NULL)
 }
 
+/// Split a proxy binary into (data, string stream). A non-empty R2007+ string
+/// stream (96/162) is stored after the main data; empty in every drawing seen.
+fn split_proxy_text_data(binary: &[u8], text_data_bits: u32) -> (&[u8], &[u8]) {
+    let text_len = (text_data_bits as usize).div_ceil(8).min(binary.len());
+    binary.split_at(binary.len() - text_len)
+}
+
 fn append_hex_bytes(target: &mut Vec<u8>, value: &str) {
     let bytes = value.trim().as_bytes();
     let mut index = 0;
@@ -692,10 +699,20 @@ impl ClassDxfFields {
 fn class_dxf_render_settings(
     fields: &mut ClassDxfFields,
     has_predefined_in_base: bool,
+    rapid_rt: bool,
+    version: DxfVersion,
 ) -> RenderSettings {
     let section = "AcDbRenderSettings";
+    // Same class-version normalisation as the DWG reader.
+    let stored_version = fields.i32(section, 90);
     RenderSettings {
-        class_version: fields.i32(section, 90),
+        class_version: if rapid_rt && version == DxfVersion::AC1027 {
+            stored_version + 1
+        } else if !rapid_rt && version >= DxfVersion::AC1027 {
+            stored_version - 1
+        } else {
+            stored_version
+        },
         name: fields.string(section, 1),
         fog_enabled: fields.bool(section, 290),
         fog_background_enabled: fields.bool(section, 290),
@@ -994,6 +1011,12 @@ impl DynamicDxfFields {
             .unwrap_or(Handle::NULL)
     }
 
+    /// Vector stored as 140/141/142 (AutoCAD) or 140/150/160 (older acadrust output).
+    fn vector_140(&self, section: &str) -> Vector3 {
+        let pick = |a: i32, b: i32| if self.values(section, a).is_empty() { self.f64(section, b) } else { self.f64(section, a) };
+        Vector3::new(self.f64(section, 140), pick(141, 150), pick(142, 160))
+    }
+
     fn point(&self, section: &str, x_code: i32) -> Vector3 {
         Vector3::new(
             self.f64(section, x_code),
@@ -1009,8 +1032,11 @@ fn dynamic_dxf_eval(fields: &DynamicDxfFields) -> BlockEvalExpression {
     let value_code = short_values
         .first()
         .and_then(|value| value.trim().parse().ok())
-        .unwrap_or(0);
+        // No 70 group means "no value" (-9999).
+        .unwrap_or(-9999);
     let value = match value_code {
+        // AutoCAD writes a real value as 140; older acadrust output used 40.
+        40 if !fields.values(section, 140).is_empty() => BlockEvalValue::Real(fields.f64(section, 140)),
         40 => BlockEvalValue::Real(fields.f64(section, 40)),
         10 | 11 => BlockEvalValue::Point([
             fields.f64(section, value_code as i32),
@@ -4100,11 +4126,11 @@ impl<'a> SectionReader<'a> {
             "BLOCKFLIPGRIP" => DynamicBlockData::FlipGrip(BlockFlipGrip {
                 grip: dynamic_dxf_grip(&fields),
                 combined_state: fields.i32("AcDbBlockFlipGrip", 93),
-                orientation: fields.point("AcDbBlockFlipGrip", 140),
+                orientation: fields.vector_140("AcDbBlockFlipGrip"),
             }),
             "BLOCKLINEARGRIP" => DynamicBlockData::LinearGrip(BlockOrientedGrip {
                 grip: dynamic_dxf_grip(&fields),
-                orientation: fields.point("AcDbBlockLinearGrip", 140),
+                orientation: fields.vector_140("AcDbBlockLinearGrip"),
             }),
             "BLOCKLOOKUPGRIP" => DynamicBlockData::LookupGrip(dynamic_dxf_grip(&fields)),
             "BLOCKPOLARGRIP" => DynamicBlockData::PolarGrip(dynamic_dxf_grip(&fields)),
@@ -4758,10 +4784,22 @@ impl<'a> SectionReader<'a> {
                 }
             }
             "ACDB_MTEXTOBJECTCONTEXTDATA_CLASS" => {
-                let section = "AcDbMTextObjectContextData";
+                // AutoCAD: no subclass marker, fields follow the annotation
+                // scale groups, 10 = x-axis direction, 11 = insertion point.
+                // Older acadrust output: an AcDbMTextObjectContextData marker
+                // with the two points the other way round.
+                let legacy = fields.has("AcDbMTextObjectContextData", 70);
+                let section = if legacy {
+                    "AcDbMTextObjectContextData"
+                } else {
+                    "AcDbAnnotScaleObjectContextData"
+                };
                 let attachment = fields.i32(section, 70);
-                let insertion = fields.point3(section, 10);
-                let x_axis_dir = fields.point3(section, 11);
+                let (insertion, x_axis_dir) = if legacy {
+                    (fields.point3(section, 10), fields.point3(section, 11))
+                } else {
+                    (fields.point3(section, 11), fields.point3(section, 10))
+                };
                 let rect_width = fields.f64(section, 40);
                 let rect_height = fields.f64(section, 41);
                 let extents_width = fields.f64(section, 42);
@@ -5004,7 +5042,7 @@ impl<'a> SectionReader<'a> {
         })
     }
 
-    fn read_class_object_dxf(&mut self, dxf_name: &str) -> Result<ClassObject> {
+    fn read_class_object_dxf(&mut self, dxf_name: &str, version: DxfVersion) -> Result<ClassObject> {
         let mut object = ClassObject::default();
         let mut fields = ClassDxfFields::default();
         let mut section = String::new();
@@ -5203,10 +5241,15 @@ impl<'a> SectionReader<'a> {
                 })
             }
             "RENDERSETTINGS" => {
-                ClassObjectData::RenderSettings(class_dxf_render_settings(&mut fields, true))
+                ClassObjectData::RenderSettings(class_dxf_render_settings(
+                    &mut fields,
+                    version >= DxfVersion::AC1027,
+                    false,
+                    version,
+                ))
             }
             "MENTALRAYRENDERSETTINGS" => {
-                let base = class_dxf_render_settings(&mut fields, true);
+                let base = class_dxf_render_settings(&mut fields, false, false, version);
                 let section = "AcDbMentalRayRenderSettings";
                 ClassObjectData::MentalRayRenderSettings(MentalRayRenderSettings {
                     base,
@@ -5268,7 +5311,7 @@ impl<'a> SectionReader<'a> {
             }
             "RAPIDRTRENDERSETTINGS" => {
                 let section = "AcDbRapidRTRenderSettings";
-                let mut base = class_dxf_render_settings(&mut fields, false);
+                let mut base = class_dxf_render_settings(&mut fields, false, true, version);
                 let version = fields.i32(section, 90);
                 let render_target = fields.i32(section, 70);
                 let render_level = fields.i32(section, 90);
@@ -5587,14 +5630,26 @@ impl<'a> SectionReader<'a> {
                 let mut columns = Vec::new();
                 for _ in 0..column_count {
                     let value_type = fields.i32(section, 92);
+                    let cell_type = DataTableCellType::from_code(value_type)
+                        .filter(|kind| kind.has_native_codec())
+                        .ok_or_else(|| {
+                            crate::error::DxfError::NotImplemented(format!(
+                                "DATATABLE cell type {value_type}"
+                            ))
+                        })?;
                     let name = fields.string(section, 2);
                     let mut rows = Vec::new();
                     for _ in 0..row_count.max(0).min(100_000) {
-                        rows.push(DataTableValue {
-                            integer: fields.i32(section, 93),
-                            real: fields.f64(section, 40),
-                            text: fields.string(section, 3),
-                        });
+                        let mut value = DataTableValue::default();
+                        match cell_type {
+                            DataTableCellType::Integer => value.integer = fields.i32(section, 93),
+                            DataTableCellType::Double => value.real = fields.f64(section, 40),
+                            DataTableCellType::Text => value.text = fields.string(section, 3),
+                            DataTableCellType::Point => value.point = fields.point3(section, 10),
+                            DataTableCellType::ObjectId => value.handle = fields.handle(section, 331),
+                            _ => unreachable!("cell type checked above"),
+                        }
+                        rows.push(value);
                     }
                     columns.push(DataTableColumn {
                         value_type,
@@ -6445,7 +6500,7 @@ impl<'a> SectionReader<'a> {
                             .insert(object.handle, ObjectType::Associative(object));
                     }
                     name if is_class_object_name(name) => {
-                        let object = self.read_class_object_dxf(name)?;
+                        let object = self.read_class_object_dxf(name, document.version)?;
                         if let ClassObjectData::SectionViewStyle(style) = &object.data {
                             document.section_view_style = Some(crate::entities::SectionViewStyle {
                                 show_arrows: style.flags & 0x02 != 0,
@@ -11104,6 +11159,7 @@ impl<'a> SectionReader<'a> {
         let mut owner_seen = false;
         let mut binary = Vec::new();
         let mut object_data_bits = 0u32;
+        let mut text_data_bits = 0u32;
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
                 self.reader.push_back(pair);
@@ -11126,10 +11182,12 @@ impl<'a> SectionReader<'a> {
                 }
                 code @ (330 | 340 | 350 | 360) if group.is_empty() => {
                     let kind = match code {
-                        330 => crate::objects::ProxyReferenceKind::SoftOwnership,
-                        340 => crate::objects::ProxyReferenceKind::HardOwnership,
-                        350 => crate::objects::ProxyReferenceKind::SoftPointer,
-                        360 => crate::objects::ProxyReferenceKind::HardPointer,
+                        // DXF reference groups: 330 soft pointer, 340 hard pointer,
+                        // 350 soft owner, 360 hard owner.
+                        330 => crate::objects::ProxyReferenceKind::SoftPointer,
+                        340 => crate::objects::ProxyReferenceKind::HardPointer,
+                        350 => crate::objects::ProxyReferenceKind::SoftOwnership,
+                        360 => crate::objects::ProxyReferenceKind::HardOwnership,
                         _ => unreachable!(),
                     };
                     object
@@ -11145,8 +11203,13 @@ impl<'a> SectionReader<'a> {
                 71 => object.dwg_version = pair.as_i32().unwrap_or(0),
                 97 => object.maintenance_version = pair.as_i32().unwrap_or(0),
                 70 => object.from_dxf = pair.as_i16().unwrap_or(0) != 0,
-                93 => {
-                    object_data_bits = pair.as_i32().unwrap_or(0).max(0) as u32;
+                // Data size in bits: 93 up to R2007, 161 (64-bit) from R2010.
+                93 | 161 => {
+                    object_data_bits = pair.as_int().unwrap_or(0).max(0) as u32;
+                }
+                // R2007+ string-stream size in bits: 96 in R2007, 162 from R2010.
+                96 | 162 => {
+                    text_data_bits = pair.as_int().unwrap_or(0).max(0) as u32;
                 }
                 310 => append_hex_bytes(&mut binary, &pair.value_string),
                 _ => {}
@@ -11155,7 +11218,9 @@ impl<'a> SectionReader<'a> {
                 group.clear();
             }
         }
-        object.payload = crate::objects::ProxyPayload::from_bits(&binary, object_data_bits);
+        let (data, text) = split_proxy_text_data(&binary, text_data_bits);
+        object.payload = crate::objects::ProxyPayload::from_bits(data, object_data_bits);
+        object.text_payload = crate::objects::ProxyPayload::from_bits(text, text_data_bits);
         if object.dwg_version == 0 && object.maintenance_version == 0 {
             object.dwg_version = object.version & 0xffff;
             object.maintenance_version = object.version >> 16;
@@ -14007,6 +14072,7 @@ impl<'a> SectionReader<'a> {
         let mut from_dxf = false;
         let mut proxy_data_size = 0usize;
         let mut object_data_bits = 0u32;
+        let mut text_data_bits = 0u32;
         let mut proxy_data = Vec::new();
         let mut object_data = Vec::new();
         let mut object_ids = Vec::new();
@@ -14033,12 +14099,19 @@ impl<'a> SectionReader<'a> {
                 71 => dwg_version = pair.as_i32().unwrap_or(0),
                 97 => maintenance_version = pair.as_i32().unwrap_or(0),
                 70 => from_dxf = pair.as_i16().unwrap_or(0) != 0,
-                92 => {
-                    proxy_data_size = pair.as_i32().unwrap_or(0).max(0) as usize;
+                // Graphics size in bytes: 92 up to R2007, 160 (64-bit) from R2010.
+                92 | 160 => {
+                    proxy_data_size = pair.as_int().unwrap_or(0).max(0) as usize;
                     reading_object_data = false;
                 }
-                93 => {
-                    object_data_bits = pair.as_i32().unwrap_or(0).max(0) as u32;
+                // R2007+ string-stream size in bits: 96 in R2007, 162 from R2010.
+                96 | 162 => {
+                    text_data_bits = pair.as_int().unwrap_or(0).max(0) as u32;
+                    reading_object_data = true;
+                }
+                // Data size in bits: 93 up to R2007, 161 (64-bit) from R2010.
+                93 | 161 => {
+                    object_data_bits = pair.as_int().unwrap_or(0).max(0) as u32;
                     reading_object_data = true;
                 }
                 310..=319 => {
@@ -14052,10 +14125,12 @@ impl<'a> SectionReader<'a> {
                 }
                 code @ (330 | 340 | 350 | 360) if reading_object_data => {
                     let kind = match code {
-                        330 => crate::objects::ProxyReferenceKind::SoftOwnership,
-                        340 => crate::objects::ProxyReferenceKind::HardOwnership,
-                        350 => crate::objects::ProxyReferenceKind::SoftPointer,
-                        360 => crate::objects::ProxyReferenceKind::HardPointer,
+                        // DXF reference groups: 330 soft pointer, 340 hard pointer,
+                        // 350 soft owner, 360 hard owner.
+                        330 => crate::objects::ProxyReferenceKind::SoftPointer,
+                        340 => crate::objects::ProxyReferenceKind::HardPointer,
+                        350 => crate::objects::ProxyReferenceKind::SoftOwnership,
+                        360 => crate::objects::ProxyReferenceKind::HardOwnership,
                         _ => unreachable!(),
                     };
                     object_ids.push(crate::objects::ProxyObjectReference {
@@ -14078,7 +14153,9 @@ impl<'a> SectionReader<'a> {
         } else {
             version = (maintenance_version << 16) | (dwg_version & 0xffff);
         }
-        let payload = crate::objects::ProxyPayload::from_bits(&object_data, object_data_bits);
+        let (data, text) = split_proxy_text_data(&object_data, text_data_bits);
+        let payload = crate::objects::ProxyPayload::from_bits(data, object_data_bits);
+        let text_payload = crate::objects::ProxyPayload::from_bits(text, text_data_bits);
         if let Some(envelope) =
             crate::objects::semantic_property::decode_registered_class_envelope(&payload)
         {
@@ -14108,7 +14185,7 @@ impl<'a> SectionReader<'a> {
                 from_dxf,
                 graphics: crate::objects::ProxyPayload::from_bytes(&proxy_data),
                 payload,
-                text_payload: crate::objects::ProxyPayload::default(),
+                text_payload,
                 object_ids,
             }),
         }))

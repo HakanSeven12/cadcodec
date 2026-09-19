@@ -17,6 +17,8 @@ pub struct BlockFlags {
     pub is_xref_overlay: bool,
     /// Block is from external reference
     pub is_external: bool,
+    /// Xref is currently unloaded (R2000+ "loaded" bit set).
+    pub is_xref_unloaded: bool,
 }
 
 impl BlockFlags {
@@ -28,6 +30,7 @@ impl BlockFlags {
             is_xref: false,
             is_xref_overlay: false,
             is_external: false,
+            is_xref_unloaded: false,
         }
     }
 }

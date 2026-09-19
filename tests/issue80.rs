@@ -5,12 +5,20 @@
 //! by the normalized name captured at insertion, so assigning `layer.name`
 //! directly leaves the entry reachable only under its *old* name. Every
 //! name-based lookup then misses, and the writer emitted a NULL layer hard
-//! pointer for each entity on that layer — a required reference.
+//! pointer for each entity on that layer — a required reference — which
+//! AutoCAD reports as a damaged drawing.
+//!
+//! The follow-up layout investigation found an incorrectly typed plot-view
+//! reference. Binary tests below cover that separately from layer renaming.
 
 use std::io::Cursor;
 
 use acadrust::entities::{EntityType, Line};
-use acadrust::tables::Layer;
+use acadrust::io::dwg::dwg_stream_readers::object_reader::DwgObjectReader;
+use acadrust::io::dwg::dwg_stream_writers::object_writer::DwgObjectWriter;
+use acadrust::io::dwg::DwgReferenceType;
+use acadrust::objects::{ObjectType, PlotSettings};
+use acadrust::tables::{Layer, View};
 use acadrust::types::{DxfVersion, Handle};
 use acadrust::{CadDocument, DwgReader, DwgWriter, DxfWriter};
 
@@ -210,4 +218,101 @@ fn resync_keeps_a_rename_that_collides_with_a_live_layer() {
     assert_eq!(doc.layers.get("KEEP").map(|l| l.handle), Some(keep_handle));
     let rt = dwg_roundtrip(&doc);
     assert_layers_resolve(&rt, "colliding rename");
+}
+
+// A semantic roundtrip discards handle reference types. Inspect the encoded
+// stream directly: ODA section 20.4.84 and native AutoCAD files use a hard
+// pointer for the plot view, including when it is null.
+fn assert_plot_view_reference_types(standalone: bool) {
+    for version in [
+        DxfVersion::AC1018,
+        DxfVersion::AC1021,
+        DxfVersion::AC1024,
+        DxfVersion::AC1027,
+        DxfVersion::AC1032,
+    ] {
+        for reference in ["null", "handle", "name"] {
+            let mut doc = CadDocument::with_version(version);
+            let mut view = View::new("Plot view");
+            view.handle = doc.allocate_handle();
+            let expected_handle = if reference == "null" {
+                Handle::NULL
+            } else {
+                view.handle
+            };
+            doc.views.add(view).unwrap();
+            let supplied_handle = if reference == "handle" {
+                expected_handle
+            } else {
+                Handle::NULL
+            };
+            let supplied_name = if reference == "name" { "Plot view" } else { "" };
+
+            let handle = if standalone {
+                let mut settings = PlotSettings::new("Issue 80 page setup");
+                settings.handle = doc.allocate_handle();
+                settings.owner = doc.header.named_objects_dict_handle;
+                settings.plot_view_handle = supplied_handle;
+                settings.plot_view_name = supplied_name.to_string();
+                let handle = settings.handle;
+                doc.objects
+                    .insert(handle, ObjectType::PlotSettings(settings));
+                if let Some(ObjectType::Dictionary(root)) =
+                    doc.objects.get_mut(&doc.header.named_objects_dict_handle)
+                {
+                    root.add_entry("Issue 80 page setup", handle);
+                }
+                handle
+            } else {
+                let handle = doc.add_layout("Plan EXE - Sheet A").unwrap();
+                let ObjectType::Layout(layout) = doc.objects.get_mut(&handle).unwrap() else {
+                    unreachable!()
+                };
+                layout.plot_view_handle = supplied_handle;
+                layout.plot_view_name = supplied_name.to_string();
+                handle
+            };
+
+            let (bytes, handles, _, _) = DwgObjectWriter::new(&doc).unwrap().write();
+            let handles = handles
+                .into_iter()
+                .map(|(h, offset)| (h, offset as i64))
+                .collect();
+            let objects = DwgObjectReader::new(bytes, version, handles).unwrap();
+            let offset = objects.offset_for(handle.value()).unwrap();
+            let (type_code, mut record) = objects.read_record_at(offset as usize).unwrap();
+            objects.read_common_non_entity_data(&mut record, type_code);
+
+            assert_eq!(
+                record.read_typed_handle(),
+                (expected_handle.value(), DwgReferenceType::HardPointer),
+                "{version:?}: {reference} plot view (standalone={standalone})"
+            );
+            if version >= DxfVersion::AC1021 {
+                assert_eq!(
+                    record.read_typed_handle(),
+                    (0, DwgReferenceType::SoftPointer)
+                );
+            }
+            if !standalone {
+                let ObjectType::Layout(layout) = doc.objects.get(&handle).unwrap() else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    record.read_typed_handle(),
+                    (layout.block_record.value(), DwgReferenceType::SoftPointer)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn layout_plot_view_is_a_hard_pointer() {
+    assert_plot_view_reference_types(false);
+}
+
+#[test]
+fn standalone_plot_settings_plot_view_is_a_hard_pointer() {
+    assert_plot_view_reference_types(true);
 }

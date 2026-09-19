@@ -753,8 +753,16 @@ pub struct WipeoutVariablesData {
 /// ("ACAD_FILTER\u{80}0…"), which broke exact-name lookups (xclip filters,
 /// gradient round-trip records). The trailing garbage is always non-printable
 /// or high-bit, so cut the key at the first such byte.
+/// Trim a dictionary key at the first control character.
+///
+/// Keys are arbitrary user text: material, page-setup, layer-state and
+/// dictionary-variable names routinely contain non-ASCII letters (Swedish
+/// "GRÅ", "LIMTRÄ", "VITMÅLAD" ...). Cutting at the first byte above 0x7E,
+/// as this used to do, collapsed such keys ("R" three times in one
+/// ACAD_MATERIAL dictionary) and the collision was then written back to the
+/// file. Only control characters can never be part of a key.
 fn clean_dict_key(name: String) -> String {
-    match name.find(|c: char| (c as u32) < 0x20 || (c as u32) > 0x7e) {
+    match name.find(|c: char| (c as u32) < 0x20) {
         Some(pos) => name[..pos].to_string(),
         None => name,
     }

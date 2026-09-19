@@ -32,7 +32,8 @@ pub use block_visibility::{
 pub use class_object::{
     AcMeCommandHistory, AcMeScope, AcMeStateManager, ClassObject, ClassObjectData,
     ContextDataEntry, ContextDataManager, ContextDataSubManager, CsacDocumentOptions, CurvePath,
-    DataLink, DataLinkCustomData, DataTable, DataTableColumn, DataTableValue, DetailViewStyle,
+    DataLink, DataLinkCustomData, DataTable, DataTableCellType, DataTableColumn, DataTableValue,
+    DetailViewStyle,
     GeoMapImage, GradientBackground, GroundPlaneBackground, IblBackground, ImageBackground,
     LayerFilter, LightList, LightListEntry, MentalRayRenderSettings, ModelDocViewStyle, MotionPath,
     NavisworksModelDefinition, PartialViewingIndex, PartialViewingIndexEntry,

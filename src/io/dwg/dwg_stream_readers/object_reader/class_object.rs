@@ -11,11 +11,17 @@ fn count(value: i32) -> usize {
     value.max(0).min(MAX_ITEMS) as usize
 }
 
+/// `read_predefined_bit`: whether the R2013+ `has_predefined` flag follows
+/// `display_index`. It does for RENDERSETTINGS, but not for
+/// MENTALRAYRENDERSETTINGS (its body starts right after `display_index`;
+/// consuming a bit there shifted every following field) nor for
+/// RAPIDRTRENDERSETTINGS, which stores the flag after its own fields.
 fn read_render_settings(
     reader: &mut DwgMergedReader,
     version: DwgVersion,
     dxf_version: DxfVersion,
     rapid_rt: bool,
+    read_predefined_bit: bool,
 ) -> RenderSettings {
     let stored_version = reader.read_bit_long();
     RenderSettings {
@@ -34,7 +40,7 @@ fn read_render_settings(
         environment_image_filename: reader.read_variable_text(),
         description: reader.read_variable_text(),
         display_index: reader.read_bit_long(),
-        has_predefined: if !rapid_rt && version.r2013_plus(dxf_version) {
+        has_predefined: if read_predefined_bit {
             reader.read_bit()
         } else {
             false
@@ -394,40 +400,11 @@ pub fn read_class_object_data(
                 entities,
             })
         }
-        "SPATIAL_INDEX" => {
-            let last_updated_julian_day = reader.read_bit_long();
-            let last_updated_milliseconds = reader.read_bit_long();
-            let min_corner = crate::types::Vector3::new(
-                reader.read_bit_double(),
-                reader.read_bit_double(),
-                reader.read_bit_double(),
-            );
-            let max_corner = crate::types::Vector3::new(
-                reader.read_bit_double(),
-                reader.read_bit_double(),
-                reader.read_bit_double(),
-            );
-            let mut indexed_objects = Vec::new();
-            for _ in 0..count(reader.read_bit_long()) {
-                // AcDbSpatialIndex stores its indexed-entity IDs inline in
-                // the main data stream, not in the trailing object-handle
-                // stream. The latter contains only the ordinary common-object
-                // owner/reactor references.
-                indexed_objects.push(Handle::from(reader.read_main_handle()));
-            }
-            let binary_size = count(reader.read_bit_long());
-            // Autodesk documents the trailing binary block as an internal,
-            // ignorable acceleration cache. Consume it to keep the stream
-            // aligned; the semantic index is the extents + ordered object IDs.
-            let _cached_acceleration_data = reader.read_bytes(binary_size);
-            ClassObjectData::SpatialIndex(SpatialIndex {
-                last_updated_julian_day,
-                last_updated_milliseconds,
-                min_corner,
-                max_corner,
-                indexed_objects,
-            })
-        }
+        // AcDbSpatialIndex is an undocumented, host-rebuilt acceleration cache. The
+        // previous field-level parse mis-read it (garbage extents and ids) and the
+        // re-written object made AutoCAD reject the drawing (issue #80). Leave it
+        // to the opaque path, which carries the record through verbatim.
+        "SPATIAL_INDEX" => return None,
         "LAYERFILTER" => {
             let mut names = Vec::new();
             for _ in 0..count(reader.read_bit_long()) {
@@ -553,9 +530,10 @@ pub fn read_class_object_data(
             version,
             dxf_version,
             false,
+            version.r2013_plus(dxf_version),
         )),
         "MENTALRAYRENDERSETTINGS" => {
-            let base = read_render_settings(reader, version, dxf_version, false);
+            let base = read_render_settings(reader, version, dxf_version, false, false);
             ClassObjectData::MentalRayRenderSettings(MentalRayRenderSettings {
                 base,
                 version: reader.read_bit_long(),
@@ -612,7 +590,7 @@ pub fn read_class_object_data(
             })
         }
         "RAPIDRTRENDERSETTINGS" => {
-            let mut base = read_render_settings(reader, version, dxf_version, true);
+            let mut base = read_render_settings(reader, version, dxf_version, true, false);
             let rapid_version = reader.read_bit_long();
             let render_target = reader.read_bit_long();
             let render_level = reader.read_bit_long();
@@ -881,20 +859,36 @@ pub fn read_class_object_data(
         }
         "DATATABLE" => {
             let flags = reader.read_bit_short();
-            let column_count = count(reader.read_bit_long());
+            let column_count = reader.read_bit_long();
             let row_count = reader.read_bit_long();
+            if !(0..=MAX_ITEMS).contains(&column_count) || !(0..=MAX_ITEMS).contains(&row_count) {
+                return None;
+            }
             let name = reader.read_variable_text();
-            let mut columns = Vec::with_capacity(column_count);
+            let mut columns = Vec::with_capacity(column_count as usize);
             for _ in 0..column_count {
                 let value_type = reader.read_bit_long();
+                // Unknown schemas must keep the complete raw record: skipping
+                // a cell would desynchronize all subsequent columns.
+                let cell_type = DataTableCellType::from_code(value_type)?;
+                if !cell_type.has_native_codec() {
+                    return None;
+                }
                 let column_name = reader.read_variable_text();
                 let mut rows = Vec::new();
                 for _ in 0..count(row_count) {
-                    rows.push(DataTableValue {
-                        integer: reader.read_bit_long(),
-                        real: reader.read_bit_double(),
-                        text: reader.read_variable_text(),
-                    });
+                    let mut value = DataTableValue::default();
+                    match cell_type {
+                        DataTableCellType::Integer => value.integer = reader.read_bit_long(),
+                        DataTableCellType::Double => value.real = reader.read_bit_double(),
+                        DataTableCellType::Text => value.text = reader.read_variable_text(),
+                        DataTableCellType::Point => value.point = reader.read_3bit_double(),
+                        DataTableCellType::ObjectId => {
+                            value.handle = Handle::from(reader.read_handle());
+                        }
+                        _ => return None,
+                    }
+                    rows.push(value);
                 }
                 columns.push(DataTableColumn {
                     value_type,

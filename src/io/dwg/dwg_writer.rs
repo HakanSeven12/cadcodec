@@ -551,11 +551,22 @@ fn prepare_legacy_document(document: &mut CadDocument) {
         }
     }
 
+    // A document read from an R2004 (AC1018) DWG that already carried
+    // ACAD_MLEADERSTYLE (AutoCAD writes it there when saving as 2004, with
+    // the MLEADERSTYLE class declared) must keep it: the reader parsed those
+    // records with the same pre-R2010 layout the writer emits, and dropping
+    // them silently loses every multileader style in the file.  Only a
+    // document that did not come from such a file gets the legacy cleanup.
+    let keep_mleader_style = document.dwg_source_version == Some(document.version)
+        && document.version >= DxfVersion::AC1018
+        && document.classes.get_by_name("MLEADERSTYLE").is_some();
     let root_handle = document.header.named_objects_dict_handle;
     let mut obsolete = Vec::new();
     if let Some(ObjectType::Dictionary(root)) = document.objects.get_mut(&root_handle) {
         root.entries.retain(|(name, handle)| {
-            let remove = (name == "ACAD_MLEADERSTYLE" && document.version < DxfVersion::AC1021)
+            let remove = (name == "ACAD_MLEADERSTYLE"
+                && document.version < DxfVersion::AC1021
+                && !keep_mleader_style)
                 || (name == "ACAD_TABLESTYLE" && document.version < DxfVersion::AC1018);
             if remove {
                 obsolete.push(*handle);

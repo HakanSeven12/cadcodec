@@ -43,6 +43,35 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// Write a single entity record.
     pub(super) fn write_entity(&mut self, entity: &EntityType) {
+        // Already emitted verbatim (ACADRUST_RAW_ALL bisection aid): skip, so a
+        // compound entity does not re-allocate handles for its children.
+        if self.registered_handles.contains(&entity.common().handle.value()) {
+            return;
+        }
+        // Verbatim passthrough: the entity still carries the exact bytes it was read
+        // from, the target is the same version, and nothing the writer would
+        // rewrite differs. Skipped for pre-R2004 (records embed prev/next entity
+        // links there) and for ACIS entities on R2013+ (their SAB bodies live in
+        // the AcDs section, which is assembled from what gets written).
+        if let Some(raw) = &entity.common().raw_record {
+            let handle = entity.common().handle;
+            let acis = matches!(entity, EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) | EntityType::Surface(_));
+            // Compound entities own follow-up records (VERTEX…/ATTRIB…/SEQEND) that the
+            // reader folded into them; the writer emits those alongside, so they must
+            // go through the normal path.
+            let compound = matches!(entity, EntityType::Polyline(_) | EntityType::Polyline2D(_) | EntityType::Polyline3D(_)
+                | EntityType::PolyfaceMesh(_) | EntityType::PolygonMesh(_) | EntityType::Insert(_));
+            let ok = self.version.r2004_plus()
+                && raw.version == self.dxf_version
+                && !self.raw_excluded_handles.contains(&handle.value())
+                && !compound
+                && !(acis && self.version.r2013_plus(self.dxf_version))
+                && !self.owner_overrides.contains_key(&handle);
+            if ok {
+                self.register_raw_object(handle, &raw.data, raw.handle_bits);
+                return;
+            }
+        }
         match entity {
             EntityType::Point(e) => self.write_point(e),
             EntityType::Line(e) => self.write_line(e),
@@ -103,7 +132,9 @@ impl<'a> DwgObjectWriter<'a> {
                     _ => None,
                 };
                 if let Some((raw, handle_bits, version)) = raw {
-                    if self.raw_passthrough_compatible(version) {
+                    if self.raw_passthrough_compatible(version)
+                        && !self.raw_excluded_handles.contains(&e.common.handle.value())
+                    {
                         self.register_raw_object(e.common.handle, raw, handle_bits);
                         return;
                     }
@@ -1277,6 +1308,16 @@ impl<'a> DwgObjectWriter<'a> {
             att.vertical_alignment as i16,
         );
 
+        // Common TEXT style precedes embedded MTEXT handles (ODA 20.4.4).
+        let style_handle = self
+            .document
+            .text_styles
+            .get(&att.text_style)
+            .map(|s| s.handle)
+            .unwrap_or(Handle::NULL);
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, style_handle.value());
+
         // writeCommonAttData: R2010+ version byte
         if self.version.r2010_plus() {
             self.writer.write_byte(0);
@@ -1314,14 +1355,6 @@ impl<'a> DwgObjectWriter<'a> {
         if self.version.r2007_plus() {
             self.writer.write_bit(att.lock_position);
         }
-        let style_handle = self
-            .document
-            .text_styles
-            .get(&att.text_style)
-            .map(|s| s.handle)
-            .unwrap_or(Handle::NULL);
-        self.writer
-            .write_handle(DwgReferenceType::HardPointer, style_handle.value());
 
         self.register_object(handle);
     }
@@ -3099,13 +3132,53 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_3bit_double(e.start_point);
         self.writer.write_3bit_double(e.normal);
 
-        // Openclosed BS: open (1), closed (3) — always has HAS_VERTICES flag
-        let flag_value: i16 = if e.flags.contains(MLineFlags::CLOSED) {
+        // `Openclosed BS`, DXF group 71. The ODA specification documents two
+        // values for this field, open (1) and closed (3), and those are not
+        // enum tags: they are group 71's two low bits, `HAS_VERTICES` (1) and
+        // `HAS_VERTICES | CLOSED` (1 | 2). The short *is* group 71, so the
+        // cap-suppression bits `NO_START_CAPS` (4) and `NO_END_CAPS` (8) ride
+        // in it as well, and the entity's own object stream is the only place
+        // they can: MLINESTYLE's flag word has bits 4 and 8 unassigned, and
+        // its cap bits (16/32/64 start, 256/512/1024 end) pick a cap *shape*
+        // for every entity sharing the style, which cannot express one
+        // multiline suppressing its own caps. libredwg decodes this same field
+        // as `FIELD_BS (flags, 71)` with `MLINE_FLAGS_SUPPRESS_START_CAPS` /
+        // `_SUPPRESS_END_CAPS` and a validity mask of 15 (`src/dwg.spec`
+        // entity MLINE (47), `include/dwg.h`), and writes that raw short
+        // straight back out at group 71.
+        //
+        // Deliberately not `e.flags.bits()` — which is what the DXF writer
+        // emits at `src/io/dxf/writer/section_writer.rs:9373` — because the
+        // in-memory flags can hold combinations the documented contract
+        // excludes: `MLineFlags::empty()`, or `CLOSED` without `HAS_VERTICES`
+        // from a DXF file whose group 71 said 2. A `0` or `2` on this short is
+        // a value no AutoCAD drawing contains, and ACadSharp's reader resolves
+        // it as open by `== 3` (`DwgObjectReader.cs:3374`). So the open/closed
+        // pair is always rebuilt from `CLOSED` into one of the two documented
+        // patterns, and only the cap bits are carried across verbatim. That
+        // makes a DWG write lossless for every flag set a conforming file can
+        // hold, which is the four-bit space with `HAS_VERTICES` set. It does
+        // not make the two writers byte-identical: for the two excluded sets
+        // the DXF writer emits the raw bits, so an in-memory `0` crosses DXF as
+        // `0` and DWG as `1`, and a `2` crosses as `2` and `3` respectively.
+        //
+        // ACadSharp <= 3.7.1 is the one known reader this costs, and citing its
+        // `== 3` above without saying so would be one-sided: `DwgObjectReader.cs:3374`
+        // resolves the short by equality, so a closed multiline that also
+        // suppresses a cap (7, 11, 15) reads back OPEN there — while 4 and 8
+        // already die on any DWG it reads. That is its own defect: its model
+        // declares `[DxfCodeValue(71)] MLineFlags` with all four bits and its
+        // DXF path carries them. Real AutoCAD drawings settle the question —
+        // ACadSharp 3.7.1's `samples/sample_AC1018.dwg` and
+        // `samples/sample_AC1032.dwg` carry 5 on handle `3A6`, which libredwg
+        // 0.14 decodes as HAS_VERTEX | SUPPRESS_START_CAPS.
+        let caps = e.flags & (MLineFlags::NO_START_CAPS | MLineFlags::NO_END_CAPS);
+        let open_closed: i16 = if e.flags.contains(MLineFlags::CLOSED) {
             3
         } else {
             1
         };
-        self.writer.write_bit_short(flag_value);
+        self.writer.write_bit_short(open_closed | caps.bits());
 
         // Linesinstyle RC 73 — number of segments from first vertex
         let nlines: u8 = if let Some(first_v) = e.vertices.first() {
@@ -4565,8 +4638,7 @@ impl<'a> DwgObjectWriter<'a> {
         fallback.style = style.to_string();
         let mtext = embedded.unwrap_or(&fallback);
 
-        // AcDbMTextObjectEmbedded has a reduced common-entity header whose
-        // order differs from a standalone MTEXT entity.
+        // AcDbMTextObjectEmbedded starts at the common entity's Entmode.
         // Embedded MTEXT is a payload, not a model/paper-space entity.  Mode
         // zero still requires its (nullable) owner slot in the handle stream.
         self.writer.write_2bits(0);
@@ -4576,12 +4648,12 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit(true);
         self.writer.write_bit(false);
         self.writer
-            .write_bit_short(mtext.common.color.index().unwrap_or(256) as i16);
+            .write_en_color(&mtext.common.color, &mtext.common.transparency);
         self.writer.write_bit_double(mtext.common.linetype_scale);
         self.writer.write_2bits(0);
         self.writer.write_2bits(0);
-        self.writer.write_2bits(0);
         self.writer.write_byte(mtext.common.shadow_flags);
+        self.writer.write_2bits(0);
         self.writer.write_bit(false);
         self.writer.write_bit(false);
         self.writer.write_bit(false);
@@ -4692,6 +4764,16 @@ impl<'a> DwgObjectWriter<'a> {
             e.vertical_alignment as i16,
         );
 
+        // Common TEXT style precedes embedded MTEXT handles (ODA 20.4.4).
+        let style_handle = self
+            .document
+            .text_styles
+            .get(&e.text_style)
+            .map(|s| s.handle)
+            .unwrap_or(Handle::NULL);
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, style_handle.value());
+
         // writeCommonAttData: R2010+ version byte
         if self.version.r2010_plus() {
             self.writer.write_byte(0); // version
@@ -4740,17 +4822,6 @@ impl<'a> DwgObjectWriter<'a> {
         // Prompt
         self.writer.write_variable_text(&e.prompt);
 
-        // The outer TEXT style is the final ATTDEF handle.  For multiline
-        // attributes the embedded MTEXT layer/style handles precede it.
-        let style_handle = self
-            .document
-            .text_styles
-            .get(&e.text_style)
-            .map(|s| s.handle)
-            .unwrap_or(Handle::NULL);
-        self.writer
-            .write_handle(DwgReferenceType::HardPointer, style_handle.value());
-
         self.register_object(e.common.handle);
     }
 
@@ -4774,6 +4845,16 @@ impl<'a> DwgObjectWriter<'a> {
             e.horizontal_alignment as i16,
             e.vertical_alignment as i16,
         );
+
+        // Common TEXT style precedes embedded MTEXT handles (ODA 20.4.4).
+        let style_handle = self
+            .document
+            .text_styles
+            .get(&e.text_style)
+            .map(|s| s.handle)
+            .unwrap_or(Handle::NULL);
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, style_handle.value());
 
         // writeCommonAttData: R2010+ version byte
         if self.version.r2010_plus() {
@@ -4812,15 +4893,6 @@ impl<'a> DwgObjectWriter<'a> {
         if self.version.r2007_plus() {
             self.writer.write_bit(e.lock_position);
         }
-        // The outer TEXT style follows the embedded MTEXT handles.
-        let style_handle = self
-            .document
-            .text_styles
-            .get(&e.text_style)
-            .map(|s| s.handle)
-            .unwrap_or(Handle::NULL);
-        self.writer
-            .write_handle(DwgReferenceType::HardPointer, style_handle.value());
 
         self.register_object(e.common.handle);
     }
@@ -5412,6 +5484,21 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_long(encrypted.len() as i32);
         self.writer.write_bytes(&encrypted);
         self.writer.write_bit_long(0);
+    }
+
+    /// Raw R2013+ entity records still depend on the external AcDs section.
+    pub(super) fn queue_raw_entity_sab(&mut self, entity: &EntityType) {
+        if !self.needs_acds_section() {
+            return;
+        }
+        let acis = match entity {
+            EntityType::Solid3D(entity) => &entity.acis_data,
+            EntityType::Region(entity) => &entity.acis_data,
+            EntityType::Body(entity) => &entity.acis_data,
+            EntityType::Surface(entity) => &entity.acis_data,
+            _ => return,
+        };
+        self.queue_sab_entry(acis, entity.common().handle);
     }
 
     /// Queue SAB data for writing into the AcDsPrototype_1b section.

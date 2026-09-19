@@ -290,7 +290,7 @@ impl<'a> DwgObjectWriter<'a> {
             ObjectType::Dictionary(d) => self.write_dictionary(d),
             ObjectType::Layout(l) => self.write_layout(l),
             ObjectType::XRecord(x) => {
-                if !x.entries_complete {
+                if !x.entries_complete && !self.raw_excluded_handles.contains(&x.handle.value()) {
                     if let Some(raw) = &x.raw_dwg_data {
                         if self.raw_passthrough_compatible(x.raw_dwg_version) {
                             for reference in &x.object_references {
@@ -334,7 +334,9 @@ impl<'a> DwgObjectWriter<'a> {
             ObjectType::ClassObject(value) => {
                 if let ClassObjectData::CsacDocumentOptions(data) = &value.data {
                     if let Some(raw) = &data.raw_dwg_data {
-                        if self.raw_passthrough_compatible(data.raw_dwg_version) {
+                        if self.raw_passthrough_compatible(data.raw_dwg_version)
+                            && !self.raw_excluded_handles.contains(&value.handle.value())
+                        {
                             self.register_raw_object(value.handle, raw, data.raw_dwg_handle_bits);
                             return;
                         }
@@ -346,7 +348,9 @@ impl<'a> DwgObjectWriter<'a> {
             ObjectType::Field(value) => self.write_field_object(value),
             ObjectType::FieldList(value) => self.write_field_list(value),
             ObjectType::RegisteredClass(value) => {
-                if value.properties.is_empty() {
+                if value.properties.is_empty()
+                    && !self.raw_excluded_handles.contains(&value.handle.value())
+                {
                     if let Some(raw) = &value.raw_dwg_data {
                         if self.raw_passthrough_compatible(value.raw_dwg_version) {
                             self.register_raw_object(value.handle, raw, value.raw_dwg_handle_bits);
@@ -1724,7 +1728,7 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_bit_short(layout.shade_plot_resolution);
             self.writer.write_bit_short(layout.shade_plot_dpi);
 
-            // Plot view handle (soft pointer)
+            // Plot view handle (hard pointer, including null; ODA 20.4.84).
             let plot_view_handle = if !layout.plot_view_handle.is_null() {
                 layout.plot_view_handle
             } else {
@@ -1735,7 +1739,7 @@ impl<'a> DwgObjectWriter<'a> {
                     .unwrap_or(Handle::NULL)
             };
             self.writer
-                .write_handle(DwgReferenceType::SoftPointer, plot_view_handle.value());
+                .write_handle(DwgReferenceType::HardPointer, plot_view_handle.value());
         }
 
         // R2007+: visual style handle
@@ -1825,7 +1829,7 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_bit_short(ps.shade_plot_resolution as i16);
             self.writer.write_bit_short(ps.shade_plot_dpi);
 
-            // Plot view handle (soft pointer)
+            // Plot view handle (hard pointer, as in the embedded Layout settings).
             let plot_view_handle = if !ps.plot_view_handle.is_null() {
                 ps.plot_view_handle
             } else {
@@ -1836,7 +1840,7 @@ impl<'a> DwgObjectWriter<'a> {
                     .unwrap_or(Handle::NULL)
             };
             self.writer
-                .write_handle(DwgReferenceType::SoftPointer, plot_view_handle.value());
+                .write_handle(DwgReferenceType::HardPointer, plot_view_handle.value());
         }
 
         // R2007+: visual style handle

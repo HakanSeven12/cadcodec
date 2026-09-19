@@ -1239,6 +1239,17 @@ pub struct CadDocument {
     /// Shared so document snapshots do not duplicate large modeler data.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) raw_acds_data: Option<Arc<Vec<u8>>>,
+    /// Debug aid: every record of the source DWG, verbatim, keyed by handle
+    /// (type code, bytes). Only filled when `ACADRUST_RAW_ALL` is set in the
+    /// environment; the writer then re-emits these instead of re-serialising
+    /// so that a writer defect can be bisected by object type
+    /// (`ACADRUST_RAW_EXCLUDE`).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) raw_records: HashMap<u64, (i16, Arc<crate::entities::RawRecord>)>,
+    /// Child record -> compound entity handle, captured with `raw_records`.
+    /// Exclusions must serialize each compound entity and its children together.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) raw_record_owners: HashMap<u64, u64>,
 
     /// `(handle, byte length, hash)` of SAB bodies when `raw_acds_data` was
     /// captured. Used to reject stale section passthrough after geometry edits.
@@ -1421,6 +1432,8 @@ impl CadDocument {
             preview: None,
             acis_sab_handles: Vec::new(),
             raw_acds_data: None,
+            raw_records: HashMap::new(),
+            raw_record_owners: HashMap::new(),
             raw_acds_fingerprint: Vec::new(),
             dwg_data_store_handles: HashSet::new(),
             section_view_style: None,
@@ -2703,6 +2716,7 @@ impl CadDocument {
     /// The entity is stored in both the flat entity map (used by the DXF
     /// writer) and the *Model_Space block record (used by the DWG writer).
     pub fn add_entity(&mut self, mut entity: EntityType) -> Result<Handle> {
+        entity.common_mut().raw_record = None;   // (re)placed in the document: owner/handle may differ from the source bytes
         // Allocate a handle if the entity doesn't have one
         let handle = if entity.common().handle.is_null() {
             let h = self.allocate_handle();
@@ -2852,7 +2866,9 @@ impl CadDocument {
     pub fn get_entity_mut(&mut self, handle: Handle) -> Option<&mut EntityType> {
         let idx = *self.entity_index.get(&handle)?;
         self.record_entity_before(handle, Some(Arc::clone(&self.entities[idx])));
-        Some(Arc::make_mut(&mut self.entities[idx]))
+        let entity = Arc::make_mut(&mut self.entities[idx]);
+        entity.common_mut().raw_record = None;   // may be modified: verbatim bytes no longer trustworthy
+        Some(entity)
     }
 
     /// Replace an existing entity with a shared image, preserving its storage
@@ -3010,6 +3026,7 @@ impl CadDocument {
     /// [`add_paper_space_entity`](Self::add_paper_space_entity), and
     /// [`add_entity_to_layout`](Self::add_entity_to_layout).
     fn add_entity_to_block(&mut self, mut entity: EntityType, block_name: &str) -> Result<Handle> {
+        entity.common_mut().raw_record = None;
         // Allocate a handle if the entity doesn't have one
         let handle = if entity.common().handle.is_null() {
             let h = self.allocate_handle();
@@ -3207,6 +3224,18 @@ impl CadDocument {
     /// it is O(entities) deep only for bulk passes (save prep, handle reassign),
     /// not the single-entity edit path (which uses `get_entity_mut`).
     pub fn entities_mut(&mut self) -> impl Iterator<Item = &mut EntityType> {
+        if let Some(recorder) = self.active_entity_change_recorder() {
+            for entity in &self.entities {
+                recorder.record(entity.common().handle, Some(Arc::clone(entity)));
+            }
+        }
+        self.entities.iter_mut().map(|entity| { let e = Arc::make_mut(entity); e.common_mut().raw_record = None; e })
+    }
+
+    /// Like [`entities_mut`](Self::entities_mut) but keeps `raw_record`: for
+    /// read-time passes that only fill in *derived* fields (names resolved from
+    /// handles, colour-book lookups) and never change what the record encodes.
+    pub(crate) fn entities_mut_keep_raw(&mut self) -> impl Iterator<Item = &mut EntityType> {
         if let Some(recorder) = self.active_entity_change_recorder() {
             for entity in &self.entities {
                 recorder.record(entity.common().handle, Some(Arc::clone(entity)));
@@ -5033,7 +5062,7 @@ impl CadDocument {
             return;
         }
 
-        for entity in self.entities_mut() {
+        for entity in self.entities_mut_keep_raw() {   // derived colour names only; record bytes untouched
             let common = entity.common_mut();
             let resolved = common
                 .color_book_handle
