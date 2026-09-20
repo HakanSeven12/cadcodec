@@ -16799,6 +16799,11 @@ impl<'a> SectionReader<'a> {
                         leader.annotation_handle = Handle::new(h);
                     }
                 }
+                77 => {
+                    if let Some(v) = pair.as_i16() {
+                        leader.override_color = Color::from_index(v);
+                    }
+                }
                 210 | 220 | 230 => {
                     normal.add_coordinate(&pair);
                 }

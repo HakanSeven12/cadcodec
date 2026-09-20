@@ -118,3 +118,31 @@ fn underlay_rotation_is_degrees_on_the_wire() {
         .expect("UNDERLAY missing");
     assert!((u.rotation - 0.5).abs() < 1e-9, "rotation = {}", u.rotation);
 }
+
+#[test]
+fn leader_annotation_link_vectors_and_color_survive_dxf_roundtrip() {
+    use acadrust::entities::Leader;
+    use acadrust::types::{Color, Handle};
+    let mut l = Leader::new();
+    l.vertices = vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(5.0, 5.0, 0.0)];
+    l.annotation_handle = Handle::new(0x2A);
+    l.horizontal_direction = Vector3::new(0.0, 1.0, 0.0);
+    l.block_offset = Vector3::new(1.0, 2.0, 3.0);
+    l.annotation_offset = Vector3::new(4.0, 5.0, 6.0);
+    l.override_color = Color::from_index(3);
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    doc.add_entity(EntityType::Leader(l)).unwrap();
+    let rt = dxf_roundtrip(&doc);
+    let l = rt
+        .entities()
+        .find_map(|e| match e {
+            EntityType::Leader(l) => Some(l.clone()),
+            _ => None,
+        })
+        .expect("LEADER missing");
+    assert_eq!(l.annotation_handle, Handle::new(0x2A));
+    assert_eq!(l.horizontal_direction, Vector3::new(0.0, 1.0, 0.0));
+    assert_eq!(l.block_offset, Vector3::new(1.0, 2.0, 3.0));
+    assert_eq!(l.annotation_offset, Vector3::new(4.0, 5.0, 6.0));
+    assert_eq!(l.override_color, Color::from_index(3));
+}
