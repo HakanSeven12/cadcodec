@@ -157,3 +157,22 @@ fn view_border_and_section_symbol_keep_their_kind_in_dxf_entities_section() {
     assert!(rt.entities().any(|e| matches!(e, EntityType::ViewBorder(_))));
     assert!(rt.entities().any(|e| matches!(e, EntityType::SectionSymbol(_))));
 }
+
+#[test]
+fn table_merged_ranges_are_rebuilt_after_dxf_roundtrip() {
+    use acadrust::entities::table::{CellRange, Table};
+    let mut t = Table::new(Vector3::new(0.0, 0.0, 0.0), 3, 3);
+    t.merge_cells(CellRange::new(0, 0, 1, 1));
+    assert_eq!(t.merged_ranges.len(), 1);
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    doc.add_entity(EntityType::Table(t)).unwrap();
+    let rt = dxf_roundtrip(&doc);
+    let t = rt
+        .entities()
+        .find_map(|e| match e {
+            EntityType::Table(t) => Some(t.clone()),
+            _ => None,
+        })
+        .expect("TABLE missing");
+    assert_eq!(t.merged_ranges, vec![CellRange::new(0, 0, 1, 1)]);
+}

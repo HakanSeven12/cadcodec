@@ -19529,6 +19529,8 @@ impl<'a> SectionReader<'a> {
             proxy_graphics.truncate(proxy_graphics_size);
             table.common.graphic_data = Some(proxy_graphics);
         }
+        // The entity record carries merges only as per-cell dimensions.
+        table.sync_merged_ranges_from_cells();
         Ok(Some(table))
     }
 
