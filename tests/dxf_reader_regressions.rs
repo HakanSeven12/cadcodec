@@ -100,3 +100,21 @@ fn light_boolean_flags_survive_dxf_roundtrip() {
         .expect("LIGHT missing");
     assert!(l.status && l.plot_glyph && l.use_attenuation_limits && l.cast_shadows);
 }
+
+#[test]
+fn underlay_rotation_is_degrees_on_the_wire() {
+    use acadrust::entities::underlay::{Underlay, UnderlayType};
+    let mut u = Underlay::new(UnderlayType::Pdf);
+    u.rotation = 0.5; // radians
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    doc.add_entity(EntityType::Underlay(u)).unwrap();
+    let rt = dxf_roundtrip(&doc);
+    let u = rt
+        .entities()
+        .find_map(|e| match e {
+            EntityType::Underlay(u) => Some(u.clone()),
+            _ => None,
+        })
+        .expect("UNDERLAY missing");
+    assert!((u.rotation - 0.5).abs() < 1e-9, "rotation = {}", u.rotation);
+}

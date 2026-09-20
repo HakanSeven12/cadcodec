@@ -19571,7 +19571,7 @@ impl<'a> SectionReader<'a> {
                 }
                 50 => {
                     if let Some(v) = pair.as_double() {
-                        underlay.rotation = v;
+                        underlay.rotation = v.to_radians();
                     }
                 }
                 280 => {
