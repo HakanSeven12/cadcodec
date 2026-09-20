@@ -61,3 +61,42 @@ fn attdef_text_and_attribute_fields_survive_dxf_roundtrip() {
     assert_eq!(b.field_length, 12);
     assert_eq!(b.normal, Vector3::new(0.0, 0.0, -1.0));
 }
+
+#[test]
+fn helix_left_handed_survives_dxf_roundtrip() {
+    use acadrust::entities::Helix;
+    let mut h = Helix::new();
+    h.handedness = false;
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    doc.add_entity(EntityType::Helix(h)).unwrap();
+    let rt = dxf_roundtrip(&doc);
+    let h = rt
+        .entities()
+        .find_map(|e| match e {
+            EntityType::Helix(h) => Some(h.clone()),
+            _ => None,
+        })
+        .expect("HELIX missing");
+    assert!(!h.handedness);
+}
+
+#[test]
+fn light_boolean_flags_survive_dxf_roundtrip() {
+    use acadrust::entities::Light;
+    let mut l = Light::new();
+    l.status = true;
+    l.plot_glyph = true;
+    l.use_attenuation_limits = true;
+    l.cast_shadows = true;
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    doc.add_entity(EntityType::Light(l)).unwrap();
+    let rt = dxf_roundtrip(&doc);
+    let l = rt
+        .entities()
+        .find_map(|e| match e {
+            EntityType::Light(l) => Some(l.clone()),
+            _ => None,
+        })
+        .expect("LIGHT missing");
+    assert!(l.status && l.plot_glyph && l.use_attenuation_limits && l.cast_shadows);
+}
