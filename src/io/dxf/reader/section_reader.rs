@@ -15732,6 +15732,19 @@ impl<'a> SectionReader<'a> {
         let mut color = Color::ByLayer;
         let mut common = EntityCommon::new();
         let mut lock_position = false;
+        let mut alignment_point = PointReader::new();
+        let mut normal = PointReader::new();
+        let mut text_style: Option<String> = None;
+        let mut width_factor: Option<f64> = None;
+        let mut oblique_angle: Option<f64> = None;
+        let mut flags: Option<crate::entities::attribute_definition::AttributeFlags> = None;
+        let mut text_generation_flags: Option<i16> = None;
+        let mut field_length: Option<i16> = None;
+        let mut horizontal_alignment = None;
+        let mut vertical_alignment = None;
+        // Code 71 means text-generation flags in AcDbText but the MTEXT flag
+        // in AcDbAttributeDefinition (same disambiguation as ATTRIB).
+        let mut in_attribute_subclass = false;
         // Code 280 appears twice: first the version byte, then lock-position.
         let mut seen_version = false;
 
@@ -15742,6 +15755,11 @@ impl<'a> SectionReader<'a> {
             }
 
             match pair.code {
+                100 => {
+                    if pair.value_string == "AcDbAttributeDefinition" {
+                        in_attribute_subclass = true;
+                    }
+                }
                 8 => layer = pair.value_string.clone(),
                 62 => {
                     if let Some(color_index) = pair.as_i16() {
@@ -15753,6 +15771,61 @@ impl<'a> SectionReader<'a> {
                 3 => prompt = pair.value_string.clone(),
                 10 | 20 | 30 => {
                     insertion_point.add_coordinate(&pair);
+                }
+                7 => text_style = Some(pair.value_string.clone()),
+                11 | 21 | 31 => {
+                    alignment_point.add_coordinate(&pair);
+                }
+                210 | 220 | 230 => {
+                    normal.add_coordinate(&pair);
+                }
+                41 => {
+                    if let Some(v) = pair.as_double() {
+                        width_factor = Some(v);
+                    }
+                }
+                // DXF stores the oblique angle in degrees.
+                51 => {
+                    if let Some(v) = pair.as_double() {
+                        oblique_angle = Some(v.to_radians());
+                    }
+                }
+                70 => {
+                    if let Some(v) = pair.as_i16() {
+                        flags = Some(
+                            crate::entities::attribute_definition::AttributeFlags::from_bits(
+                                v as i32,
+                            ),
+                        );
+                    }
+                }
+                71 => {
+                    if !in_attribute_subclass {
+                        if let Some(v) = pair.as_i16() {
+                            text_generation_flags = Some(v);
+                        }
+                    }
+                }
+                72 => {
+                    if let Some(v) = pair.as_i16() {
+                        horizontal_alignment = Some(
+                            crate::entities::attribute_definition::HorizontalAlignment::from_value(
+                                v,
+                            ),
+                        );
+                    }
+                }
+                73 => {
+                    if let Some(v) = pair.as_i16() {
+                        field_length = Some(v);
+                    }
+                }
+                74 => {
+                    if let Some(v) = pair.as_i16() {
+                        vertical_alignment = Some(
+                            crate::entities::attribute_definition::VerticalAlignment::from_value(v),
+                        );
+                    }
                 }
                 40 => {
                     if let Some(h) = pair.as_double() {
@@ -15790,6 +15863,36 @@ impl<'a> SectionReader<'a> {
         attdef.height = height;
         attdef.rotation = rotation;
         attdef.lock_position = lock_position;
+        if let Some(p) = alignment_point.get_point() {
+            attdef.alignment_point = p;
+        }
+        if let Some(n) = normal.get_point() {
+            attdef.normal = n;
+        }
+        if let Some(v) = text_style {
+            attdef.text_style = v;
+        }
+        if let Some(v) = width_factor {
+            attdef.width_factor = v;
+        }
+        if let Some(v) = oblique_angle {
+            attdef.oblique_angle = v;
+        }
+        if let Some(v) = flags {
+            attdef.flags = v;
+        }
+        if let Some(v) = text_generation_flags {
+            attdef.text_generation_flags = v;
+        }
+        if let Some(v) = field_length {
+            attdef.field_length = v;
+        }
+        if let Some(v) = horizontal_alignment {
+            attdef.horizontal_alignment = v;
+        }
+        if let Some(v) = vertical_alignment {
+            attdef.vertical_alignment = v;
+        }
         // True color from code 420 overrides ACI
         if common.color.is_true_color() {
             color = common.color;
