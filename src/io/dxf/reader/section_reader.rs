@@ -3696,6 +3696,14 @@ impl<'a> SectionReader<'a> {
                             let _ = document.add_entity(EntityType::Underlay(entity));
                         }
                     }
+                    "SECTIONLINE" => {
+                        let entity = self.read_section_symbol_dxf()?;
+                        let _ = document.add_entity(EntityType::SectionSymbol(entity));
+                    }
+                    "DRAWINGVIEW" => {
+                        let entity = self.read_view_border_dxf()?;
+                        let _ = document.add_entity(EntityType::ViewBorder(entity));
+                    }
                     "OLE2FRAME" => {
                         if let Some(entity) = self.read_ole2frame()? {
                             let _ = document.add_entity(EntityType::Ole2Frame(entity));

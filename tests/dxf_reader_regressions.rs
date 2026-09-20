@@ -146,3 +146,14 @@ fn leader_annotation_link_vectors_and_color_survive_dxf_roundtrip() {
     assert_eq!(l.annotation_offset, Vector3::new(4.0, 5.0, 6.0));
     assert_eq!(l.override_color, Color::from_index(3));
 }
+
+#[test]
+fn view_border_and_section_symbol_keep_their_kind_in_dxf_entities_section() {
+    use acadrust::entities::{SectionSymbol, ViewBorder};
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    doc.add_entity(EntityType::ViewBorder(ViewBorder::default())).unwrap();
+    doc.add_entity(EntityType::SectionSymbol(SectionSymbol::default())).unwrap();
+    let rt = dxf_roundtrip(&doc);
+    assert!(rt.entities().any(|e| matches!(e, EntityType::ViewBorder(_))));
+    assert!(rt.entities().any(|e| matches!(e, EntityType::SectionSymbol(_))));
+}
