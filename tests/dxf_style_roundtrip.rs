@@ -4,7 +4,7 @@
 
 use std::io::Cursor;
 
-use acadrust::tables::TextStyle;
+use acadrust::tables::{DimStyle, TextStyle};
 use acadrust::types::DxfVersion;
 use acadrust::{CadDocument, DxfReader, DxfWriter};
 
@@ -57,4 +57,22 @@ fn text_style_oblique_angle_is_degrees_on_the_wire() {
     let rt = dxf_roundtrip(&doc);
     let style = rt.text_styles.get("Slanted").unwrap();
     assert!((style.oblique_angle - 15f64.to_radians()).abs() < 1e-9, "read back {}", style.oblique_angle);
+}
+
+#[test]
+fn dimension_style_text_style_name_is_resolved_from_its_handle() {
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    let mut text = TextStyle::new("Heading");
+    text.handle = doc.allocate_handle();
+    let handle = text.handle;
+    doc.text_styles.add(text).unwrap();
+    let mut dim = DimStyle::new("Metric");
+    dim.dimtxsty = "Heading".into();
+    dim.dimtxsty_handle = handle;
+    dim.handle = doc.allocate_handle();
+    doc.dim_styles.add(dim).unwrap();
+    let rt = dxf_roundtrip(&doc);
+    let dim = rt.dim_styles.get("Metric").expect("dim style missing");
+    assert_eq!(dim.dimtxsty_handle, handle);
+    assert_eq!(dim.dimtxsty, "Heading");
 }

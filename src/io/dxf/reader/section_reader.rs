@@ -9459,7 +9459,18 @@ impl<'a> SectionReader<'a> {
                     document.header.dimstyle_control_handle = Handle::new(handle);
                 }
             } else if pair.code == 0 && pair.value_string == "DIMSTYLE" {
-                if let Some(dimstyle) = self.read_dimstyle_entry()? {
+                if let Some(mut dimstyle) = self.read_dimstyle_entry()? {
+                    // DXF names the dimension text style only by handle (group 340);
+                    // resolve the name from the STYLE table, which is read first.
+                    if !dimstyle.dimtxsty_handle.is_null() {
+                        if let Some(text_style) = document
+                            .text_styles
+                            .iter()
+                            .find(|style| style.handle == dimstyle.dimtxsty_handle)
+                        {
+                            dimstyle.dimtxsty = text_style.name.clone();
+                        }
+                    }
                     document.dim_styles.add_or_replace(dimstyle);
                     self.decoded_records = self.decoded_records.saturating_add(1);
                 }
