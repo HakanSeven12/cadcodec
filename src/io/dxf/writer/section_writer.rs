@@ -1204,7 +1204,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_i16(70, flags)?;
         self.writer.write_double(40, style.height)?;
         self.writer.write_double(41, style.width_factor)?;
-        self.writer.write_double(50, style.oblique_angle)?;
+        // Group 50 is in degrees; the entity stores radians.
+        self.writer.write_double(50, style.oblique_angle.to_degrees())?;
         // Text generation flags: 2 = backward, 4 = upside down.
         let mut generation: i16 = 0;
         if style.flags.backward {

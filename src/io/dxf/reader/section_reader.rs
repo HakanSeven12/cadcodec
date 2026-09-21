@@ -9288,8 +9288,9 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 50 => {
+                    // Group 50 is in degrees; the entity stores radians.
                     if let Some(angle) = pair.as_double() {
-                        style.oblique_angle = angle;
+                        style.oblique_angle = angle.to_radians();
                     }
                 }
                 71 => {
