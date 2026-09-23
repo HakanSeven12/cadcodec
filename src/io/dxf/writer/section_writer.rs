@@ -1835,6 +1835,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_string(3, block_record.name())?;
         // Group code 1 is XRef path (empty for normal blocks)
         self.writer.write_string(1, &block_record.xref_path)?;
+        // Group code 4 is the block description, written only when it has one.
+        if !block_record.description.is_empty() {
+            self.writer.write_string(4, &block_record.description)?;
+        }
 
         // Write entities inside block definition:
         // - Model space entities go to ENTITIES section (not here)

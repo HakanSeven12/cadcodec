@@ -3167,6 +3167,9 @@ impl<'a> SectionReader<'a> {
                             block_record.entity_handles = entity_handles;
                             block_record.xref_path = block.xref_path.clone();
                             block_record.base_point = block.base_point;
+                            // The BLOCK marker is not kept in the entity list,
+                            // so its description only survives on the record.
+                            block_record.description = block.description.clone();
                             // Block-type flags come from the BLOCK entity's
                             // code 70 (the BLOCK_RECORD's code 70 is units).
                             block_record.flags.anonymous = (block_flags & 1) != 0;

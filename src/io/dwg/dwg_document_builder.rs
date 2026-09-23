@@ -478,6 +478,24 @@ impl DwgDocumentBuilder {
     /// 2. Read entities and objects → resolve handle references
     ///
     /// Returns collected notifications (skipped records, warnings).
+    /// Give every BLOCK marker the base point of the record that owns it.
+    ///
+    /// The marker and the `BlockRecord` are two views of one definition, and
+    /// a consumer that reads both must not see them disagree.
+    fn hydrate_block_markers(document: &mut CadDocument) {
+        let points: Vec<(Handle, crate::types::Vector3)> = document
+            .block_records
+            .iter()
+            .filter(|record| !record.block_entity_handle.is_null())
+            .map(|record| (record.block_entity_handle, record.base_point))
+            .collect();
+        for (handle, base_point) in points {
+            if let Some(EntityType::Block(marker)) = document.get_entity_mut(handle) {
+                marker.base_point = base_point;
+            }
+        }
+    }
+
     pub fn build(self, document: &mut CadDocument) -> NotificationCollection {
         self.build_with_stats(document).notifications
     }
@@ -2990,6 +3008,13 @@ impl DwgDocumentBuilder {
         // it into the header so consumers (and DXF export) see the real scale
         // rather than the "1:1" default.
         Self::reflect_annotation_scale(document);
+
+        // A DWG BLOCK entity record carries only the name: the base point
+        // lives on the BLOCK_HEADER. The marker was published with a zero
+        // base point, which reads as an authoritative origin and contradicts
+        // its own BlockRecord. Copy the record's value across now that both
+        // are assembled.
+        Self::hydrate_block_markers(document);
 
         if perf {
             eprintln!(
