@@ -1468,6 +1468,16 @@ fn visit_table_cell_handles(value: &mut TableCell, visit: &mut impl FnMut(&mut H
 }
 
 impl Table {
+    /// Rebuild `merged_ranges` from the per-cell merge dimensions.
+    ///
+    /// DXF stores a merge as the origin cell's `merge_width`/`merge_height`
+    /// (groups 175/176); readers that only see those fields call this so the
+    /// range list agrees with the cells, as it does after a DWG read.
+    pub fn sync_merged_ranges_from_cells(&mut self) {
+        let ranges = self.canonical_merged_ranges();
+        self.merged_ranges = ranges;
+    }
+
     fn canonical_merged_ranges(&self) -> Vec<CellRange> {
         let row_count = self.rows.len();
         let column_count = self.columns.len();

@@ -26,6 +26,7 @@ pub struct DxfCodePair {
     pub code: i32,
 
     /// The DXF code enum
+    #[allow(dead_code)]
     pub dxf_code: DxfCode,
 
     /// String representation of the value
@@ -111,6 +112,9 @@ impl DxfCodePair {
     pub fn as_i16(&self) -> Option<i16> {
         match self.typed_value {
             CodePairValue::Int(v) => i16::try_from(v).ok(),
+            // Codes 290-299 are typed as booleans, but many readers consume
+            // them as 0/1 flags through this accessor.
+            CodePairValue::Bool(v) => Some(v as i16),
             _ => None,
         }
     }
@@ -120,6 +124,7 @@ impl DxfCodePair {
     pub fn as_i32(&self) -> Option<i32> {
         match self.typed_value {
             CodePairValue::Int(v) => i32::try_from(v).ok(),
+            CodePairValue::Bool(v) => Some(v as i32),
             _ => None,
         }
     }
@@ -221,8 +226,8 @@ impl PointReader {
 
     /// Add a coordinate value
     pub fn add_coordinate(&mut self, pair: &DxfCodePair) -> bool {
-        if let Some(axis) = GroupCodeValueType::coordinate_axis(pair.dxf_code) {
-            let coord_group = GroupCodeValueType::coordinate_group(pair.dxf_code);
+        if let Some(axis) = GroupCodeValueType::coordinate_axis_raw(pair.code) {
+            let coord_group = GroupCodeValueType::coordinate_group_raw(pair.code);
 
             // If this is a new group, reset
             if self.group.is_some() && self.group != coord_group {
