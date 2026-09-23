@@ -1204,8 +1204,17 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_i16(70, flags)?;
         self.writer.write_double(40, style.height)?;
         self.writer.write_double(41, style.width_factor)?;
-        self.writer.write_double(50, style.oblique_angle)?;
-        self.writer.write_i16(71, 0)?; // Text generation flags
+        // Group 50 is in degrees; the entity stores radians.
+        self.writer.write_double(50, style.oblique_angle.to_degrees())?;
+        // Text generation flags: 2 = backward, 4 = upside down.
+        let mut generation: i16 = 0;
+        if style.flags.backward {
+            generation |= 2;
+        }
+        if style.flags.upside_down {
+            generation |= 4;
+        }
+        self.writer.write_i16(71, generation)?;
                                        // Last height used — must be > 0 for CAD validation
         self.writer
             .write_double(42, style.effective_last_height())?;
