@@ -11066,7 +11066,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_double(230, underlay.normal.z)?;
 
         // Flags
-        self.writer.write_byte(280, underlay.flags.bits())?;
+        self.writer.write_byte(280, underlay.display_flags().bits())?;
 
         // Contrast
         self.writer.write_byte(281, underlay.contrast)?;

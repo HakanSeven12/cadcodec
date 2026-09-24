@@ -3969,7 +3969,7 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_double(e.x_scale);
         self.writer.write_bit_double(e.y_scale);
         self.writer.write_bit_double(e.z_scale);
-        self.writer.write_byte(e.flags.bits());
+        self.writer.write_byte(e.display_flags().bits());
         self.writer.write_byte(e.contrast);
         self.writer.write_byte(e.fade);
 
