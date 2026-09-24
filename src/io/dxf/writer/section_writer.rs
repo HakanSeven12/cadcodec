@@ -7127,6 +7127,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_subclass("AcDbUnderlayDefinition")?;
         self.writer.write_string(1, &def.file_path)?;
         self.writer.write_string(2, &def.page_name)?;
+        if def.unloaded {
+            self.writer.write_string(1001, "ACAD")?;
+            self.writer.write_string(1000, "NOLOAD")?;
+        }
         Ok(())
     }
 

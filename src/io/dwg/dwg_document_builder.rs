@@ -2512,6 +2512,44 @@ impl DwgDocumentBuilder {
             );
         }
 
+        // ── Unloaded underlay definitions: NOLOAD in their ACAD EED ──
+        // The flag moves onto the definition (and out of the raw EED) so the
+        // model is its one source; the writer emits it back from there.
+        if let Some(acad) = document.app_ids.get("ACAD").map(|a| a.handle.value()) {
+            let wide = self.obj_reader.version().r2007_plus();
+            let is_noload = |bytes: &[u8]| {
+                crate::io::dwg::eed_codec::decode_values(bytes, wide, |_| None).is_some_and(
+                    |values| {
+                        matches!(values.as_slice(), [crate::xdata::XDataValue::String(s)]
+                            if s.eq_ignore_ascii_case("NOLOAD"))
+                    },
+                )
+            };
+            let unloaded: Vec<Handle> = document
+                .objects
+                .iter()
+                .filter(|(_, object)| {
+                    matches!(object, crate::objects::ObjectType::UnderlayDefinition(_))
+                })
+                .map(|(handle, _)| *handle)
+                .filter(|handle| {
+                    document.eed_by_handle.get(handle).is_some_and(|blocks| {
+                        blocks.iter().any(|(app, bytes)| *app == acad && is_noload(bytes))
+                    })
+                })
+                .collect();
+            for handle in unloaded {
+                if let Some(blocks) = document.eed_by_handle.get_mut(&handle) {
+                    blocks.retain(|(app, bytes)| !(*app == acad && is_noload(bytes)));
+                }
+                if let Some(crate::objects::ObjectType::UnderlayDefinition(definition)) =
+                    document.objects.get_mut(&handle)
+                {
+                    definition.unloaded = true;
+                }
+            }
+        }
+
         let annotative_started = web_time::Instant::now();
         // ── Annotative flag from `AcadAnnotative` EED (STYLE / DIMSTYLE) ──
         // These records have no native annotative field; the flag is stored as

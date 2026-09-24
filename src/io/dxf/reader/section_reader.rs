@@ -19986,6 +19986,7 @@ impl<'a> SectionReader<'a> {
     ) -> Result<Option<crate::objects::UnderlayDefinition>> {
         let mut def = crate::objects::UnderlayDefinition::new(utype);
         let mut in_reactors = false;
+        let mut xdata_app = String::new();
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
@@ -20010,6 +20011,12 @@ impl<'a> SectionReader<'a> {
                 }
                 1 => def.file_path = pair.value_string.clone(),
                 2 => def.page_name = pair.value_string.clone(),
+                1001 => xdata_app = pair.value_string.clone(),
+                1000 if xdata_app.eq_ignore_ascii_case("ACAD")
+                    && pair.value_string.eq_ignore_ascii_case("NOLOAD") =>
+                {
+                    def.unloaded = true;
+                }
                 _ => {}
             }
         }

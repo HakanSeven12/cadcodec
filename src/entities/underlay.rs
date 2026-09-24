@@ -115,6 +115,10 @@ pub struct UnderlayDefinition {
 
     /// Reactors (entities referencing this definition).
     pub reactors: Vec<Handle>,
+
+    /// The file is unloaded: its underlays show no content. Stored as the
+    /// `NOLOAD` string in the definition's `ACAD` extended data.
+    pub unloaded: bool,
 }
 
 impl UnderlayDefinition {
@@ -128,6 +132,7 @@ impl UnderlayDefinition {
             page_name: String::new(),
             name: String::new(),
             reactors: Vec::new(),
+            unloaded: false,
         }
     }
 

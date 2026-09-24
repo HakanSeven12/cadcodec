@@ -2112,12 +2112,33 @@ impl<'a> DwgObjectWriter<'a> {
             UnderlayType::Pdf => common::OBJ_PDFDEFINITION,
         };
         let type_code = self.class_type_code(def.entity_name(), fallback);
-        self.write_common_non_entity_data(
+        // An unloaded definition carries NOLOAD in its ACAD extended data.
+        let mut extra = Vec::new();
+        if def.unloaded {
+            if let Some(app) = self.document.app_ids.get("ACAD") {
+                let code_page =
+                    crate::io::dxf::code_page::dwg_code_page_index(&self.document.header.code_page);
+                let encoding = crate::io::dxf::code_page::encoding_from_code_page(
+                    &self.document.header.code_page,
+                )
+                .unwrap_or(encoding_rs::WINDOWS_1252);
+                let bytes = crate::io::dwg::eed_codec::encode_values_with_encoding(
+                    self.version.r2007_plus(),
+                    &[crate::xdata::XDataValue::String("NOLOAD".to_string())],
+                    encoding,
+                    code_page,
+                    |_| 0,
+                );
+                extra.push((app.handle.value(), bytes));
+            }
+        }
+        self.write_common_non_entity_data_eed(
             type_code,
             def.handle,
             def.owner_handle,
             &def.reactors,
             &None,
+            extra,
         );
 
         self.writer.write_variable_text(&def.file_path);
