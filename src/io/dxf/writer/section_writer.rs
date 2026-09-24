@@ -5291,7 +5291,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 ObjectType::Material(obj) => self.write_material(obj)?,
                 ObjectType::ImageDefinitionReactor(obj) => self.write_imagedef_reactor(obj)?,
                 ObjectType::GeoData(obj) => self.write_geodata(obj)?,
-                ObjectType::SpatialFilter(obj) => self.write_spatial_filter(obj)?,
+                ObjectType::SpatialFilter(obj) => self.write_spatial_filter(obj, document)?,
                 ObjectType::RasterVariables(obj) => self.write_raster_variables(obj)?,
                 ObjectType::BookColor(obj) => self.write_bookcolor(obj)?,
                 ObjectType::PlaceHolder(obj) => {
@@ -8603,9 +8603,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     /// Inverse of [`read_spatial_filter`]. The two 4×3 transforms are emitted
     /// as 12 code-40 doubles each, in column-major order, after the front/back
     /// clip flags and distances.
-    fn write_spatial_filter(&mut self, obj: &SpatialFilter) -> Result<()> {
+    fn write_spatial_filter(&mut self, obj: &SpatialFilter, document: &CadDocument) -> Result<()> {
         self.writer.write_string(0, "SPATIAL_FILTER")?;
         self.writer.write_handle(5, obj.handle)?;
+        // An inverted clip keeps its drawn boundary in the filter's extension
+        // dictionary; without the link that dictionary is left unreferenced.
+        self.write_table_entry_xdictionary(obj.handle, document)?;
         self.writer.write_handle(330, obj.owner)?;
         self.writer.write_subclass("AcDbFilter")?;
         self.writer.write_subclass("AcDbSpatialFilter")?;
