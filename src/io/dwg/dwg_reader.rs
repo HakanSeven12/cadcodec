@@ -15,7 +15,7 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use acadrust::io::dwg::dwg_reader::DwgReader;
+//! use opencadcodec::io::dwg::dwg_reader::DwgReader;
 //!
 //! let reader = DwgReader::from_file("drawing.dwg")?;
 //! let info = reader.read_file_header()?;
@@ -321,7 +321,7 @@ fn find_acds_magic(buf: &[u8], from: usize) -> Option<usize> {
 /// This is what AutoCAD 2013+ / BricsCAD emit.
 const ASM_END_MARKER: &[u8] = b"\x0E\x03End\x0E\x02of\x0E\x03ASM\x0D\x04data";
 /// End-of-body terminator for a classic ACIS SAB blob, written as one tagged
-/// identifier string. This is what acadrust's own `SabWriter` emits, so the
+/// identifier string. This is what opencadcodec's own `SabWriter` emits, so the
 /// reader must recognise it to round-trip natively-built solids (primitives and
 /// the exact planar/NURBS export), not just ASM bodies read from other apps.
 const ACIS_END_MARKER: &[u8] = b"End-of-ACIS-data";
@@ -399,7 +399,7 @@ fn extract_acds_record_blobs(buf: &[u8], modeler_handles: &HashSet<u64>) -> Vec<
             p += 20;
         }
         // A single entry can also be the interleaved layout emitted by older
-        // acadrust versions. Use the order-based fallback for those files.
+        // opencadcodec versions. Use the order-based fallback for those files.
         if recs.len() < 2 {
             continue;
         }
@@ -1552,7 +1552,7 @@ impl<R: Read + Seek> DwgReader<R> {
         // the end of the Classes section and the start of the Handles section,
         // regardless of where Template/AuxHeader are physically placed: many
         // real-world R2000 files store Template/AuxHeader *after* Handles (and
-        // acadrust's own R13/R14 writer places ObjFreeSpace/Template after
+        // opencadcodec's own R13/R14 writer places ObjFreeSpace/Template after
         // Handles too), so inferring the region from the AuxHeader end yields
         // a negative size and an empty document (issue #55).
         //

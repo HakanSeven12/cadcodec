@@ -610,8 +610,8 @@ impl Default for AcisData {
 /// # Example
 ///
 /// ```ignore
-/// use acadrust::entities::Solid3D;
-/// use acadrust::types::Vector3;
+/// use opencadcodec::entities::Solid3D;
+/// use opencadcodec::types::Vector3;
 ///
 /// // Create a 3D solid (typically from DXF/DWG import)
 /// let mut solid = Solid3D::new();

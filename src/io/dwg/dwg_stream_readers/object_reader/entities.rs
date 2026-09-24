@@ -3233,7 +3233,7 @@ pub fn read_underlay(reader: &mut DwgMergedReader) -> UnderlayData {
 //
 // The table entity is INSERT-derived; after the insert base the R2010+ record
 // carries the full table content inline (equivalent to the TABLECONTENT
-// object). This ports the reference readTableContent + sub-parsers. acadrust's
+// object). This ports the reference readTableContent + sub-parsers. opencadcodec's
 // model does not hold every cell-style / border / geometry detail, so those
 // sub-structures are read (to stay positioned) but only their meaningful data
 // (column widths, row heights, cell text/value) is retained.

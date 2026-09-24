@@ -1,4 +1,4 @@
-use acadrust::{tables::Layer, types::Color, CadDocument, DwgReader, DwgWriter};
+use opencadcodec::{tables::Layer, types::Color, CadDocument, DwgReader, DwgWriter};
 use std::io::Cursor;
 
 #[test]

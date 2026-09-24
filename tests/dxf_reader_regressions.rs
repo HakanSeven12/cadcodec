@@ -4,12 +4,12 @@
 
 use std::io::Cursor;
 
-use acadrust::entities::attribute_definition::{
+use opencadcodec::entities::attribute_definition::{
     AttributeDefinition, AttributeFlags, HorizontalAlignment, VerticalAlignment,
 };
-use acadrust::entities::EntityType;
-use acadrust::types::{DxfVersion, Vector3};
-use acadrust::{CadDocument, DxfReader, DxfWriter};
+use opencadcodec::entities::EntityType;
+use opencadcodec::types::{DxfVersion, Vector3};
+use opencadcodec::{CadDocument, DxfReader, DxfWriter};
 
 fn dxf_roundtrip(doc: &CadDocument) -> CadDocument {
     let bytes = DxfWriter::new(doc).write_to_vec().expect("DXF write failed");
@@ -64,7 +64,7 @@ fn attdef_text_and_attribute_fields_survive_dxf_roundtrip() {
 
 #[test]
 fn helix_left_handed_survives_dxf_roundtrip() {
-    use acadrust::entities::Helix;
+    use opencadcodec::entities::Helix;
     let mut h = Helix::new();
     h.handedness = false;
     let mut doc = CadDocument::with_version(DxfVersion::AC1032);
@@ -82,7 +82,7 @@ fn helix_left_handed_survives_dxf_roundtrip() {
 
 #[test]
 fn light_boolean_flags_survive_dxf_roundtrip() {
-    use acadrust::entities::Light;
+    use opencadcodec::entities::Light;
     let mut l = Light::new();
     l.status = true;
     l.plot_glyph = true;
@@ -103,7 +103,7 @@ fn light_boolean_flags_survive_dxf_roundtrip() {
 
 #[test]
 fn underlay_rotation_is_degrees_on_the_wire() {
-    use acadrust::entities::underlay::{Underlay, UnderlayType};
+    use opencadcodec::entities::underlay::{Underlay, UnderlayType};
     let mut u = Underlay::new(UnderlayType::Pdf);
     u.rotation = 0.5; // radians
     let mut doc = CadDocument::with_version(DxfVersion::AC1032);
@@ -121,8 +121,8 @@ fn underlay_rotation_is_degrees_on_the_wire() {
 
 #[test]
 fn leader_annotation_link_vectors_and_color_survive_dxf_roundtrip() {
-    use acadrust::entities::Leader;
-    use acadrust::types::{Color, Handle};
+    use opencadcodec::entities::Leader;
+    use opencadcodec::types::{Color, Handle};
     let mut l = Leader::new();
     l.vertices = vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(5.0, 5.0, 0.0)];
     l.annotation_handle = Handle::new(0x2A);
@@ -149,7 +149,7 @@ fn leader_annotation_link_vectors_and_color_survive_dxf_roundtrip() {
 
 #[test]
 fn view_border_and_section_symbol_keep_their_kind_in_dxf_entities_section() {
-    use acadrust::entities::{SectionSymbol, ViewBorder};
+    use opencadcodec::entities::{SectionSymbol, ViewBorder};
     let mut doc = CadDocument::with_version(DxfVersion::AC1032);
     doc.add_entity(EntityType::ViewBorder(ViewBorder::default())).unwrap();
     doc.add_entity(EntityType::SectionSymbol(SectionSymbol::default())).unwrap();
@@ -160,7 +160,7 @@ fn view_border_and_section_symbol_keep_their_kind_in_dxf_entities_section() {
 
 #[test]
 fn table_merged_ranges_are_rebuilt_after_dxf_roundtrip() {
-    use acadrust::entities::table::{CellRange, Table};
+    use opencadcodec::entities::table::{CellRange, Table};
     let mut t = Table::new(Vector3::new(0.0, 0.0, 0.0), 3, 3);
     t.merge_cells(CellRange::new(0, 0, 1, 1));
     assert_eq!(t.merged_ranges.len(), 1);

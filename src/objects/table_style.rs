@@ -516,7 +516,7 @@ pub struct NamedTableCellStyle {
 /// # Example
 ///
 /// ```ignore
-/// use acadrust::objects::TableStyle;
+/// use opencadcodec::objects::TableStyle;
 ///
 /// let mut style = TableStyle::new("MyStyle");
 /// style.horizontal_margin = 0.1;

@@ -1,12 +1,10 @@
-# acadrust
+# opencadcodec
 
-[![Crates.io](https://img.shields.io/crates/v/acadrust.svg)](https://crates.io/crates/acadrust)
-[![Documentation](https://docs.rs/acadrust/badge.svg)](https://docs.rs/acadrust)
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL%202.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
 
 **A pure Rust crate for reading, writing, and inspecting CAD files.**
 
-acadrust handles ASCII and binary DXF plus native binary DWG without requiring
+opencadcodec handles ASCII and binary DXF plus native binary DWG without requiring
 an installed CAD application. File support spans DXF R12 through R2018+ and DWG
 R13 through R2018+.
 
@@ -14,13 +12,13 @@ R13 through R2018+.
 
 ```toml
 [dependencies]
-acadrust = "0.5.5"
+opencadcodec = "0.5.5"
 ```
 
 ```rust
-use acadrust::{DxfReader, DxfWriter};
+use opencadcodec::{DxfReader, DxfWriter};
 
-fn main() -> acadrust::Result<()> {
+fn main() -> opencadcodec::Result<()> {
     let doc = DxfReader::from_file("input.dxf")?.read()?;
     println!("{} entities", doc.entities().count());
 
@@ -43,7 +41,7 @@ Enable optional features as needed:
 
 ```toml
 [dependencies]
-acadrust = { version = "0.5.5", features = ["serde", "import"] }
+opencadcodec = { version = "0.5.5", features = ["serde", "import"] }
 ```
 
 ## Features
@@ -63,7 +61,7 @@ acadrust = { version = "0.5.5", features = ["serde", "import"] }
   pre-2007 drawings
 - **Optional serialization** — Serde support for document data
 - **Optional 3D imports** — STL, COLLADA, OBJ, glTF/GLB, and FBX converted to
-  acadrust documents
+  opencadcodec documents
 
 ## File Version Support
 
@@ -87,9 +85,9 @@ acadrust = { version = "0.5.5", features = ["serde", "import"] }
 <summary>DWG Read/Write</summary>
 
 ```rust
-use acadrust::{CadDocument, Color, DwgReader, DwgWriter, EntityType, Line};
+use opencadcodec::{CadDocument, Color, DwgReader, DwgWriter, EntityType, Line};
 
-fn main() -> acadrust::Result<()> {
+fn main() -> opencadcodec::Result<()> {
     let mut reader = DwgReader::from_file("drawing.dwg")?;
     let doc = reader.read()?;
 
@@ -111,15 +109,15 @@ fn main() -> acadrust::Result<()> {
 <summary>Paper Space Layouts & Viewports</summary>
 
 ```rust
-use acadrust::{CadDocument, DxfVersion, DxfWriter};
-use acadrust::entities::{EntityType, Viewport};
-use acadrust::types::Vector3;
+use opencadcodec::{CadDocument, DxfVersion, DxfWriter};
+use opencadcodec::entities::{EntityType, Viewport};
+use opencadcodec::types::Vector3;
 
-fn main() -> acadrust::Result<()> {
+fn main() -> opencadcodec::Result<()> {
     let mut doc = CadDocument::with_version(DxfVersion::AC1027);
 
     // Add geometry to model space
-    let line = acadrust::entities::Line::from_coords(0.0, 0.0, 0.0, 100.0, 100.0, 0.0);
+    let line = opencadcodec::entities::Line::from_coords(0.0, 0.0, 0.0, 100.0, 100.0, 0.0);
     doc.add_entity(EntityType::Line(line))?;
 
     // Overall viewport (ID=1) for default Layout1
@@ -153,9 +151,9 @@ fn main() -> acadrust::Result<()> {
 <summary>Failsafe Reading and Diagnostics</summary>
 
 ```rust
-use acadrust::{DxfReader, DxfReaderConfiguration};
+use opencadcodec::{DxfReader, DxfReaderConfiguration};
 
-fn main() -> acadrust::Result<()> {
+fn main() -> opencadcodec::Result<()> {
     let config = DxfReaderConfiguration {
         failsafe: true,
         ..Default::default()
@@ -179,9 +177,9 @@ fn main() -> acadrust::Result<()> {
 Requires `features = ["import"]`.
 
 ```rust
-use acadrust::{import_file, DwgWriter, ImportConfig};
+use opencadcodec::{import_file, DwgWriter, ImportConfig};
 
-fn main() -> acadrust::Result<()> {
+fn main() -> opencadcodec::Result<()> {
     let doc = import_file("model.glb", &ImportConfig::default())?;
     DwgWriter::write_to_file("model.dwg", &doc)?;
     Ok(())
@@ -193,9 +191,9 @@ fn main() -> acadrust::Result<()> {
 <summary>Serde / JSON</summary>
 
 ```rust
-use acadrust::{CadDocument, DxfReader};
+use opencadcodec::{CadDocument, DxfReader};
 
-fn main() -> acadrust::Result<()> {
+fn main() -> opencadcodec::Result<()> {
     let doc = DxfReader::from_file("drawing.dxf")?.read()?;
     let json = serde_json::to_string_pretty(&doc).unwrap();
     let doc2: CadDocument = serde_json::from_str(&json).unwrap();
@@ -207,7 +205,6 @@ fn main() -> acadrust::Result<()> {
 
 ## Documentation
 
-- [API documentation](https://docs.rs/acadrust)
 - [Paper-space viewport example](examples/viewport_layouts.rs)
 
 ## Development
@@ -221,7 +218,7 @@ cargo check --all-targets --all-features
 ---
 
 ## Used By
-- [Open CAD Studio](https://github.com/HakanSeven12/OpenCADStudio) An open-source (GPLv3) CAD application that uses acadrust as its core native DWG/DXF engine for read/write operations and 3D modeling.
+- [Open CAD Studio](https://github.com/HakanSeven12/OpenCADStudio) An open-source (GPLv3) CAD application that uses opencadcodec as its core native DWG/DXF engine for read/write operations and 3D modeling.
 
 ## Support & Sponsorship
 

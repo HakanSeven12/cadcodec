@@ -1191,7 +1191,7 @@ mod tests {
     // ── Mirrored INSERT arc handedness ──────────────────────────
     //
     // The visual sweep direction of an arc inside a mirrored block must match
-    // the mirror of the original sweep. acadrust encodes this by emitting a
+    // the mirror of the original sweep. opencadcodec encodes this by emitting a
     // flipped normal so that the CCW (around-normal) parameterization traces
     // the mirrored geometry.
 

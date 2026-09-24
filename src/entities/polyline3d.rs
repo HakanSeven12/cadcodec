@@ -153,8 +153,8 @@ impl Default for Vertex3DPolyline {
 ///
 /// # Example
 /// ```ignore
-/// use acadrust::entities::Polyline3D;
-/// use acadrust::types::Vector3;
+/// use opencadcodec::entities::Polyline3D;
+/// use opencadcodec::types::Vector3;
 ///
 /// let mut polyline = Polyline3D::new();
 /// polyline.add_vertex(Vector3::new(0.0, 0.0, 0.0));

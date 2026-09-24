@@ -2410,7 +2410,7 @@ impl<'a> SatTransform<'a> {
 /// # Example
 ///
 /// ```rust
-/// use acadrust::entities::acis::SatDocument;
+/// use opencadcodec::entities::acis::SatDocument;
 ///
 /// let sat_text = "700 0 1 0\n\
 ///     @8 acadrust @8 ACIS 7.0 @24 Thu Jan 01 00:00:00 2023\n\

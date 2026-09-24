@@ -11,19 +11,19 @@
 
 use std::io::Cursor;
 
-use acadrust::entities::dimension::DimensionLinear;
-use acadrust::entities::hatch::{
+use opencadcodec::entities::dimension::DimensionLinear;
+use opencadcodec::entities::hatch::{
     BoundaryEdge, BoundaryPath, BoundaryPathFlags, CircularArcEdge, EllipticArcEdge, LineEdge,
     PolylineEdge, SplineEdge,
 };
-use acadrust::entities::mesh::Mesh;
-use acadrust::entities::mline::{MLine, MLineFlags};
-use acadrust::entities::multileader::MultiLeader;
-use acadrust::entities::polyface_mesh::PolyfaceMesh;
-use acadrust::entities::*;
-use acadrust::tables::{LineType, LineTypeComplexContent, LineTypeElement};
-use acadrust::types::{Color, DxfVersion, Handle, Vector2, Vector3};
-use acadrust::{CadDocument, DwgReader, DwgWriter, DxfReader, DxfWriter};
+use opencadcodec::entities::mesh::Mesh;
+use opencadcodec::entities::mline::{MLine, MLineFlags};
+use opencadcodec::entities::multileader::MultiLeader;
+use opencadcodec::entities::polyface_mesh::PolyfaceMesh;
+use opencadcodec::entities::*;
+use opencadcodec::tables::{LineType, LineTypeComplexContent, LineTypeElement};
+use opencadcodec::types::{Color, DxfVersion, Handle, Vector2, Vector3};
+use opencadcodec::{CadDocument, DwgReader, DwgWriter, DxfReader, DxfWriter};
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  HELPER: build a document with a rich set of entities for testing
@@ -614,7 +614,7 @@ fn compare_single_entity(
 }
 
 /// Normalize an EntityCommon struct by zeroing out handle-related fields.
-fn normalize_entity_common(common: &mut acadrust::entities::EntityCommon) {
+fn normalize_entity_common(common: &mut opencadcodec::entities::EntityCommon) {
     common.handle = Handle::NULL;
     common.owner_handle = Handle::NULL;
     common.reactors.clear();
@@ -785,8 +785,8 @@ fn round_vector3(v: Vector3, decimals: u32) -> Vector3 {
 
 fn compare_header_variables(
     report: &mut DiffReport,
-    orig: &acadrust::document::HeaderVariables,
-    rt: &acadrust::document::HeaderVariables,
+    orig: &opencadcodec::document::HeaderVariables,
+    rt: &opencadcodec::document::HeaderVariables,
 ) {
     // Compare critical header fields that should survive roundtrip
     macro_rules! cmp_header {
@@ -901,7 +901,7 @@ fn dxf_roundtrip_preserves_spline_extension_and_construction_flags() {
 
 #[test]
 fn dxf_acis_preserves_tokens_and_splits_at_utf8_boundaries() {
-    use acadrust::entities::solid3d::{AcisVersion, Solid3D};
+    use opencadcodec::entities::solid3d::{AcisVersion, Solid3D};
 
     let first_chunk = "x".repeat(2048);
     let remainder = "é compact_bool F";
@@ -944,10 +944,10 @@ fn fake_sab_blob(tag: u8, body_len: usize) -> Vec<u8> {
 }
 
 fn solid_with_sab(sab: Vec<u8>) -> EntityType {
-    let mut s = acadrust::entities::solid3d::Solid3D::new();
+    let mut s = opencadcodec::entities::solid3d::Solid3D::new();
     s.acis_data.sab_data = sab;
     s.acis_data.is_binary = true;
-    s.acis_data.version = acadrust::entities::solid3d::AcisVersion::Version2;
+    s.acis_data.version = opencadcodec::entities::solid3d::AcisVersion::Version2;
     EntityType::Solid3D(s)
 }
 
@@ -956,8 +956,8 @@ fn dwg_r2018_planar_body_solid_survives_roundtrip() {
     // A 3DSOLID built from an exact planar B-rep (build_planar_body) must save
     // to R2018 DWG and reload with its ACIS geometry intact and linked via the
     // has_ds_data flag — the full exact-export path (issue 225 + Problem 1).
-    use acadrust::entities::acis::primitives::build_planar_body;
-    use acadrust::entities::solid3d::Solid3D;
+    use opencadcodec::entities::acis::primitives::build_planar_body;
+    use opencadcodec::entities::solid3d::Solid3D;
 
     let vertices = [
         [0.0, 0.0, 0.0],
@@ -1810,7 +1810,7 @@ fn dwg_roundtrip_entity_properties() {
     let mut doc = CadDocument::with_version(DxfVersion::AC1032);
 
     // DWG requires the layer to exist in the layer table WITH a valid handle
-    let mut test_layer = acadrust::Layer::new("TestLayer");
+    let mut test_layer = opencadcodec::Layer::new("TestLayer");
     test_layer.handle = doc.allocate_handle();
     doc.layers.add(test_layer).unwrap();
 
@@ -2575,8 +2575,8 @@ fn hatch_polyline_edge_roundtrip() {
 /// survive both DXF and DWG roundtrips.
 #[test]
 fn roundtrip_vport_render_mode() {
-    use acadrust::entities::ViewportRenderMode as M;
-    use acadrust::tables::VPort;
+    use opencadcodec::entities::ViewportRenderMode as M;
+    use opencadcodec::tables::VPort;
 
     let (mut doc, _) = build_rich_document(DxfVersion::AC1032);
     // Replace the vport table with two tiled *Active entries carrying
@@ -2626,7 +2626,7 @@ fn roundtrip_vport_render_mode() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn build_annotative_document() -> CadDocument {
-    use acadrust::objects::{MultiLeaderStyle, ObjectType, TableStyle};
+    use opencadcodec::objects::{MultiLeaderStyle, ObjectType, TableStyle};
     let mut doc = CadDocument::with_version(DxfVersion::AC1032);
 
     if let Some(s) = doc.text_styles.get_mut("Standard") {
@@ -2651,7 +2651,7 @@ fn build_annotative_document() -> CadDocument {
 }
 
 fn mleader_is_annotative(doc: &CadDocument) -> bool {
-    use acadrust::objects::ObjectType;
+    use opencadcodec::objects::ObjectType;
     // Order-independent: the objects map is a HashMap, so a find_map here
     // raced between the default "Standard" style (not annotative) and the
     // test's annotative one (issue #51 class of bugs).
@@ -2661,7 +2661,7 @@ fn mleader_is_annotative(doc: &CadDocument) -> bool {
 }
 
 fn table_is_annotative(doc: &CadDocument) -> bool {
-    use acadrust::objects::ObjectType;
+    use opencadcodec::objects::ObjectType;
     doc.objects
         .values()
         .any(|o| matches!(o, ObjectType::TableStyle(s) if s.annotative))
@@ -2718,7 +2718,7 @@ fn dwg_roundtrip_annotative_styles() {
 
 #[test]
 fn dxf_roundtrip_complex_linetype_shape() {
-    use acadrust::tables::LineTypeComplexData;
+    use opencadcodec::tables::LineTypeComplexData;
     let mut doc = build_minimal_document(DxfVersion::AC1032, EntityType::Point(Point::new()));
 
     let mut lt = LineType::new("SHAPELT");
@@ -2753,7 +2753,7 @@ fn dxf_roundtrip_complex_linetype_shape() {
 
 #[test]
 fn dxf_roundtrip_complex_linetype_text() {
-    use acadrust::tables::LineTypeComplexData;
+    use opencadcodec::tables::LineTypeComplexData;
     let mut doc = build_minimal_document(DxfVersion::AC1032, EntityType::Point(Point::new()));
 
     let mut lt = LineType::new("TEXTLT");
@@ -2784,7 +2784,7 @@ fn dxf_roundtrip_complex_linetype_text() {
 
 #[test]
 fn dwg_roundtrip_complex_linetype_shape() {
-    use acadrust::tables::LineTypeComplexData;
+    use opencadcodec::tables::LineTypeComplexData;
     let mut doc = build_minimal_document(DxfVersion::AC1032, EntityType::Point(Point::new()));
 
     let mut lt = LineType::new("SHAPELT");
@@ -2821,8 +2821,8 @@ fn dwg_roundtrip_complex_linetype_shape() {
 // These assert the values survive a full write → read cycle in both the
 // R2007+ UTF-16 string branch and the pre-R2007 codepage branch.
 fn xdata_record_survives_dwg_roundtrip(version: DxfVersion) {
-    use acadrust::tables::AppId;
-    use acadrust::xdata::{ExtendedDataRecord, XDataValue};
+    use opencadcodec::tables::AppId;
+    use opencadcodec::xdata::{ExtendedDataRecord, XDataValue};
 
     let mut doc = CadDocument::with_version(version);
     let mut app = AppId::new("DEMO_SURVEY");

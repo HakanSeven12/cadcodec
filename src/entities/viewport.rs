@@ -225,8 +225,8 @@ impl GridFlags {
 ///
 /// # Example
 /// ```ignore
-/// use acadrust::entities::Viewport;
-/// use acadrust::types::Vector3;
+/// use opencadcodec::entities::Viewport;
+/// use opencadcodec::types::Vector3;
 ///
 /// let mut viewport = Viewport::new();
 /// viewport.center = Vector3::new(5.0, 5.0, 0.0);

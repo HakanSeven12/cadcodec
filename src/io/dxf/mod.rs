@@ -6,7 +6,7 @@
 //! # Reading
 //!
 //! ```rust,ignore
-//! use acadrust::DxfReader;
+//! use opencadcodec::DxfReader;
 //!
 //! let doc = DxfReader::from_file("drawing.dxf")?.read()?;
 //! ```
@@ -14,7 +14,7 @@
 //! # Writing
 //!
 //! ```rust,ignore
-//! use acadrust::DxfWriter;
+//! use opencadcodec::DxfWriter;
 //!
 //! DxfWriter::new(&doc).write_to_file("output.dxf")?;
 //! ```

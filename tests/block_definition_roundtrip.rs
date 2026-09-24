@@ -4,10 +4,10 @@
 
 use std::io::Cursor;
 
-use acadrust::entities::{EntityType, Line};
-use acadrust::tables::BlockRecord;
-use acadrust::types::{DxfVersion, Vector3};
-use acadrust::{CadDocument, DwgReader, DwgWriter, DxfReader, DxfWriter};
+use opencadcodec::entities::{EntityType, Line};
+use opencadcodec::tables::BlockRecord;
+use opencadcodec::types::{DxfVersion, Vector3};
+use opencadcodec::{CadDocument, DwgReader, DwgWriter, DxfReader, DxfWriter};
 
 fn dxf_roundtrip(doc: &CadDocument) -> CadDocument {
     let bytes = DxfWriter::new(doc).write_to_vec().expect("DXF write failed");

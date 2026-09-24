@@ -14,15 +14,15 @@
 
 use std::io::Cursor;
 
-use acadrust::entities::{
+use opencadcodec::entities::{
     BoundaryEdge, BoundaryPath, BoundaryPathFlags, HatchPatternLine, LineEdge,
 };
-use acadrust::objects::{
+use opencadcodec::objects::{
     DimContext, DimSubtype, HatchLoopContext, HatchScaleContext, HatchViewContext, MTextColumns,
     MTextContext, ObjectContextData, ObjectContextKind, ObjectType, Scale,
 };
-use acadrust::types::{DxfVersion, Vector2, Vector3};
-use acadrust::{CadDocument, DwgReader, DwgWriter, Handle};
+use opencadcodec::types::{DxfVersion, Vector2, Vector3};
+use opencadcodec::{CadDocument, DwgReader, DwgWriter, Handle};
 
 const GOLDEN: &str = "/home/hakanseven/Downloads/0718-mbmdmc.dwg";
 
