@@ -360,9 +360,7 @@ impl AttributeDefinition {
 
     /// Estimate the width of the text
     pub fn estimated_width(&self) -> f64 {
-        // Approximate width based on character count and height
-        let char_width = self.height * 0.6 * self.width_factor;
-        self.default_value.len() as f64 * char_width
+        super::text::estimated_width_in_heights(&self.default_value) * self.height * self.width_factor
     }
 
     /// Builder: Set position
