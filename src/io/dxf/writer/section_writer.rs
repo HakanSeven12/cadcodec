@@ -669,6 +669,19 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$TDUPDATE", |w| w.write_double(40, hdr.update_date_julian))?;
         self.write_header_variable("$TDINDWG", |w| w.write_double(40, hdr.total_editing_time))?;
 
+        // === Identity === (R2000+, as in the DWG header; empty ones are
+        // omitted rather than written blank)
+        if self.dxf_version >= DxfVersion::AC1015 {
+            if !hdr.fingerprint_guid.is_empty() {
+                self.write_header_variable("$FINGERPRINTGUID", |w| {
+                    w.write_string(2, &hdr.fingerprint_guid)
+                })?;
+            }
+            if !hdr.version_guid.is_empty() {
+                self.write_header_variable("$VERSIONGUID", |w| w.write_string(2, &hdr.version_guid))?;
+            }
+        }
+
         // === UCS ===
         self.write_header_variable("$UCSORG", |w| {
             let v = &hdr.model_space_ucs_origin;
