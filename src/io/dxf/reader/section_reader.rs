@@ -3282,7 +3282,7 @@ impl<'a> SectionReader<'a> {
                             block_entities.push(EntityType::Face3D(entity));
                         }
                     }
-                    "INSERT" | "ACDBVIEWREPBLOCKREFERENCE" => {
+                    "INSERT" | "ACDBVIEWREPBLOCKREFERENCE" | "ACIDBLOCKREFERENCE" => {
                         if let Some(entity) = self.read_insert()? {
                             block_entities.push(EntityType::Insert(entity));
                         }
@@ -3591,7 +3591,7 @@ impl<'a> SectionReader<'a> {
                             let _ = document.add_entity(EntityType::Face3D(entity));
                         }
                     }
-                    "INSERT" | "ACDBVIEWREPBLOCKREFERENCE" => {
+                    "INSERT" | "ACDBVIEWREPBLOCKREFERENCE" | "ACIDBLOCKREFERENCE" => {
                         if let Some(entity) = self.read_insert()? {
                             let _ = document.add_entity(EntityType::Insert(entity));
                         }

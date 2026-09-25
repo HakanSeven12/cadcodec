@@ -58,9 +58,11 @@ impl<'a> DwgObjectWriter<'a> {
             let acis = matches!(entity, EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) | EntityType::Surface(_));
             // Compound entities own follow-up records (VERTEX…/ATTRIB…/SEQEND) that the
             // reader folded into them; the writer emits those alongside, so they must
-            // go through the normal path.
+            // go through the normal path. An INSERT without attributes owns none, and
+            // copying it keeps subclasses such as AcIdBlockReference intact.
             let compound = matches!(entity, EntityType::Polyline(_) | EntityType::Polyline2D(_) | EntityType::Polyline3D(_)
-                | EntityType::PolyfaceMesh(_) | EntityType::PolygonMesh(_) | EntityType::Insert(_));
+                | EntityType::PolyfaceMesh(_) | EntityType::PolygonMesh(_))
+                || matches!(entity, EntityType::Insert(i) if !i.attributes.is_empty() || i.seqend_handle.is_some());
             let ok = self.version.r2004_plus()
                 && raw.version == self.dxf_version
                 && !self.raw_excluded_handles.contains(&handle.value())

@@ -46,8 +46,9 @@ pub struct Insert {
     dwg_minsert: bool,
     /// Attribute entities attached to this insert
     pub attributes: Vec<AttributeEntity>,
-    /// Model-documentation viewport referenced by
-    /// `AcDbViewRepBlockReference`; `None` for ordinary INSERT entities.
+    /// Viewport referenced by `AcDbViewRepBlockReference` (model
+    /// documentation) or `AcIdBlockReference` (Inventor drawing views); the
+    /// reference is drawn only in that viewport. `None` for ordinary INSERTs.
     pub view_rep_handle: Option<Handle>,
     /// SEQEND handle terminating the attribute sequence.
     ///

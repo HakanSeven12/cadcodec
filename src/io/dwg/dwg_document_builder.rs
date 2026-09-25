@@ -3427,11 +3427,19 @@ impl DwgDocumentBuilder {
                 // ── Moderate entities ──────────────────────────────
                 OBJ_INSERT => {
                     let data = entities::read_insert(&mut reader, self.obj_reader.version());
+                    // Both subclasses follow the block handle with the viewport
+                    // they are drawn in. Inventor's model-space view blocks overlap,
+                    // so the link is what keeps each view inside its own viewport;
+                    // its sheet-level references carry a null handle.
                     let view_rep_handle = class_names
                         .dxf
                         .get(&raw_type_code)
-                        .filter(|name| name.eq_ignore_ascii_case("ACDBVIEWREPBLOCKREFERENCE"))
-                        .map(|_| Handle::from(reader.read_handle()));
+                        .filter(|name| {
+                            name.eq_ignore_ascii_case("ACDBVIEWREPBLOCKREFERENCE")
+                                || name.eq_ignore_ascii_case("ACIDBLOCKREFERENCE")
+                        })
+                        .map(|_| Handle::from(reader.read_handle()))
+                        .filter(|handle| !handle.is_null());
                     let block_name = maps.block_name(data.block_handle);
                     let mut e = Insert::new(block_name, data.insert_point);
                     e.common = entity_common;
